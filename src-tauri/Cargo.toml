@@ -29,3 +29,7 @@ tauri-plugin-store = "2"
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+# The explorer gate drives cw-core directly to build a manager to list.
+cw-core = { path = "../crates/cw-core" }
+

@@ -14,12 +14,16 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto done, gate cleared |
-| 2 — Explorer Mode | not started |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto and 1.2 RPF done, both gates cleared |
+| 2 — Explorer Mode | **in progress** — folder picker and `list_dir` over the real archives |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **27 unit + 3 gate** (gate is
-`#[ignore]`d, needs a local install).
+Branch: work happens on `dev`. Current tests: **43 unit + 13 gate + 10 frontend**.
+The gates are `#[ignore]`d and need a local install:
+
+```bash
+cargo test --workspace -- --ignored --nocapture
+```
 
 ---
 
@@ -54,10 +58,21 @@ understanding of the code, which is the thing under test.
 cargo test --workspace && bun run typecheck && bunx oxlint . && bun test && bun run build
 ```
 
-The gate (needs the game; override the path with `ASTRAMAPPER_GTA_PATH`):
+The gates (need the game; override the path with `ASTRAMAPPER_GTA_PATH`):
 
 ```bash
-cargo test -p cw-core -- --ignored --nocapture
+cargo test --workspace -- --ignored --nocapture
+```
+
+Two of them compare against oracles whose data is gitignored. Regenerate before
+running, or they skip with a message:
+
+```bash
+pwsh -File scripts/rpf-oracle.ps1
+```
+
+```bash
+bash scripts/rpftool-oracle.sh
 ```
 
 ---
@@ -101,42 +116,49 @@ common.rpf 1421 entries, 1420 printable names, 28112 byte name table
    because `UseMagicData` seeds it with the Jenkins hash of the AES key. Do not
    substitute another PRNG.
 
-### 1.2 RPF archive layer — **NEXT**
+### 1.2 RPF archive layer — **DONE, gate cleared**
 
-Target: `crates/cw-core/src/rpf/{mod,file,entry,manager}.rs`.
-Reference: `CodeWalker.Core/GameFiles/RpfFile.cs` (105 KB), `RpfManager.cs`.
+Files: `crates/cw-core/src/rpf/{mod,entry,file,manager}.rs`, gate at
+`crates/cw-core/tests/rpf_gate.rs`.
 
-Most of the header logic already exists, written by hand inside
-`tests/crypto_gate.rs::opens_a_real_encrypted_archive`. Moving it into
-`rpf/file.rs` and building an entry model around it is the concrete first step.
+Proven against the real install:
 
-What the reference does, in order:
+```
+179 top-level archives, 5199 nested, 403,642 entries, scanned in 0.2s
+x64a.rpf    all 656 entries and all 624 extracted payloads match CodeWalker
+common.rpf all 1421 entries and all 1378 extracted payloads match CodeWalker
+7 OPEN archives, 249 entries agree with RPFTool
+```
 
-- Header: `Version` must be `0x52504637` (`RPF7`), then `EntryCount`,
-  `NamesLength`, `Encryption`.
-- `RpfEncryption`: `NONE = 0`, `OPEN = 0x4E45504F`, `AES = 0x0FFFFFF9`,
-  `NG = 0x0FEFFFFF`. **Any unrecognised value is treated as NG**, not an error.
-- Read `EntryCount * 16` bytes of entries and `NamesLength` bytes of names, then
-  decrypt both according to `Encryption` (NG keys on the archive's *file name*
-  and *size on disk* — both wrong-able silently).
-- Entry discrimination, from the first two u32s (`y`, `x`) of each 16-byte entry:
-  - `x == 0x7fffff00` → directory
-  - `(x & 0x80000000) == 0` → binary file
-  - otherwise → resource file
-- Names come from `namesrdr.Position = e.NameOffset`, NUL-terminated. The
-  reference truncates names longer than 256 chars (comment: long names freeze the
-  RPF Explorer).
-- `RpfResourceFileEntry.IsEncrypted = name.EndsWith(".ysc")`, with the
-  reference's own comment "any other way to know..?". Carry the doubt across.
-- RPF-in-RPF nesting, with the reference's cycle handling.
-- RSC7 resource header + raw-deflate payloads; binary entries are deflate too.
+Both oracles were used, and they disagree in exactly one place — see below.
+Regenerate their data with `scripts/rpf-oracle.ps1` and
+`scripts/rpftool-oracle.sh`.
 
-Cross-check the `OPEN` path against RPFTool's `src/rpf/{header,entries,extract}.ts`
-and `bun run src/cli.ts list <rpf> --json`. Two independent implementations
-disagreeing is the cheapest bug signal available.
+**Five things worth knowing before touching this code:**
 
-Acceptance: enumerate all 179 legacy RPFs; entry counts and extracted bytes match
-`CodeWalker RPF Explorer.exe` on a sampled set.
+1. **The three entry layouts are genuinely different**, not one field at three
+   widths. A directory reads its name offset as a `u32`, a resource as a `u16`,
+   a binary entry as the low 16 bits of a packed `u64`. They agree only because
+   name tables are under 64 KB. Unifying them will work until a name table grows.
+2. **Unknown encryption values are NG, not errors.** The reference's `default:`
+   case decrypts as NG with the comment "never seems to get here".
+3. **`GetSizeFromFlags` overflows into negative `int`** — the reference really
+   returns `-1627389952` for `0x0FEFFFFF`. `size_from_flags` computes in `u64`
+   and truncates, reproducing the same 32 bits. This is pinned as a test because
+   any misplaced shift among the nine page-count fields would land elsewhere.
+4. **A resource length of `0xFFFFFF` is an escape**, not a length: the real value
+   is unpacked from bytes 7, 14, 5 and 2 of the payload's own header. **RPFTool
+   does not implement this** and reports the raw sentinel, so it is the single
+   point where the two oracles disagree; CodeWalker arbitrates and agrees with
+   this port (`b2a.ytd` is 20921589 bytes).
+5. **A nested archive is one thing seen from two sides.** The `.rpf` binary entry
+   in the parent and the root directory of the archive it opens share a path. The
+   index keeps the parent's entry — it is the one that can be extracted — and
+   listing it steps through transparently.
+
+Not ported: writing. `Write` on every entry type, `CompressBytes`, and NG
+*encryption* are all still open, so `formats.md` marks this **partial** rather
+than **done** under its round-trip rule.
 
 ### 1.3 MetaTypes
 
@@ -176,6 +198,29 @@ search by name and Jenkins hash.
 
 Rule: heavy work in Rust threads, and **raw archive bytes never cross the IPC
 boundary** for the frontend to parse.
+
+### Done
+
+The scaffold: `src-tauri/src/explorer.rs` (`open_game_folder`, `list_dir`,
+`game_is_open`), `src/lib/explorer.ts`, `src/components/Explorer.tsx`. Picking a
+folder recovers the keys, scans every archive off the main thread, and the whole
+install browses as one tree — nested archives included, with no visible seam at
+an `.rpf` boundary. Gate at `src-tauri/tests/explorer_gate.rs`.
+
+### Next
+
+- **Extraction to disk.** `RpfManager::extract` already works and is covered by
+  the 1.2 gate; what is missing is the IPC command and the save dialog. The keys
+  are already held in `explorer::Loaded` for exactly this.
+- **Lazy pagination.** `list_dir` currently returns a whole directory. Fine at
+  the sizes measured, but the phase 2 brief asks for paging.
+- **Search** by name and Jenkins hash across the 403,642-entry index.
+- **Per-type viewers**, which need 1.3 and 1.4 first — there is nothing to view
+  until the resource and file-type parsers land.
+- **DLC/mod precedence.** `RpfManager` deliberately keeps one flat index and lets
+  later archives win a path collision. The reference maintains six overlapping
+  lists to resolve base/mod/DLC override order; that work belongs with
+  `patchday*` selection in phase 3.
 
 ## Phase 3 — World View
 

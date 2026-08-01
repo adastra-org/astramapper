@@ -5,6 +5,10 @@
 //! the WebView receives computed results (tree listings, decoded textures,
 //! selection state), never raw archive bytes to parse itself.
 
+// Public so `tests/explorer_gate.rs` can drive the listing logic against a real
+// scan without a Tauri runtime.
+pub mod explorer;
+
 use serde::Serialize;
 
 /// Build information for the about panel, and a smoke test that `cw-core` is
@@ -29,6 +33,7 @@ fn app_info() -> AppInfo {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(explorer::GameState::default())
         .plugin(tauri_plugin_opener::init())
         // Picking the GTA V install folder.
         .plugin(tauri_plugin_dialog::init())
@@ -36,7 +41,12 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         // Persisting settings (game folder, DLC level, window layout).
         .plugin(tauri_plugin_store::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![app_info])
+        .invoke_handler(tauri::generate_handler![
+            app_info,
+            explorer::open_game_folder,
+            explorer::list_dir,
+            explorer::game_is_open,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

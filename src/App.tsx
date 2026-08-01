@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Boxes, FolderTree, Globe2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatHash } from "./lib/format";
+import { Explorer } from "./components/Explorer";
 
 /** Mirrors the `AppInfo` struct returned by the `app_info` Tauri command. */
 type AppInfo = {
@@ -57,18 +58,24 @@ function App(): React.JSX.Element {
           ))}
         </nav>
 
-        <main className="flex min-w-0 flex-1 items-center justify-center p-8">
-          <div className="text-center">
-            <p className="text-sm text-ink-dim">
-              {active.label} arrives in phase {active.phase}.
-            </p>
-            {info && (
-              <p className="mt-3 font-mono text-xs text-ink-dim">
-                cw-core linked, jenk(&quot;astramapper&quot;) ={" "}
-                {formatHash(info.core_check)}
-              </p>
-            )}
-          </div>
+        <main className="flex min-w-0 flex-1 flex-col">
+          {mode === "explorer" ? (
+            <Explorer />
+          ) : (
+            <div className="flex flex-1 items-center justify-center p-8">
+              <div className="text-center">
+                <p className="text-sm text-ink-dim">
+                  {active.label} arrives in phase {active.phase}.
+                </p>
+                {info && (
+                  <p className="mt-3 font-mono text-xs text-ink-dim">
+                    cw-core linked, jenk(&quot;astramapper&quot;) ={" "}
+                    {formatHash(info.core_check)}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
         </main>
       </div>
     </div>
