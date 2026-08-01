@@ -15,11 +15,42 @@ files back.
 | Unit | C# reference | Status | Notes |
 | --- | --- | --- | --- |
 | `utils/jenk.rs` | `Utils/Jenk.cs` | **done** | Vectors from the reference DLL. Three overloads kept distinct, see `porting-guide.md`. |
-| `utils/keys.rs` | `Utils/GTAKeys.cs` | todo | SHA-1 hash search over `GTA5.exe`; needs `magic.dat` embedded. |
-| `utils/crypto.rs` | `Utils/GTACrypto.cs` | todo | AES + NG decrypt/encrypt and the NG tables. |
-| `utils/data.rs` | `Utils/Data.cs` | todo | LE reader/writer. |
+| `utils/data.rs` | `Utils/Data.cs` | **done** | Reader only, LE only. Writer lands with the first format that serializes. |
+| `utils/net_random.rs` | .NET `System.Random` | **done** | Not a game format; the key loader needs it. Pinned against .NET Framework 4.8. |
+| `utils/keys.rs` | `Utils/GTAKeys.cs` | **done** | `LoadFromPath` path only. `magic.dat` embedded from `assets/`. |
+| `utils/crypto.rs` | `Utils/GTACrypto.cs` | **done** | AES-256 ECB, NG decrypt, `GTA5Hash`. NG *encrypt* still todo. |
 | `utils/dds.rs` | `Utils/DDSIO.cs` | todo | 124 KB; BC1–BC7. |
 | math | SharpDX.Mathematics | todo | `glam` aliases. `f32` only in serialized layouts. |
+
+### Notes on the crypto
+
+**Which key path.** The reference has two. `Generate` hash-searches `GTA5.exe`
+for the AES key, all 101 NG keys and the decrypt tables; `LoadFromPath` →
+`GenerateV2` + `UseMagicData` scans out only the AES key and unmasks everything
+else from `magic.dat`. Every real caller uses the second, so that is what is
+ported. Consequence: `RandomGauss` and `LookUpTableGenerator` — the largest and
+most intimidating part of `GTAKeys.cs` — are not on the critical path, because
+they solve for *encryption* tables only. They will be needed to write
+NG-encrypted archives back out, not to read them.
+
+**`GTA5Hash` is Jenkins plus a lookup table.** The reference writes its mixing
+steps as multiplications, which disguises it: `1025 * x == x + (x << 10)`,
+`9 * x == x + (x << 3)`, and `32769 * x == x + (x << 15)` are precisely Jenkins'
+three steps. So `gta5_hash` is `gen_hash` with a byte substitution applied to
+each input character. The real LUT remaps only **27 of 256** values, meaning the
+two hashes agree on the large majority of inputs — a port that dropped the table
+would pass casual testing and select the wrong NG key for names containing one
+of the 27.
+
+**The LUT is not a permutation.** It has 229 distinct values with a maximum
+multiplicity of 2. (An earlier test asserted a permutation; that was assumed,
+not taken from the reference, and the real keys disproved it.)
+
+**.NET `System.Random` is load-bearing.** `UseMagicData` unmasks `magic.dat` by
+subtracting four `Random` byte streams seeded with `(int)JenkHash.GenHash(aesKey)`.
+The seed is normally negative, and `Math.Abs` makes seed and `-seed` equivalent
+while `int.MinValue` is special-cased to `int.MaxValue`. All three behaviours are
+pinned by tests. Substituting any other PRNG produces silent garbage.
 
 ## Archive layer
 
@@ -85,5 +116,12 @@ approximation used. Unlit flat materials are not an acceptable default.
 
 ## Open questions
 
-None recorded yet. Anything marked `TODO(port):` in the Rust source belongs here
-with the file it came from.
+- `RpfResourceFileEntry.IsEncrypted` is set from `name.EndsWith(".ysc")` with the
+  reference's own comment "any other way to know..?". Carry the same rule and the
+  same doubt into the RPF port.
+- NG *encryption* (writing archives back) needs `RandomGauss.Solve` and
+  `LookUpTableGenerator.BuildLUTs2`. Not required for reading; deferred until
+  archive writing is in scope.
+
+Anything marked `TODO(port):` in the Rust source belongs here with the file it
+came from.
