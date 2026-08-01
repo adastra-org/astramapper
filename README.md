@@ -8,35 +8,46 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 1 in progress — archive crypto working
+## Status: phase 2 in progress — the whole install browses, and four viewers work
 
 **Works**
 
 - Cargo workspace with `cw-core` (the port of `CodeWalker.Core`, no Tauri
   dependency) and the Tauri app crate.
-- App shell with the three modes stubbed, calling into `cw-core` over IPC.
-- Tauri dialog / fs / store plugins wired.
 - **Archive decryption against a real retail install.** Keys are recovered from
-  the local `GTA5.exe` and the NG cipher opens stock archives:
+  the local `GTA5.exe` and the NG cipher opens stock archives.
+- **The whole game folder as one tree.** 179 top-level archives, 5,199 nested,
+  403,642 entries, scanned in 0.2 s — nested `.rpf`s browse with no visible seam.
+- **Explorer viewers**, with the backend choosing which one opens because that
+  decision needs the payload:
+  - **3D** for `.ydr` and `.ydd`, in three.js over mesh buffers decoded in Rust.
+  - **Audio** for `.awc` — every stream listed, decoded on demand, played or
+    saved as WAV.
+  - **Text**, editable, for anything that sniffs as text whatever its extension.
+  - **Hex**, paged, for everything else.
+- **Extraction to disk** for any entry, decrypted and decompressed.
+- 112 unit tests, 18 install-dependent gate tests, 25 frontend tests. Format
+  work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
-  x64a.rpf    656 entries,  655 printable names
-  common.rpf 1421 entries, 1420 printable names
+  drawables  213 geometries, 80,350 vertices identical; 716,436 vertices
+             inside their own AABB across 300 files
+  audio      261 streams, 132,741,415 samples decode identically;
+             400 containers open, 104,263 seconds of audio
   ```
 
-  Ported: `Jenk`, `Data` (reader), .NET `System.Random`, `GTAKeys`, `GTACrypto`.
-- 27 unit tests plus 3 install-dependent gate tests; typecheck, lint and build
-  all green.
+**Not yet**
 
-**Stubbed**
+- Writing. Reading only, everywhere: `RpfFile.Write`, `CompressBytes` and NG
+  *encryption* are all still open, so a text edit saves a copy to disk rather
+  than going back into the archive.
+- Textures (`.ytd`), metadata (`.ymap`, `.ytyp`), fragments (`.yft`), collision
+  (`.ybn`) — each opens as hex, with a note saying which parser is missing.
+- Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
+- World and Project are placeholder panels; `crates/cw-render` does not exist.
 
-- No format parsers yet — the RPF reader is next.
-- Explorer, World and Project are placeholder panels.
-- `crates/cw-render` does not exist yet.
-
-**Next: phase 1.2** — the RPF archive layer (`RpfFile`, `RpfManager`). See
-[docs/phases.md](docs/phases.md) for the handoff: what is done, what to do next,
-and the traps found so far.
+See [docs/phases.md](docs/phases.md) for the handoff: what is done, what to do
+next, and the traps found so far.
 
 ## Development
 
@@ -58,6 +69,13 @@ Tests that need a real GTA V install are marked `#[ignore]`:
 
 ```bash
 cargo test --workspace -- --ignored
+```
+
+Three of those gates compare against data dumped from the reference DLL. The
+dumps are gitignored; regenerate them first or the gates skip with a message:
+
+```bash
+pwsh -File scripts/rpf-oracle.ps1; pwsh -File scripts/drawable-oracle.ps1; pwsh -File scripts/awc-oracle.ps1
 ```
 
 ## Docs

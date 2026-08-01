@@ -14,11 +14,11 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto and 1.2 RPF done, both gates cleared |
-| 2 — Explorer Mode | **in progress** — folder picker and `list_dir` over the real archives |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF and the drawable and audio slices of 1.4 done, all gates cleared |
+| 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **43 unit + 13 gate + 10 frontend**.
+Branch: work happens on `dev`. Current tests: **112 unit + 18 gate + 25 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -64,7 +64,7 @@ The gates (need the game; override the path with `ASTRAMAPPER_GTA_PATH`):
 cargo test --workspace -- --ignored --nocapture
 ```
 
-Two of them compare against oracles whose data is gitignored. Regenerate before
+Four of them compare against oracles whose data is gitignored. Regenerate before
 running, or they skip with a message:
 
 ```bash
@@ -73,6 +73,14 @@ pwsh -File scripts/rpf-oracle.ps1
 
 ```bash
 bash scripts/rpftool-oracle.sh
+```
+
+```bash
+pwsh -File scripts/drawable-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/awc-oracle.ps1
 ```
 
 ---
@@ -160,6 +168,76 @@ Not ported: writing. `Write` on every entry type, `CompressBytes`, and NG
 *encryption* are all still open, so `formats.md` marks this **partial** rather
 than **done** under its round-trip rule.
 
+### 1.4a Resources — drawables — **DONE, gate cleared**
+
+Taken out of order, ahead of 1.3, because Explorer Mode needs *something* to
+view and a drawable is the shortest path from an archive entry to a picture.
+
+Files: `crates/cw-core/src/resources/{reader,vertex,drawable}.rs` and
+`crates/cw-core/src/mesh.rs`, gate at
+`crates/cw-core/tests/drawable_gate.rs`, oracle at
+`scripts/drawable-oracle.ps1`.
+
+Proven against the real install:
+
+```
+40 files, 213 geometries, 80,350 vertices agree with CodeWalker field for field
+300 files, 1,163 geometries, 716,436 vertices all inside their own AABB
+150 files, 349 renderable bundles, 391,852 triangles
+```
+
+**Four things worth knowing before touching this code:**
+
+1. **A junk payload parses.** `ResourceDataReader` reads through `MemoryStream`,
+   which short-reads instead of throwing, so a truncated or wrong file decodes
+   to zeros — which look like null pointers, which look like absent blocks. The
+   result is a valid `Drawable` with nothing in it. Ask `has_geometry`, not
+   whether `read` returned `Ok`.
+2. **Vertex declarations are indexed by semantic, not by packing order.** See
+   `formats.md`. Reading the nibbles in sequence works on the one declaration
+   nearly every YDR uses and misparses the rest.
+3. **The drawable's bounding box is not a superset of its vertices** — a fifth
+   fall outside, two thirds for skinned models. The *per-geometry* AABB is
+   exact, and is what the gate validates positions against.
+4. **`DrawableModelsBlock` has no header of its own.** It is read at whichever
+   LOD pointer is non-zero and then ignores that position, re-seeking to each of
+   the four pointers held by its owner. The four lists only look nested.
+
+Not ported: writing, Gen9 declarations, and everything a drawable points at that
+is not geometry — texture dictionary, skeleton, joints, light attributes,
+bounds, shader parameters.
+
+### 1.4b Audio — AWC — **DONE, gate cleared**
+
+Also out of order, for the same reason: `.awc` is self-contained, so a viewer
+can play it without any of `1.3` landing first.
+
+Files: `crates/cw-core/src/audio/{awc,adpcm,wav}.rs`, gate at
+`crates/cw-core/tests/awc_gate.rs`, oracle at `scripts/awc-oracle.ps1`.
+
+Proven against the real install:
+
+```
+31 files (12 multi-channel), 261 streams, 132,741,415 samples decode
+  identically to CodeWalker
+400 containers open, 12,230 playable streams (11,103 ADPCM, 1,127 PCM),
+  104,263 seconds of audio
+```
+
+**Three things worth knowing before touching this code:**
+
+1. **Whole-file encryption has no flag.** It is detected by the magic failing to
+   read as `ADAT`. The per-block and single-channel modes *are* flags.
+2. **The RSXXTEA decrypt looks asymmetric and is not**, and the reference
+   describes its own code as undefined behaviour. See `formats.md`; there is a
+   test pinning the round trip so a cleanup cannot silently change it.
+3. **A stream is one channel.** Multi-channel containers put all the audio in a
+   carrier stream with id 0 and have the others index into it.
+
+Not ported: writing, encoding, big-endian console files, the `peak`/`markers`/
+`seektable`/granular chunks, and `RelFile.cs` — so streams are identified by
+hash, with no names and no `_left`/`_right` pairing.
+
 ### 1.3 MetaTypes
 
 `meta/` ← `MetaTypes/`. `PsoTypes.cs` (1.5 MB) and `MetaNames.cs` (870 KB) are
@@ -201,22 +279,58 @@ boundary** for the frontend to parse.
 
 ### Done
 
-The scaffold: `src-tauri/src/explorer.rs` (`open_game_folder`, `list_dir`,
+**Browsing.** `src-tauri/src/explorer.rs` (`open_game_folder`, `list_dir`,
 `game_is_open`), `src/lib/explorer.ts`, `src/components/Explorer.tsx`. Picking a
 folder recovers the keys, scans every archive off the main thread, and the whole
 install browses as one tree — nested archives included, with no visible seam at
 an `.rpf` boundary. Gate at `src-tauri/tests/explorer_gate.rs`.
 
+**Viewing.** `src-tauri/src/viewer.rs` (`open_entry`, `read_text`, `read_hex`,
+`read_model`, `extract_to`, `save_text`), `src/lib/viewer.ts`,
+`src/components/FileViewer.tsx` and `src/components/viewers/`. One file is open
+at a time and its extracted payload is held on the Rust side, so paging a 20 MB
+file does not re-decrypt and re-inflate it per scroll.
+
+Four viewers, and the backend picks which one opens because that decision needs
+the payload:
+
+- **3D** for `.ydr` and `.ydd`, via three.js over the mesh buffers from
+  `cw_core::mesh`. Orbit, wireframe, LOD and per-drawable selection for a
+  dictionary. Positions, normals and texcoords are decoded in Rust; the WebView
+  uploads buffers and nothing else.
+- **Audio** for `.awc`. Streams are listed on open and decoded one at a time —
+  a container runs to hundreds of them — then played as WAV in an `<audio>`
+  element, or saved to disk. ADPCM is decoded in Rust; no browser plays
+  Rockstar's framing.
+- **Text** for anything that sniffs as text, whatever its extension — which is
+  most `.meta`, `.xml`, `.ini` and a fair number of `.dat`. Editable, with the
+  encoding preserved on save.
+- **Hex**, paged, always available for anything at all.
+
+A file the extension says is a model but that will not parse falls back with the
+reason attached, and the formats that have no parser yet each say so rather than
+opening as unexplained bytes.
+
+**Extraction.** Any entry to disk, decrypted and decompressed. Saving edited
+text writes a copy to disk, *not* back into the archive: RPF writing is not
+ported, and the UI says so rather than offering a save that would quietly do
+something else.
+
 ### Next
 
-- **Extraction to disk.** `RpfManager::extract` already works and is covered by
-  the 1.2 gate; what is missing is the IPC command and the save dialog. The keys
-  are already held in `explorer::Loaded` for exactly this.
-- **Lazy pagination.** `list_dir` currently returns a whole directory. Fine at
-  the sizes measured, but the phase 2 brief asks for paging.
+- **Writing back into an archive.** The blocker for a real editor. Needs
+  `RpfFile.Write`, `CompressBytes` and NG *encryption* (`RandomGauss.Solve`).
+- **Texture previews.** `.ytd` needs `Texture.cs` plus BC1–BC7 decoding in Rust
+  (`bcdec`), then RGBA across the boundary.
+- **Fragments and particles.** `.yft` and `.ypt` embed drawables the 3D viewer
+  could already draw; reaching them needs `Frag.cs` and `Particle.cs`.
+- **Meta viewers.** `.ymap`/`.ytyp`/`.ymt` need 1.3, and would then show as XML
+  the way the reference does.
+- **Audio names.** `RelFile.cs` would give the streams in an `.awc` names
+  instead of hashes, and pair `_left`/`_right` channels into stereo.
+- **Lazy pagination.** `list_dir` still returns a whole directory. Fine at the
+  sizes measured, but the phase 2 brief asks for paging.
 - **Search** by name and Jenkins hash across the 403,642-entry index.
-- **Per-type viewers**, which need 1.3 and 1.4 first — there is nothing to view
-  until the resource and file-type parsers land.
 - **DLC/mod precedence.** `RpfManager` deliberately keeps one flat index and lets
   later archives win a path collision. The reference maintains six overlapping
   lists to resolve base/mod/DLC override order; that work belongs with

@@ -43,6 +43,17 @@ Consequences that shape the commands:
   entries; a single `list_dir` returning everything would stall the channel.
 - The hex viewer requests page ranges, never a whole file.
 - Nothing is sent per frame in the render loop.
+- A vertex declaration, an ADPCM block and a text encoding are all resolved in
+  Rust. The WebView receives `f32` arrays, a `.wav` and a `String`.
+
+Buffers that are genuinely bytes — mesh attributes, hex pages, decoded audio —
+cross as base64 rather than as JSON number arrays. A 60k-vertex drawable is about
+2 MB of JSON digits versus 700 KB of base64 that decodes straight into a
+`Float32Array`. Same channel, very different parse on the far side.
+
+One file is open at a time, and its extracted payload is held in Rust state
+(`viewer::ViewerState`). Extraction is a seek, a decrypt and an inflate; paging
+through a 20 MB texture dictionary would otherwise redo all three per scroll.
 
 Concurrency is Rust threads (`std::thread`, `rayon`), replacing the C# `Task`
 parallelism. Web Workers are not used.
@@ -73,6 +84,11 @@ with the WebView as a transparent UI overlay. A spike, capped at two days,
 decides it; three.js in the WebView is the documented fallback. The criteria are
 shader fidelity, 60 fps on mid-range hardware, and how awkward the overlay turns
 out to be. The decision and its trade-offs get recorded here when made.
+
+Explorer Mode's model preview is a separate question with separate constraints
+and is settled: three.js in the WebView, loading on demand so it stays out of the
+startup bundle. Previewing one drawable in a panel does not need a native surface
+and does not prejudge the world renderer.
 
 ## Build and CI
 

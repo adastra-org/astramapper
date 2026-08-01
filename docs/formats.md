@@ -21,6 +21,9 @@ files back.
 | `utils/crypto.rs` | `Utils/GTACrypto.cs` | **done** | AES-256 ECB, NG decrypt, `GTA5Hash`. NG *encrypt* still todo. |
 | `utils/dds.rs` | `Utils/DDSIO.cs` | todo | 124 KB; BC1–BC7. |
 | math | SharpDX.Mathematics | todo | `glam` aliases. `f32` only in serialized layouts. |
+| `text.rs` | — | n/a | Not a port. Encoding sniffing for the Explorer's text viewer. |
+| `filetype.rs` | `GameFileType` + `GameFileCache.cs` switches | n/a | Extension-to-family table, collected rather than ported. |
+| `mesh.rs` | `CodeWalker/Rendering` buffer upload | n/a | Not a port. Flattens a `Drawable` into buffers for the WebView. |
 
 ### Notes on the crypto
 
@@ -104,17 +107,99 @@ file; listing it steps through into the archive transparently.
 
 ## Resources
 
-`Drawable` (282 KB), `Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB),
-`Clip` (164 KB), `Clothes` (111 KB), `ShaderParams`, `Expression`, `Texture`,
-`Nav`, `Node`, `Filter`, `VertexType`, `VehicleRecord`, `WaypointRecord`,
-`ResourceBaseTypes`, `ResourceData`, `ResourceBuilder`, `ResourceFile`,
-`ResourceAnalyzer` — all **todo**. These are the shared building blocks the file
-types compose, so they land before the parsers that use them.
+| Unit | C# reference | Status | Notes |
+| --- | --- | --- | --- |
+| `resources/reader.rs` | `ResourceData.cs` | **partial** | `ResourceDataReader` only. The writer lands with the first format that serializes. |
+| `resources/vertex.rs` | `VertexType.cs`, `VertexDeclaration` | **partial** | Declaration decode and component extraction. Gen9 declarations not ported. |
+| `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes. Reads, does not write. |
+
+`Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB), `Clip` (164 KB),
+`Clothes` (111 KB), `ShaderParams`, `Expression`, `Texture`, `Nav`, `Node`,
+`Filter`, `VehicleRecord`, `WaypointRecord`, `ResourceBuilder`,
+`ResourceAnalyzer` — all **todo**.
+
+Not read by `resources/drawable.rs`, though their pointers are kept: the
+embedded texture dictionary, the skeleton, joints, light attributes, collision
+bounds and shader *parameters*. Each needs a sibling file that is not ported.
+
+### Notes on the resource layer
+
+**Two segments, no relocation pass.** A resource payload is a system half and a
+graphics half, mapped at `0x50000000` and `0x60000000`. Every pointer in the file
+is an address in that space, so resolving one is masking off the base and
+picking a segment. The reference's segment test is a bitmask, not a range check,
+and it tries system first; both are reproduced, because the masks overlap and the
+order decides who wins.
+
+**Short reads are zeros, not errors.** `ResourceDataReader` reads through
+`MemoryStream`, which short-reads rather than throwing. A payload smaller than
+its page flags claim therefore yields zeros, and the reference relies on it. The
+consequence for the Explorer: a junk `.ydr` *parses*, into a drawable with no
+models. "It parsed" is not the question worth asking, which is why
+`Drawable::has_geometry` exists.
+
+**Vertex declarations are indexed by semantic, not by packing order.** `flags` is
+a bitmask over the 16 semantics; `types` is 16 nibbles, one per semantic, present
+or not. A component's offset is the sum of the sizes of the *present* components
+below it. Reading the nibbles in sequence works on `0x7755555555996996` — the
+declaration nearly every YDR uses — and silently misparses the rest.
+
+**A resource length of `0xFFFFFF` is unrelated to `FloatUnk`.** Two component
+nibbles (`FloatUnk`, and 11-15) are sized zero in the reference and never seen.
+They are kept sized zero rather than rejected, so an unknown declaration decodes
+to a shorter stride instead of failing.
+
+**The drawable's bounding box is not a superset of its vertices.** Measured over
+716k vertices: a fifth fall outside it, two thirds for skinned models. The
+per-geometry AABB from `DrawableModel.BoundsPointer` *is* exact — not one vertex
+outside — and is what `drawable_gate.rs` validates against.
+
+## Audio
+
+| Unit | C# reference | Status | Notes |
+| --- | --- | --- | --- |
+| `audio/awc.rs` | `AwcFile.cs` (113 KB) | **partial** | Header, stream and chunk tables, `format`/`streamformat`/`data`/`mid`, multi-channel de-interleave, RSXXTEA. Reads only; PC (little-endian) only. |
+| `audio/adpcm.rs` | `ADPCMCodec` in `AwcFile.cs` | **partial** | Decode. Encode not ported. |
+| `audio/wav.rs` | `AwcStream.GetWavStream` | **done** | 16-bit mono PCM, which is the only shape the reference writes. |
+| `rel.rs` | `RelFile.cs` (1.2 MB) | todo | The metadata that names and sequences the waves. Without it a stream is a hash. |
+
+### Notes on the audio layer
+
+**Three encryption modes, and one of them has no flag.** A container can be
+encrypted whole, per multi-channel block, or not at all, under a modified XXTEA
+(`^ 0x7B3A207F` folded into the key lookup). The per-block and single-channel
+cases are flags. The whole-file case is detected by the magic failing to read as
+`ADAT` — there is nothing else to go on.
+
+**The decrypt looks asymmetric and is not.** It seeds its running value from
+`blocks[0]` where the textbook XXTEA decrypt seeds from the last block, and the
+reference labels its own code as undefined behaviour it has not cleaned up. At
+`p = n-1` the textbook value *is* `blocks[0]`, so the two directions agree. A
+test pins the round trip so a future tidy-up cannot quietly change which is true.
+XXTEA is undefined for a single 4-byte block and the two directions genuinely
+disagree there; no real payload is that short.
+
+**A stream is a channel, not a sound.** A stereo song is two streams paired by a
+`_left`/`_right` naming convention that lives in the name tables, not in the
+file. In a multi-channel container the audio is in a single carrier stream with
+id 0, and the others index into it; a channel's audio is its slice of every
+block, concatenated.
+
+**The declared sample count is authoritative, in both directions.** Blocks hold
+4088 samples, so an odd declared count is routinely one more than the blocks can
+produce — `01_0_gtaiv_legacy_support_small.awc` declares 12161 and carries 12160.
+This port pads to the declared count. It also *trims* to it, which the reference
+does not: `DecodeADPCM` returns a `data.len() * 4` buffer however little it
+wrote, so CodeWalker's exported WAVs carry four bytes of silence per block
+header. That trim is the one deliberate divergence; the samples agree exactly.
+Verified over 132.7 million samples against `GetPcmData`.
 
 ## File types
 
-All 41 **todo**. Planned order: `YtdFile`, `YtypFile`, `YmapFile`, `YdrFile`,
-`YddFile`, `YbnFile`, `YftFile`, `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
+All 41 **todo** as files, though `YdrFile.cs`, `YddFile.cs` and `AwcFile.cs` are
+covered by `resources::read_drawables` and `audio::AwcFile` respectively.
+Planned order: `YtdFile`, `YtypFile`, `YmapFile`, `YdrFile`, `YddFile`,
+`YbnFile`, `YftFile`, `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
 
 `AwcFile` · `Builders` · `CacheDatFile` · `CarColsFile` · `CarModColsFile` ·
 `CarVariationsFile` · `CutFile` · `DistantLightsFile` · `DlcContentFile` ·
