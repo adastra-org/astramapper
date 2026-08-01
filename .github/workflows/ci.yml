@@ -1,0 +1,65 @@
+name: CI
+
+# No remote is wired yet, so nothing runs this today. It is committed so the
+# checks are defined in one place and reviewable, and so adding a runner later
+# is a one-line change to `runs-on`.
+#
+# Tauri cannot cross-compile: each OS must build on a runner of that OS. When
+# more targets are needed, add matrix entries with their own runner labels
+# rather than trying to produce them all from one machine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # cw-core's round-trip tests that need a real GTA V install are marked
+      # #[ignore], so this stays green on a machine without the game.
+      - name: Test
+        run: cargo test --workspace
+
+  frontend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bunx oxlint .
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
