@@ -8,6 +8,7 @@
 // Public so `tests/explorer_gate.rs` can drive the listing logic against a real
 // scan without a Tauri runtime.
 pub mod explorer;
+pub mod viewer;
 
 use serde::Serialize;
 
@@ -34,6 +35,7 @@ fn app_info() -> AppInfo {
 pub fn run() {
     tauri::Builder::default()
         .manage(explorer::GameState::default())
+        .manage(viewer::ViewerState::default())
         .plugin(tauri_plugin_opener::init())
         // Picking the GTA V install folder.
         .plugin(tauri_plugin_dialog::init())
@@ -46,6 +48,15 @@ pub fn run() {
             explorer::open_game_folder,
             explorer::list_dir,
             explorer::game_is_open,
+            viewer::open_entry,
+            viewer::read_text,
+            viewer::read_hex,
+            viewer::read_model,
+            viewer::read_audio,
+            viewer::read_audio_track,
+            viewer::save_audio_track,
+            viewer::extract_to,
+            viewer::save_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

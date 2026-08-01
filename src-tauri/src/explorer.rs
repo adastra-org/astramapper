@@ -17,10 +17,9 @@ use tauri::State;
 pub struct Loaded {
     /// Held rather than recovered on demand: the keys come from a SHA-1 scan
     /// over the whole of `GTA5.exe`, which is far too slow to repeat per
-    /// extraction. Unread until extraction lands later in phase 2.
-    #[allow(dead_code)]
-    keys: GtaKeys,
-    manager: RpfManager,
+    /// extraction.
+    pub keys: GtaKeys,
+    pub manager: RpfManager,
 }
 
 #[derive(Default)]

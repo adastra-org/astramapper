@@ -1,0 +1,608 @@
+//! Looking at one file: open it, then read it as text, as hex pages, or as a
+//! mesh.
+//!
+//! The rule from `docs/architecture.md` is that the WebView never parses archive
+//! data. So every command here hands back something already interpreted — a
+//! decoded string, a mesh bundle, or an explicitly requested byte range for the
+//! hex view, which is the one case where bytes are the answer rather than the
+//! input.
+//!
+//! One file is open at a time and its extracted payload is held in
+//! [`ViewerState`]. Extraction means a seek, a decrypt and an inflate; a hex
+//! view that pages through a 20 MB texture dictionary would otherwise redo all
+//! three per scroll.
+
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
+use cw_core::audio::AwcFile;
+use cw_core::filetype::FileKind;
+use cw_core::mesh::MeshBundle;
+use cw_core::resources::{read_drawables, Drawable};
+use cw_core::rpf::EntryKind;
+use cw_core::text::{self, Encoding, TextFile};
+use serde::{Deserialize, Serialize};
+use tauri::State;
+
+use crate::explorer::GameState;
+
+/// How many bytes one `read_hex` call will hand over. A page larger than this
+/// is slower to serialize than the user can read.
+const MAX_HEX_PAGE: usize = 64 * 1024;
+
+/// The currently open file and its extracted payload.
+pub struct OpenFile {
+    pub info: EntryInfo,
+    pub data: Vec<u8>,
+    /// The AWC key, carried so the audio commands can decrypt without taking
+    /// the game lock again.
+    pub awc_key: [u32; 4],
+}
+
+#[derive(Default)]
+pub struct ViewerState(pub Mutex<Option<OpenFile>>);
+
+/// The system and graphics segment sizes of a resource, and its format version.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceInfo {
+    pub system_size: usize,
+    pub graphics_size: usize,
+    /// 165 for `.ydr`/`.ydd`, 162 for `.yft`, 13 for `.ytd`.
+    pub version: u32,
+}
+
+/// What the frontend needs to decide how to show a file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryInfo {
+    pub path: String,
+    pub name: String,
+    /// `binary` or `resource`, as in a listing.
+    pub kind: &'static str,
+    pub file_kind: FileKind,
+    /// Human label for `file_kind`, e.g. "drawable dictionary".
+    pub file_kind_label: &'static str,
+    /// Size of the entry as stored in the archive.
+    pub size_on_disk: u64,
+    /// Size of the payload once decrypted and decompressed.
+    pub byte_length: usize,
+    pub encrypted: bool,
+    pub resource: Option<ResourceInfo>,
+    /// The viewer the UI should open by default.
+    pub viewer: &'static str,
+    /// Every viewer that will work for this file. Hex is always in here.
+    pub viewers: Vec<&'static str>,
+    /// Why the preferred viewer is not the one the extension implies — a
+    /// drawable that failed to parse, for instance. Shown, not swallowed.
+    pub note: Option<String>,
+}
+
+/// One page of bytes for the hex view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HexPage {
+    pub offset: usize,
+    /// Base64 of the raw bytes in this range.
+    pub bytes: String,
+    pub length: usize,
+    pub total: usize,
+}
+
+/// Everything drawable in one file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelPreview {
+    pub path: String,
+    pub bundles: Vec<MeshBundle>,
+    /// Drawables the file holds that produced no geometry — normal in a
+    /// dictionary, and worth showing so the count is not silently wrong.
+    pub empty_drawables: usize,
+}
+
+/// Open an entry: extract its payload, classify it, and keep it for the reads
+/// that follow.
+///
+/// Runs like `list_dir` rather than `open_game_folder`: the work is bounded by
+/// one entry, not by 179 archives.
+#[tauri::command]
+pub fn open_entry(
+    path: String,
+    game: State<'_, GameState>,
+    viewer: State<'_, ViewerState>,
+) -> Result<EntryInfo, String> {
+    let guard = game.0.lock().map_err(|_| "game state is poisoned")?;
+    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+
+    let entry_ref = loaded
+        .manager
+        .find(&path)
+        .ok_or_else(|| format!("{path} is not in the index"))?;
+    let entry = loaded.manager.entry(entry_ref);
+
+    if entry.is_directory() {
+        return Err(format!("{path} is a directory"));
+    }
+
+    let data = loaded
+        .manager
+        .extract(entry_ref, &loaded.keys)
+        .map_err(|e| format!("could not read {path}: {e}"))?;
+
+    let file_kind = FileKind::from_name(&entry.name_lower);
+    let resource = entry
+        .resource_segments()
+        .map(|(system, graphics)| ResourceInfo {
+            system_size: system,
+            graphics_size: graphics,
+            version: entry.resource_version().unwrap_or(0),
+        });
+
+    let awc_key = loaded.keys.awc_key;
+    let (viewer_name, viewers, note) = choose_viewer(file_kind, &data, resource.as_ref(), &awc_key);
+
+    let info = EntryInfo {
+        path: entry.path.clone(),
+        name: entry.name.clone(),
+        kind: match &entry.kind {
+            EntryKind::Directory(_) => "directory",
+            EntryKind::Binary(_) if file_kind == FileKind::Archive => "archive",
+            EntryKind::Binary(_) => "binary",
+            EntryKind::Resource(_) => "resource",
+        },
+        file_kind,
+        file_kind_label: file_kind.label(),
+        size_on_disk: entry.file_size_on_disk(),
+        byte_length: data.len(),
+        encrypted: entry.is_encrypted(),
+        resource,
+        viewer: viewer_name,
+        viewers,
+        note,
+    };
+
+    *viewer.0.lock().map_err(|_| "viewer state is poisoned")? = Some(OpenFile {
+        info: info.clone(),
+        data,
+        awc_key,
+    });
+
+    Ok(info)
+}
+
+/// Pick the default viewer, and say what else would work.
+///
+/// A model that will not parse falls back rather than showing an empty canvas,
+/// and the reason travels with it — silently degrading to hex would look like
+/// the file was never a model.
+fn choose_viewer(
+    kind: FileKind,
+    data: &[u8],
+    resource: Option<&ResourceInfo>,
+    awc_key: &[u32; 4],
+) -> (&'static str, Vec<&'static str>, Option<String>) {
+    let readable_as_text = text::is_text(data);
+    let mut viewers = vec!["hex"];
+    if readable_as_text {
+        viewers.insert(0, "text");
+    }
+
+    if kind.has_audio() {
+        return match AwcFile::read(data, awc_key) {
+            Ok(awc) if awc.streams.iter().any(|s| s.is_playable()) => {
+                viewers.insert(0, "audio");
+                ("audio", viewers, None)
+            }
+            Ok(_) => (
+                viewers[0],
+                viewers.clone(),
+                Some("this container holds no playable streams".into()),
+            ),
+            Err(e) => (viewers[0], viewers.clone(), Some(format!("{e}"))),
+        };
+    }
+
+    if kind.has_model() {
+        match resource {
+            Some(resource) => match read_drawables(kind, data, resource.system_size) {
+                Ok(drawables) if drawables.iter().any(Drawable::has_geometry) => {
+                    viewers.insert(0, "model");
+                    return ("model", viewers, None);
+                }
+                Ok(_) => {
+                    return (
+                        viewers[0],
+                        viewers.clone(),
+                        Some("this file holds no renderable geometry".into()),
+                    )
+                }
+                Err(e) => {
+                    let note = format!("could not read the geometry: {e}");
+                    return (viewers[0], viewers.clone(), Some(note));
+                }
+            },
+            None => {
+                return (
+                    viewers[0],
+                    viewers.clone(),
+                    Some("a drawable stored as a binary entry, not a resource".into()),
+                )
+            }
+        }
+    }
+
+    let note = match kind {
+        FileKind::Fragment | FileKind::Particle if !readable_as_text => {
+            Some("fragments and particle dictionaries embed drawables, but Frag.cs and Particle.cs are not ported yet".into())
+        }
+        FileKind::Texture if !readable_as_text => {
+            Some("texture decoding needs Texture.cs and the BC decoders, which are not ported yet".into())
+        }
+        FileKind::AudioMetadata if !readable_as_text => {
+            Some("RelFile.cs, which names and sequences the waves in the .awc files, is not ported yet".into())
+        }
+        FileKind::Meta | FileKind::Clip | FileKind::Nav | FileKind::Bounds if !readable_as_text => {
+            Some(format!("no {} parser yet, so this opens as bytes", kind.label()))
+        }
+        _ => None,
+    };
+
+    (viewers[0], viewers, note)
+}
+
+/// Decode the open file as text.
+#[tauri::command]
+pub fn read_text(viewer: State<'_, ViewerState>) -> Result<TextFile, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    Ok(text::decode(&open.data))
+}
+
+/// One page of the open file's bytes.
+#[tauri::command]
+pub fn read_hex(
+    offset: usize,
+    length: usize,
+    viewer: State<'_, ViewerState>,
+) -> Result<HexPage, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    let total = open.data.len();
+    let start = offset.min(total);
+    let end = start.saturating_add(length.min(MAX_HEX_PAGE)).min(total);
+    let slice = &open.data[start..end];
+
+    Ok(HexPage {
+        offset: start,
+        bytes: STANDARD.encode(slice),
+        length: slice.len(),
+        total,
+    })
+}
+
+/// Build the mesh bundles for the open file.
+#[tauri::command]
+pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    let resource = open
+        .info
+        .resource
+        .as_ref()
+        .ok_or("this file is not a resource, so it has no geometry")?;
+
+    let drawables = read_drawables(open.info.file_kind, &open.data, resource.system_size)
+        .map_err(|e| format!("could not read the geometry: {e}"))?;
+
+    let mut bundles = Vec::new();
+    let mut empty_drawables = 0;
+    for drawable in &drawables {
+        match MeshBundle::best(drawable) {
+            Some(bundle) => bundles.push(bundle),
+            None => empty_drawables += 1,
+        }
+    }
+
+    if bundles.is_empty() {
+        return Err("this file holds no renderable geometry".into());
+    }
+
+    Ok(ModelPreview {
+        path: open.info.path.clone(),
+        bundles,
+        empty_drawables,
+    })
+}
+
+/// One stream in an open `.awc`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTrack {
+    /// Position in the container, and the handle for `read_audio_track`.
+    pub index: usize,
+    /// The 29-bit name hash. Resolving it to a name needs the name tables from
+    /// `MetaNames.cs`, which are not ported.
+    pub id: u32,
+    pub codec: &'static str,
+    pub sample_rate: u16,
+    pub samples: u32,
+    pub seconds: f32,
+    pub playable: bool,
+    /// True when the stream is MIDI rather than audio.
+    pub midi: bool,
+    /// The chunk kinds this stream carries, for the detail line.
+    pub chunks: Vec<&'static str>,
+}
+
+/// What an open `.awc` contains.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPreview {
+    pub path: String,
+    pub version: u16,
+    pub multi_channel: bool,
+    pub whole_file_encrypted: bool,
+    pub tracks: Vec<AudioTrack>,
+}
+
+/// One decoded stream, as a `.wav`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioClip {
+    pub index: usize,
+    pub sample_rate: u16,
+    pub samples: usize,
+    /// Base64 of a complete RIFF/WAVE file, ready for an `<audio>` element.
+    pub wav: String,
+}
+
+/// Parse the open file as an AWC. Kept private so both audio commands agree on
+/// what "the open file" means.
+fn open_awc(open: &OpenFile) -> Result<AwcFile, String> {
+    if !open.info.file_kind.has_audio() {
+        return Err(format!("{} is not an audio container", open.info.name));
+    }
+    AwcFile::read(&open.data, &open.awc_key).map_err(|e| format!("{e}"))
+}
+
+/// List the streams in the open `.awc`.
+///
+/// The waves themselves are not decoded here: a container runs to hundreds of
+/// streams and tens of megabytes, and the listing is what the UI needs first.
+#[tauri::command]
+pub fn read_audio(viewer: State<'_, ViewerState>) -> Result<AudioPreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    let awc = open_awc(open)?;
+
+    let tracks = awc
+        .streams
+        .iter()
+        .enumerate()
+        .filter(|(_, stream)| !stream.is_carrier)
+        .map(|(index, stream)| AudioTrack {
+            index,
+            id: stream.id,
+            codec: stream.format.map(|f| f.codec.label()).unwrap_or("none"),
+            sample_rate: stream.format.map(|f| f.sample_rate).unwrap_or(0),
+            samples: stream.format.map(|f| f.samples).unwrap_or(0),
+            seconds: stream.format.map(|f| f.seconds()).unwrap_or(0.0),
+            playable: stream.is_playable(),
+            midi: stream.midi.is_some(),
+            chunks: stream.chunks.iter().map(|c| c.kind.label()).collect(),
+        })
+        .collect();
+
+    Ok(AudioPreview {
+        path: open.info.path.clone(),
+        version: awc.version,
+        multi_channel: awc.multi_channel,
+        whole_file_encrypted: awc.whole_file_encrypted,
+        tracks,
+    })
+}
+
+/// Decode one stream to a `.wav`.
+///
+/// ADPCM is decoded in Rust rather than in the WebView, per the boundary rule:
+/// browsers do not play Rockstar's ADPCM framing, and shipping the raw blocks
+/// across would be handing the frontend archive bytes to parse.
+#[tauri::command]
+pub fn read_audio_track(index: usize, viewer: State<'_, ViewerState>) -> Result<AudioClip, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    let awc = open_awc(open)?;
+
+    let stream = awc
+        .streams
+        .get(index)
+        .ok_or_else(|| format!("stream {index} is not in this container"))?;
+    if !stream.is_playable() {
+        return Err(format!("stream {index} holds no playable audio"));
+    }
+
+    let samples = stream.samples();
+    Ok(AudioClip {
+        index,
+        sample_rate: stream.format.map(|f| f.sample_rate).unwrap_or(0),
+        samples: samples.len(),
+        wav: STANDARD.encode(stream.to_wav()),
+    })
+}
+
+/// Write the open file's payload to `destination`, as extracted — decrypted and
+/// decompressed, which is what every other tool expects a `.ydr` on disk to be.
+#[tauri::command]
+pub fn extract_to(destination: String, viewer: State<'_, ViewerState>) -> Result<usize, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    write_file(&destination, &open.data)?;
+    Ok(open.data.len())
+}
+
+/// Write one decoded stream to disk as a `.wav`.
+#[tauri::command]
+pub fn save_audio_track(
+    index: usize,
+    destination: String,
+    viewer: State<'_, ViewerState>,
+) -> Result<usize, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    let awc = open_awc(open)?;
+
+    let stream = awc
+        .streams
+        .get(index)
+        .ok_or_else(|| format!("stream {index} is not in this container"))?;
+    let wav = stream.to_wav();
+    write_file(&destination, &wav)?;
+    Ok(wav.len())
+}
+
+/// The encoding an edited file should be written back in. Mirrors
+/// [`cw_core::text::Encoding`] on the wire.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WireEncoding {
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+}
+
+impl From<WireEncoding> for Encoding {
+    fn from(value: WireEncoding) -> Self {
+        match value {
+            WireEncoding::Utf8 => Encoding::Utf8,
+            WireEncoding::Utf8Bom => Encoding::Utf8Bom,
+            WireEncoding::Utf16Le => Encoding::Utf16Le,
+            WireEncoding::Utf16Be => Encoding::Utf16Be,
+        }
+    }
+}
+
+/// Write edited text to disk in the encoding it was read as.
+///
+/// To disk, not back into the archive: RPF *writing* is not ported — see
+/// `docs/formats.md`. The UI says so rather than offering a save that would
+/// quietly do something else.
+#[tauri::command]
+pub fn save_text(
+    destination: String,
+    contents: String,
+    encoding: WireEncoding,
+) -> Result<usize, String> {
+    let bytes = text::encode(&contents, encoding.into());
+    write_file(&destination, &bytes)?;
+    Ok(bytes.len())
+}
+
+fn write_file(destination: &str, bytes: &[u8]) -> Result<(), String> {
+    let path = PathBuf::from(destination);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resource(system_size: usize) -> ResourceInfo {
+        ResourceInfo {
+            system_size,
+            graphics_size: 0,
+            version: 165,
+        }
+    }
+
+    /// The AWC key only matters for `.awc`, which none of these cases are.
+    fn choose_viewer_for_test(
+        kind: FileKind,
+        data: &[u8],
+        resource: Option<&ResourceInfo>,
+    ) -> (&'static str, Vec<&'static str>, Option<String>) {
+        choose_viewer(kind, data, resource, &[0; 4])
+    }
+
+    #[test]
+    fn offers_text_for_a_meta_file_and_hex_as_a_fallback() {
+        let xml = b"<?xml version=\"1.0\"?>\n<CVehicleModelInfo />\n";
+        let (viewer, viewers, note) = choose_viewer_for_test(FileKind::Text, xml, None);
+        assert_eq!(viewer, "text");
+        assert_eq!(viewers, vec!["text", "hex"]);
+        assert!(note.is_none());
+    }
+
+    /// Hex is always available, whatever else is.
+    #[test]
+    fn always_offers_hex() {
+        for (kind, data) in [
+            (FileKind::Text, b"plain".as_slice()),
+            (FileKind::Data, &[0u8, 1, 2, 3]),
+            (FileKind::Unknown, &[0xFF; 64]),
+        ] {
+            let (_, viewers, _) = choose_viewer_for_test(kind, data, None);
+            assert!(viewers.contains(&"hex"), "{kind:?} does not offer hex");
+        }
+    }
+
+    /// A `.ydr` whose bytes are not a drawable must say why rather than opening
+    /// an empty 3D view.
+    #[test]
+    fn explains_a_model_that_will_not_parse() {
+        let junk = vec![0xFFu8; 64];
+        let (viewer, _, note) =
+            choose_viewer_for_test(FileKind::Model, &junk, Some(&resource(4096)));
+        assert_eq!(viewer, "hex");
+        let note = note.expect("a reason");
+        assert!(note.contains("geometry"), "unhelpful note: {note}");
+    }
+
+    /// A `.ydr` that parses without error but carries nothing to draw is the
+    /// common failure, not a parse error: the reader zero-fills past the end of
+    /// a short payload, so junk reads as a drawable with no models.
+    #[test]
+    fn does_not_open_the_3d_view_for_a_drawable_with_no_geometry() {
+        let empty = vec![0u8; 512];
+        let (viewer, viewers, note) =
+            choose_viewer_for_test(FileKind::Model, &empty, Some(&resource(512)));
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"model"));
+        assert!(note.unwrap().contains("renderable"));
+    }
+
+    /// The formats that are not ported yet each get a note, so "opens as hex"
+    /// never looks like a bug.
+    #[test]
+    fn names_the_formats_that_are_not_ported() {
+        for kind in [
+            FileKind::Fragment,
+            FileKind::Particle,
+            FileKind::Texture,
+            FileKind::Meta,
+            FileKind::Bounds,
+        ] {
+            let binary = vec![0u8; 512];
+            let (viewer, _, note) = choose_viewer_for_test(kind, &binary, Some(&resource(512)));
+            assert_eq!(viewer, "hex", "{kind:?}");
+            assert!(note.is_some(), "{kind:?} has no explanation");
+        }
+    }
+
+    /// A `.ydr` stored as a binary entry has no page flags, so there is no way
+    /// to split the payload. That is a real case in mod archives.
+    #[test]
+    fn refuses_a_drawable_with_no_resource_header() {
+        let (viewer, _, note) = choose_viewer_for_test(FileKind::Model, &[0u8; 256], None);
+        assert_eq!(viewer, "hex");
+        assert!(note.unwrap().contains("binary entry"));
+    }
+}

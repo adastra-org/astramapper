@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ChevronRight,
   FileBox,
@@ -20,6 +20,7 @@ import {
   type Listing,
 } from "../lib/explorer";
 import { formatBytes } from "../lib/format";
+import { FileViewer } from "./FileViewer";
 
 const ICONS: Record<EntryKind, typeof Folder> = {
   directory: Folder,
@@ -29,14 +30,18 @@ const ICONS: Record<EntryKind, typeof Folder> = {
 };
 
 /**
- * Explorer Mode's scaffold: pick a game folder, then walk the archives as one
- * tree. Listings come from the Rust side already sorted and typed; nothing here
- * parses archive bytes.
+ * Explorer Mode: pick a game folder, walk the archives as one tree, and preview
+ * whatever is selected.
+ *
+ * Listings come from the Rust side already sorted and typed, and the preview
+ * pane receives decoded text, mesh buffers or explicit byte ranges. Nothing
+ * here parses archive bytes.
  */
 export function Explorer(): React.JSX.Element {
   const [summary, setSummary] = useState<GameSummary | null>(null);
   const [path, setPath] = useState("");
   const [rows, setRows] = useState<Listing[]>([]);
+  const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,6 +58,20 @@ export function Explorer(): React.JSX.Element {
     }
   }, []);
 
+  // Opening a row either descends into it or previews it. A `.rpf` does both in
+  // principle; descending is what the tree is for, so that wins.
+  const open = useCallback(
+    (row: Listing) => {
+      if (row.expandable) {
+        setSelected(null);
+        void navigate(row.path);
+        return;
+      }
+      setSelected(row.path);
+    },
+    [navigate],
+  );
+
   // A folder opened earlier in this session survives a remount of this panel,
   // since the scan lives in Rust state rather than here.
   useEffect(() => {
@@ -62,11 +81,15 @@ export function Explorer(): React.JSX.Element {
   }, [navigate]);
 
   const pick = useCallback(async () => {
-    const folder = await open({ directory: true, title: "Select the GTA V folder" });
+    const folder = await openDialog({
+      directory: true,
+      title: "Select the GTA V folder",
+    });
     if (typeof folder !== "string") return;
 
     setBusy(true);
     setError(null);
+    setSelected(null);
     try {
       setSummary(await openGameFolder(folder));
       setRows(await listDir(""));
@@ -125,7 +148,18 @@ export function Explorer(): React.JSX.Element {
       )}
 
       {summary ? (
-        <Rows rows={rows} path={path} onNavigate={navigate} />
+        <div className="flex min-h-0 flex-1">
+          <div className="flex min-h-0 w-96 shrink-0 flex-col">
+            <Rows
+              rows={rows}
+              path={path}
+              selected={selected}
+              onNavigate={navigate}
+              onOpen={open}
+            />
+          </div>
+          <FileViewer path={selected} onClose={() => setSelected(null)} />
+        </div>
       ) : (
         <div className="flex flex-1 items-center justify-center">
           <p className="text-sm text-ink-dim">
@@ -176,10 +210,18 @@ function Crumbs({ crumbs, onNavigate, busy }: CrumbProps): React.JSX.Element {
 type RowsProps = {
   rows: readonly Listing[];
   path: string;
+  selected: string | null;
   onNavigate: (path: string) => void;
+  onOpen: (row: Listing) => void;
 };
 
-function Rows({ rows, path, onNavigate }: RowsProps): React.JSX.Element {
+function Rows({
+  rows,
+  path,
+  selected,
+  onNavigate,
+  onOpen,
+}: RowsProps): React.JSX.Element {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
       {path !== "" && (
@@ -195,13 +237,15 @@ function Rows({ rows, path, onNavigate }: RowsProps): React.JSX.Element {
 
       {rows.map((row) => {
         const Icon = ICONS[row.kind];
+        const isSelected = row.path === selected;
         return (
           <button
             key={row.path}
             type="button"
-            disabled={!row.expandable}
-            onClick={() => onNavigate(row.path)}
-            className="flex w-full items-center gap-2 px-4 py-1.5 text-left text-xs transition-colors hover:bg-surface-1 disabled:cursor-default disabled:hover:bg-transparent"
+            onClick={() => onOpen(row)}
+            className={`flex w-full items-center gap-2 px-4 py-1.5 text-left text-xs transition-colors ${
+              isSelected ? "bg-surface-2" : "hover:bg-surface-1"
+            }`}
           >
             <Icon
               size={14}
