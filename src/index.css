@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+/* A tool that spends its life next to 3D viewports and hex dumps is dark by
+   default. There is no light theme and no toggle. */
+@theme {
+  --color-surface-0: oklch(0.17 0.012 265);
+  --color-surface-1: oklch(0.21 0.014 265);
+  --color-surface-2: oklch(0.26 0.016 265);
+  --color-edge: oklch(0.32 0.018 265);
+  --color-ink: oklch(0.93 0.006 265);
+  --color-ink-dim: oklch(0.68 0.012 265);
+  --color-accent: oklch(0.72 0.15 232);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-surface-0);
+  color: var(--color-ink);
+  font-family:
+    ui-sans-serif, system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+
+  /* This is a desktop app, not a web page. */
+  overflow: hidden;
+  user-select: none;
+}

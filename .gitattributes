@@ -1,0 +1,12 @@
+# Normalize line endings so the tree is identical on every platform.
+* text=auto eol=lf
+
+# Binary assets and fixtures must never be munged.
+*.png binary
+*.ico binary
+*.icns binary
+*.rpf binary
+*.dat binary
+*.ytd binary
+*.ydr binary
+*.ymap binary

@@ -1,0 +1,16 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "unicorn"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "ignorePatterns": ["dist", "target", "node_modules", "src-tauri/gen"],
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    // Vite uses the automatic JSX runtime (tsconfig "jsx": "react-jsx"),
+    // so React does not need to be in scope.
+    "react/react-in-jsx-scope": "off"
+  }
+}

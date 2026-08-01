@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "astramapper",
+  "productName": "AstraMapper",
   "version": "0.1.0",
   "identifier": "com.father.astramapper",
   "build": {
@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "astramapper",
-        "width": 800,
-        "height": 600
+        "title": "AstraMapper",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600
       }
     ],
     "security": {
