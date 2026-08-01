@@ -68,6 +68,7 @@ checksum = "3d62b7694a562cdf5a74227903507c56ab2cc8bdd1f781ed5cb4cf9c9f810bfc"
 name = "astramapper"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "cw-core",
  "serde",
  "serde_json",
@@ -745,6 +746,7 @@ name = "cw-core"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "base64 0.22.1",
  "binrw",
  "flate2",
  "glam",

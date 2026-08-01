@@ -9,7 +9,11 @@
 //! All game structs are little-endian, packed, and use `f32` — never widen a
 //! serialized field to `f64`.
 
+pub mod filetype;
+pub mod mesh;
+pub mod resources;
 pub mod rpf;
+pub mod text;
 pub mod utils;
 
 /// Errors raised while reading GTA V data.

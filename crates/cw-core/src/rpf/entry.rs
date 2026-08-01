@@ -158,7 +158,8 @@ impl RpfEntry {
             }
             EntryKind::Resource(r) => {
                 if r.file_size == 0 {
-                    size_from_flags(r.system_flags) as u64 + size_from_flags(r.graphics_flags) as u64
+                    size_from_flags(r.system_flags) as u64
+                        + size_from_flags(r.graphics_flags) as u64
                 } else {
                     r.file_size as u64
                 }
@@ -172,6 +173,34 @@ impl RpfEntry {
             EntryKind::Directory(_) => None,
             EntryKind::Binary(b) => Some(b.file_offset),
             EntryKind::Resource(r) => Some(r.file_offset),
+        }
+    }
+
+    /// A resource entry's system and graphics segment sizes, decoded from its
+    /// page flags. `None` for directories and binary files.
+    ///
+    /// This is the split point an extracted payload has to be cut at before its
+    /// internal pointers mean anything — see
+    /// [`crate::resources::ResourceReader`].
+    pub fn resource_segments(&self) -> Option<(usize, usize)> {
+        match &self.kind {
+            EntryKind::Resource(r) => Some((
+                size_from_flags(r.system_flags) as usize,
+                size_from_flags(r.graphics_flags) as usize,
+            )),
+            _ => None,
+        }
+    }
+
+    /// The resource format version, from the top nibble of each flag word.
+    /// YDR and YDD are 165, YFT 162, YTD 13.
+    pub fn resource_version(&self) -> Option<u32> {
+        match &self.kind {
+            EntryKind::Resource(r) => Some(crate::resources::version_from_flags(
+                r.system_flags,
+                r.graphics_flags,
+            )),
+            _ => None,
         }
     }
 
@@ -264,7 +293,10 @@ pub const RESOURCE_SIZE_ESCAPE: u32 = 0xFF_FFFF;
 /// Unpack the real length from the first 16 bytes of an oversized resource's
 /// payload. The byte order is genuinely this scrambled in the reference.
 pub fn huge_resource_size(header: &[u8; 16]) -> u32 {
-    (header[7] as u32) | (header[14] as u32) << 8 | (header[5] as u32) << 16 | (header[2] as u32) << 24
+    (header[7] as u32)
+        | (header[14] as u32) << 8
+        | (header[5] as u32) << 16
+        | (header[2] as u32) << 24
 }
 
 /// Decode a resource page-flags word into a byte count.
@@ -354,14 +386,18 @@ mod tests {
     #[test]
     fn reads_a_binary_entry() {
         // name offset 0x0042, size on disk 0x001234, offset 0x005678.
-        let packed: u64 = 0x0042 | (0x0012_34u64 << 16) | (0x0056_78u64 << 40);
+        let packed: u64 = 0x0042 | (0x0000_1234u64 << 16) | (0x0000_5678u64 << 40);
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&packed.to_le_bytes());
         bytes.extend_from_slice(&0x9999u32.to_le_bytes()); // uncompressed
         bytes.extend_from_slice(&1u32.to_le_bytes()); // encrypted
 
         let h2 = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        assert_eq!(h2 & 0x8000_0000, 0, "test vector must look like a binary entry");
+        assert_eq!(
+            h2 & 0x8000_0000,
+            0,
+            "test vector must look like a binary entry"
+        );
 
         let mut r = DataReader::new(&bytes);
         let (kind, name_offset) = read_kind(&mut r, h2).unwrap();
@@ -390,8 +426,8 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0x0042u16.to_le_bytes());
         bytes.extend_from_slice(&[0x34, 0x12, 0x00]); // size 0x001234
-        // The top bit of the offset field is the resource discriminator and is
-        // masked off by the reader.
+                                                      // The top bit of the offset field is the resource discriminator and is
+                                                      // masked off by the reader.
         bytes.extend_from_slice(&[0x78, 0x56, 0x80]);
         bytes.extend_from_slice(&0xAAAAu32.to_le_bytes());
         bytes.extend_from_slice(&0xBBBBu32.to_le_bytes());
@@ -406,7 +442,10 @@ mod tests {
         match kind {
             EntryKind::Resource(res) => {
                 assert_eq!(res.file_size, 0x1234);
-                assert_eq!(res.file_offset, 0x5678, "the 0x80 marker bit must be masked off");
+                assert_eq!(
+                    res.file_offset, 0x5678,
+                    "the 0x80 marker bit must be masked off"
+                );
                 assert_eq!(res.system_flags, 0xAAAA);
                 assert_eq!(res.graphics_flags, 0xBBBB);
             }
@@ -439,7 +478,10 @@ mod tests {
                 entries_count: 0,
             }),
         };
-        assert_eq!(entry("prop_bench_01a.ydr").short_name_lower(), "prop_bench_01a");
+        assert_eq!(
+            entry("prop_bench_01a.ydr").short_name_lower(),
+            "prop_bench_01a"
+        );
         assert_eq!(entry("v_res_d_bskt.ytd").short_name_lower(), "v_res_d_bskt");
         assert_eq!(entry("noextension").short_name_lower(), "noextension");
         // A leading dot is not an extension separator.
