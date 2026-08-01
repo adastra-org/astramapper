@@ -98,6 +98,8 @@ mod tests {
             ("The quick brown fox", 0x43CF_4EFF),
             ("MixedCase_NAME", 0xF3B3_6806),
             ("0123456789", 0x9218_93BE),
+            // Displayed by the app shell as a live check that cw-core is linked.
+            ("astramapper", 0x79B0_5FD5),
         ];
         for &(text, expected) in cases {
             assert_eq!(gen_hash(text), expected, "gen_hash({text:?})");
