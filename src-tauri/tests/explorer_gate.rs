@@ -33,7 +33,11 @@ fn walks_from_the_root_into_a_nested_archive() {
     let manager = scan();
 
     let root = listing_for(&manager, "").expect("list the root");
-    assert_eq!(root.len(), 179, "the root should list every top-level archive");
+    assert_eq!(
+        root.len(),
+        179,
+        "the root should list every top-level archive"
+    );
     assert!(
         root.iter().all(|r| r.kind == "archive" && r.expandable),
         "every root row is an expandable archive"

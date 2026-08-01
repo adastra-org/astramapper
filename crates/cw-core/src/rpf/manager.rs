@@ -118,7 +118,13 @@ impl RpfManager {
                 // dictionary assignment. Real collisions here are a mod
                 // overriding a base file; deciding that properly is DLC
                 // precedence work, which belongs with phase 3.
-                entries.insert(entry.path.clone(), EntryRef { archive: a, entry: e });
+                entries.insert(
+                    entry.path.clone(),
+                    EntryRef {
+                        archive: a,
+                        entry: e,
+                    },
+                );
             }
         }
         self.entry_index = entries;
@@ -261,7 +267,10 @@ mod tests {
 
     #[test]
     fn normalizes_separators_and_case() {
-        assert_eq!(normalize_path("X64A.rpf/Levels/GTA5"), r"x64a.rpf\levels\gta5");
+        assert_eq!(
+            normalize_path("X64A.rpf/Levels/GTA5"),
+            r"x64a.rpf\levels\gta5"
+        );
         assert_eq!(normalize_path(r"x64a.rpf\levels"), r"x64a.rpf\levels");
     }
 

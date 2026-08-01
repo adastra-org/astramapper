@@ -288,6 +288,10 @@ impl RpfFile {
             }
 
             let parent_path = self.entries[idx].path.clone();
+            // The index is needed for `visited` and for the stack, and the loop
+            // writes back into `self.entries`, so an iterator would need a
+            // second borrow of the thing it is iterating.
+            #[allow(clippy::needless_range_loop)]
             for i in start..end {
                 self.entries[i].parent = Some(idx);
                 self.entries[i].path = format!("{}\\{}", parent_path, self.entries[i].name_lower);
@@ -360,14 +364,17 @@ impl RpfFile {
 
     /// Total entries across this archive and everything nested inside it.
     pub fn total_entry_count(&self) -> usize {
-        self.entries.len() + self.children.iter().map(|c| c.total_entry_count()).sum::<usize>()
+        self.entries.len()
+            + self
+                .children
+                .iter()
+                .map(|c| c.total_entry_count())
+                .sum::<usize>()
     }
 
     /// Every archive in this subtree, including this one.
     pub fn iter_archives(&self) -> Box<dyn Iterator<Item = &RpfFile> + '_> {
-        Box::new(
-            std::iter::once(self).chain(self.children.iter().flat_map(|c| c.iter_archives())),
-        )
+        Box::new(std::iter::once(self).chain(self.children.iter().flat_map(|c| c.iter_archives())))
     }
 
     /// Read one entry's payload, decrypted and decompressed.

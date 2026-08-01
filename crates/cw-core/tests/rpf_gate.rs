@@ -139,7 +139,10 @@ fn extracted_resources_are_not_noise() {
         );
         checked += 1;
     }
-    assert!(checked > 0, "x64a.rpf has no resource entries — wrong archive?");
+    assert!(
+        checked > 0,
+        "x64a.rpf has no resource entries — wrong archive?"
+    );
     println!("x64a.rpf: {checked} resources inflate to plausible payloads");
 }
 
@@ -244,7 +247,10 @@ fn matches_the_reference_entry_by_entry() {
             let got_size = got.file_size_on_disk();
 
             if got.path != want_path {
-                mismatches.push(format!("[{i}] path: got {:?}, want {want_path:?}", got.path));
+                mismatches.push(format!(
+                    "[{i}] path: got {:?}, want {want_path:?}",
+                    got.path
+                ));
             }
             if got_kind != want_kind {
                 mismatches.push(format!("[{i}] {want_path}: kind {got_kind} != {want_kind}"));
@@ -264,7 +270,12 @@ fn matches_the_reference_entry_by_entry() {
             "{name}: {} of {} entries disagree with the reference:\n{}",
             mismatches.len(),
             want.len(),
-            mismatches.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+            mismatches
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
 
         // Extracted payloads, byte for byte. The metadata above can be right
@@ -346,11 +357,13 @@ fn matches_rpftool_on_open_archives() {
     for a in archives {
         let name = a["name"].as_str().unwrap();
         let rpf_path = PathBuf::from(a["rpf"].as_str().unwrap());
-        let dump: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap())
-                .expect("parse an RPFTool dump");
+        let dump: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.join(format!("{name}.json"))).unwrap(),
+        )
+        .expect("parse an RPFTool dump");
 
-        let rpf = RpfFile::open(&rpf_path, "dlc.rpf", &keys).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let rpf =
+            RpfFile::open(&rpf_path, "dlc.rpf", &keys).unwrap_or_else(|e| panic!("{name}: {e}"));
         assert_eq!(
             rpf.encryption,
             RpfEncryption::Open,
@@ -436,7 +449,10 @@ fn matches_rpftool_on_open_archives() {
         total += compared;
     }
 
-    println!("{total} OPEN-archive entries agree with RPFTool across {} archives", archives.len());
+    println!(
+        "{total} OPEN-archive entries agree with RPFTool across {} archives",
+        archives.len()
+    );
 }
 
 fn sha256_hex(data: &[u8]) -> String {
