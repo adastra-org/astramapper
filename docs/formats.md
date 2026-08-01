@@ -56,11 +56,42 @@ pinned by tests. Substituting any other PRNG produces silent garbage.
 
 | Unit | C# reference | Status | Notes |
 | --- | --- | --- | --- |
-| `rpf/file.rs` | `RpfFile.cs` (105 KB) | todo | Header, entry table, nesting, RSC7. |
-| `rpf/entry.rs` | `RpfFile.cs` | todo | Directory / binary / resource discrimination. |
-| `rpf/manager.rs` | `RpfManager.cs` | todo | |
+| `rpf/file.rs` | `RpfFile.cs` (105 KB) | **partial** | Reads: header, entry table, tree, nesting, RSC7 + deflate extraction. Writing is not ported, so not **done** by this doc's rule. |
+| `rpf/entry.rs` | `RpfFile.cs` | **partial** | Directory / binary / resource discrimination, page flags, oversized-resource escape. `Write` not ported. |
+| `rpf/manager.rs` | `RpfManager.cs` | **partial** | Folder scan, flattening, path index, transparent nested listing. Mod/DLC precedence deliberately omitted. |
 | `game_file.rs` | `GameFile.cs` | todo | |
 | `cache.rs` | `GameFileCache.cs` (240 KB) | todo | |
+
+### Notes on the archive layer
+
+**Three entry layouts, not one field in three widths.** A directory reads its
+name offset as a `u32`, a resource as a `u16`, a binary entry as the low 16 bits
+of a packed `u64`. They agree only because name tables are under 64 KB. The
+discriminator is the second `u32`: `0x7FFFFF00` is a directory, a clear top bit
+is a binary file, anything else is a resource.
+
+**Unknown encryption values are NG, not errors.** `RpfEncryption` has four named
+values and the reference's `default:` case decrypts as NG anyway, with the
+comment "never seems to get here". Ported as-is.
+
+**`GetSizeFromFlags` overflows, and that is load-bearing as a test.** Its mixed
+`int`/`uint` arithmetic widens to `long` and casts back to `int`, so saturated
+flag words come out negative — the reference returns `-1627389952` for
+`0x0FEFFFFF`. Computing in `u64` and truncating reproduces the same 32 bits.
+Pinned, because any misplaced shift in the nine page-count fields would land
+somewhere else entirely.
+
+**Oversized resources.** A resource whose 24-bit length field reads `0xFFFFFF`
+is really `>= 0xFFFFFF`; the true length is unpacked from bytes 7, 14, 5 and 2 of
+its own payload header, in that order. Verified against the reference on a real
+file: `b2a.ytd` is 20921589 bytes. RPFTool does **not** implement this and
+reports the raw sentinel, so it is the one place the two oracles disagree and
+the C# reference arbitrates.
+
+**A nested archive is one thing seen from two sides.** The `.rpf` binary entry in
+the parent and the root directory of the archive it opens share a path. The index
+keeps the parent's entry, because that is the one that can be extracted as a
+file; listing it steps through into the archive transparently.
 
 ## Meta types
 
@@ -117,11 +148,20 @@ approximation used. Unlit flat materials are not an acceptable default.
 ## Open questions
 
 - `RpfResourceFileEntry.IsEncrypted` is set from `name.EndsWith(".ysc")` with the
-  reference's own comment "any other way to know..?". Carry the same rule and the
-  same doubt into the RPF port.
+  reference's own comment "any other way to know..?". Carried across with the
+  same doubt: there is no flag for it in the entry, so a differently named
+  encrypted script would be missed here exactly as it is there.
 - NG *encryption* (writing archives back) needs `RandomGauss.Solve` and
   `LookUpTableGenerator.BuildLUTs2`. Not required for reading; deferred until
   archive writing is in scope.
+- `ExtractFileResource` mutates `entry.FileSize -= 0x10` on the path where
+  inflation fails and the raw bytes are returned, which changes what a second
+  extraction of the same entry reads. Not carried across — it looks like a bug
+  rather than a format rule. Marked `TODO(port):` in `rpf/file.rs`.
+- The reference's directory-tree walk has no revisit guard, so an archive whose
+  directory points at an ancestor loops forever. This port keeps the same stack
+  walk but refuses to enter a directory twice. No real archive needs this; it
+  matters because the tool opens files it did not create.
 
 Anything marked `TODO(port):` in the Rust source belongs here with the file it
 came from.

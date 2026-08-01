@@ -1,0 +1,35 @@
+{
+  "$comment": [
+    "What fixtures/ should contain. The files themselves are gitignored: they are",
+    "derived from a retail GTA V install and from third-party archives, and are not",
+    "redistributable. This manifest is tracked so the set stays reproducible.",
+    "",
+    "Every gate that uses one of these skips with a message when it is missing,",
+    "rather than failing. Regenerate with the command listed against each entry."
+  ],
+  "fixtures": [
+    {
+      "path": "rpf_oracle.json",
+      "generate": "pwsh -File scripts/rpf-oracle.ps1",
+      "oracle": "CodeWalker.Core.dll, loaded into Windows PowerShell 5.1",
+      "usedBy": "crates/cw-core/tests/rpf_gate.rs::matches_the_reference_entry_by_entry",
+      "describes": [
+        "Per-entry path, kind, offset and size for x64a.rpf and common.rpf,",
+        "plus a SHA-256 of each extracted payload. 2077 entries, 2002 payloads."
+      ],
+      "requires": "A GTA V Legacy install and a built CodeWalker at E:\\Ad Astra Tools\\CodeWalker."
+    },
+    {
+      "path": "rpftool/index.json + rpftool/<name>.json",
+      "generate": "bash scripts/rpftool-oracle.sh",
+      "oracle": "RPFTool, a prior independent TypeScript reader",
+      "usedBy": "crates/cw-core/tests/rpf_gate.rs::matches_rpftool_on_open_archives",
+      "describes": [
+        "Path, kind and size for the 7 OPEN-encrypted archives RPFTool ships as",
+        "fixtures. Every retail archive is NG-encrypted, so without these the OPEN",
+        "branch is never exercised against a second implementation."
+      ],
+      "requires": "The RPFTool checkout at E:\\Ad Astra Tools\\RPFTool, with its incoming/ fixtures."
+    }
+  ]
+}
