@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/cw-core", "src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/adastra-org/AstraMapper"
+
+[workspace.dependencies]
+# Binary format parsing. Every GTA V struct is little-endian and packed.
+binrw = "0.15"
+# Replaces SharpDX.Mathematics. f32 throughout, never widened in serialized layouts.
+glam = "0.33"
+# GTA5Keys locates the AES/NG keys inside GTA5.exe by SHA-1 hash search.
+sha1 = "0.11"
+# RPF binary entries and RSC7 resource payloads are raw deflate.
+flate2 = "1.1"
+thiserror = "2.0"
+rayon = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+# Parsing 120 GB of archives is unusable at opt-level 0. Keep our own code
+# debuggable but build dependencies optimized.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

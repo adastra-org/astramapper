@@ -1,0 +1,19 @@
+[package]
+name = "cw-core"
+description = "GTA V binary format parsers, RPF archive reader and world models. Port of CodeWalker.Core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# This crate must never depend on tauri. It stays plain-`cargo test`-able and
+# reusable from a CLI or another frontend.
+[dependencies]
+binrw.workspace = true
+glam.workspace = true
+sha1.workspace = true
+flate2.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
