@@ -9,6 +9,7 @@
 //! All game structs are little-endian, packed, and use `f32` — never widen a
 //! serialized field to `f64`.
 
+pub mod audio;
 pub mod filetype;
 pub mod mesh;
 pub mod resources;
