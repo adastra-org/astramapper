@@ -26,6 +26,7 @@ export type FileKind =
   | "audio"
   | "audioMetadata"
   | "script"
+  | "gxt2"
   | "text"
   | "data"
   | "unknown";
@@ -39,7 +40,8 @@ export type ViewerId =
   | "audio"
   | "texture"
   | "clip"
-  | "meta";
+  | "meta"
+  | "gxt2";
 
 export type ResourceInfo = {
   readonly systemSize: number;
@@ -224,6 +226,17 @@ export type ClipPreview = {
   readonly animations: readonly AnimationEntry[];
 };
 
+/** One entry of a `.gxt2` text table. */
+export type Gxt2Entry = {
+  readonly hash: number;
+  readonly text: string;
+};
+
+export type Gxt2Preview = {
+  readonly path: string;
+  readonly entries: readonly Gxt2Entry[];
+};
+
 /** One named value in a metadata file, and its children. */
 export type MetaNode = {
   readonly name: string;
@@ -302,6 +315,11 @@ export function readBounds(): Promise<BoundsPreview> {
 /** List the clips and animations in the open `.ycd`. */
 export function readClips(): Promise<ClipPreview> {
   return invoke<ClipPreview>("read_clips");
+}
+
+/** Read the hash → text table the open `.gxt2` holds. */
+export function readGxt2(): Promise<Gxt2Preview> {
+  return invoke<Gxt2Preview>("read_gxt2");
 }
 
 /** Walk the open `.ymt` into a tree of named values. */

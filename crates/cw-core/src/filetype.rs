@@ -47,6 +47,8 @@ pub enum FileKind {
     AudioMetadata,
     /// Compiled script: `.ysc`.
     Script,
+    /// A GXT2 text table: `.gxt2`.
+    Gxt2,
     /// Text, or something conventionally stored as text: `.xml`, `.meta`,
     /// `.txt`, `.ini`, `.sps`, `.nametable`.
     Text,
@@ -91,11 +93,12 @@ impl FileKind {
             "awc" => Audio,
             "rel" | "oac" => AudioMetadata,
             "ysc" => Script,
+            "gxt2" => Gxt2,
 
             "xml" | "meta" | "txt" | "ini" | "cfg" | "sps" | "nametable" | "log" | "csv"
             | "shop" | "list" | "html" | "json" | "lua" | "js" | "vsh" | "fsh" => Text,
 
-            "dat" | "gfx" | "fxc" | "gxt2" | "cut" | "bik" | "wav" | "asi" | "dll" | "exe"
+            "dat" | "gfx" | "fxc" | "cut" | "bik" | "wav" | "asi" | "dll" | "exe"
             | "bin" | "cache" | "zip" | "oiv" => Data,
 
             _ => Unknown,
@@ -121,6 +124,7 @@ impl FileKind {
             Audio => "audio container",
             AudioMetadata => "audio metadata",
             Script => "script",
+            Gxt2 => "text table",
             Text => "text",
             Data => "data",
             Unknown => "unknown",
@@ -165,6 +169,12 @@ impl FileKind {
     /// `.ytyp` that share its encodings.
     pub fn has_metadata(self) -> bool {
         matches!(self, FileKind::Meta)
+    }
+
+    /// Whether the file is a GXT2 text table. These name the game's UI strings
+    /// and open as a list of hash → text pairs, not as plain text.
+    pub fn has_gxt2(self) -> bool {
+        matches!(self, FileKind::Gxt2)
     }
 
     /// Whether the file is *expected* to be readable as text. A false here does

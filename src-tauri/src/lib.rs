@@ -50,6 +50,7 @@ pub fn run() {
             explorer::game_is_open,
             viewer::open_entry,
             viewer::read_text,
+            viewer::read_gxt2,
             viewer::read_hex,
             viewer::read_model,
             viewer::read_bounds,

@@ -405,12 +405,33 @@ All **todo** as files, though `YdrFile.cs` and `YddFile.cs` are covered by
 `resources::read_named_drawables`, `YftFile.cs` by `resources::read_fragments`,
 `YtdFile.cs` by `resources::read_textures`, `YcdFile.cs` by
 `resources::read_clips`, `YmtFile.cs` by `meta::read_meta`, `YbnFile.cs` by
-`resources::read_bounds`, and
+`resources::read_bounds`, `Gxt2File.cs` by `gxt2::Gxt2File`, and
 `AwcFile.cs` by `audio::AwcFile`.
 Planned order: `YtypFile`, `YmapFile`, `YndFile`,
-`Gxt2File`, then the rest. `YtypFile` and `YmapFile` are metadata containers, so
+then the rest. `YtypFile` and `YmapFile` are metadata containers, so
 they already open in the Explorer as trees; what is left is the typed model
 above the tree.
+
+### Notes on GXT2
+
+**GXT2 is the first file type to round-trip, so it is `done`.** Unlike the
+resource formats, the reference has a full `Save`, and `gxt2::Gxt2File::write`
+mirrors it: the entry offsets are filled as the strings are laid out after the
+second `GXT2` header, so parse → serialize with no edits reproduces the input
+byte for byte. Every one of the 19,477 `.gxt2` in the install round-trips, and
+the sampled entries agree with the reference hash for hash, text for text.
+
+**The reference's early returns are errors here.** `Gxt2File.Load` returns
+leaving the fields defaulted when either `GXT2` magic is missing, so a wrong
+file quietly reads as empty. This port refuses instead, because a file the
+extension calls GXT2 that does not start with `GXT2` is not a GXT2 file and a
+viewer that shows nothing would look like a bug.
+
+**Offsets are absolute within the payload.** The entry table's `Offset` field
+points at the string's NUL-terminated bytes directly; the second `GXT2` magic
+and the `end` length after it are checked but the strings are not relative to
+them. Entries are stored in the file's own order and only `FromText` sorts
+them, by hash.
 
 `AwcFile` · `Builders` · `CacheDatFile` · `CarColsFile` · `CarModColsFile` ·
 `CarVariationsFile` · `CutFile` · `DistantLightsFile` · `DlcContentFile` ·

@@ -31,10 +31,12 @@ archives, view and extract what is inside them, and render and edit the world in
     checkerboard, export as `.dds` or `.png`.
   - **Audio** for `.awc` — every stream listed, decoded on demand, played or
     saved as WAV.
+  - **Strings** for `.gxt2` — every hash → text pair listed, filterable, with
+    the hash shown. GXT2 is the first file type that round-trips byte for byte.
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 175 unit tests, 30 install-dependent gate tests, 27 frontend tests. Format
+- 182 unit tests, 32 install-dependent gate tests, 27 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -48,6 +50,8 @@ archives, view and extract what is inside them, and render and edit the world in
              flattened one for one; 15,139 .ybn files parse, 104.6M triangles
   fragments  228 drawables across the physics LOD tree identical; 61,430 .yft
              files parse, 223,359 embedded drawables, 459,734 geometries
+  gxt2       283 entries identical, and all 19,477 .gxt2 files round-trip
+             byte for byte (8.8M strings)
   ```
 
 **Not yet**

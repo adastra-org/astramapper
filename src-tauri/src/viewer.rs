@@ -404,6 +404,19 @@ fn choose_viewer(
         }
     }
 
+    if kind.has_gxt2() {
+        return match cw_core::gxt2::Gxt2File::read(data) {
+            Ok(_gxt2) => {
+                viewers.insert(0, "gxt2");
+                ("gxt2", viewers, None)
+            }
+            Err(e) => {
+                let note = format!("could not read the text table: {e}");
+                (viewers[0], viewers.clone(), Some(note))
+            }
+        };
+    }
+
     let note = match kind {
         FileKind::Particle if !readable_as_text => {
             Some("particle dictionaries embed drawables, but Particle.cs is not ported yet".into())
@@ -428,6 +441,41 @@ pub fn read_text(viewer: State<'_, ViewerState>) -> Result<TextFile, String> {
     let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
     let open = guard.as_ref().ok_or("no file is open")?;
     Ok(text::decode(&open.data))
+}
+
+/// One entry of a `.gxt2` text table.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Gxt2Entry {
+    pub hash: u32,
+    pub text: String,
+}
+
+/// The text table an open `.gxt2` holds.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Gxt2Preview {
+    pub path: String,
+    pub entries: Vec<Gxt2Entry>,
+}
+
+/// Read the `.gxt2` text table the open file holds.
+#[tauri::command]
+pub fn read_gxt2(viewer: State<'_, ViewerState>) -> Result<Gxt2Preview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    let file = cw_core::gxt2::Gxt2File::read(&open.data)
+        .map_err(|e| format!("could not read the text table: {e}"))?;
+
+    Ok(Gxt2Preview {
+        path: open.info.path.clone(),
+        entries: file
+            .entries
+            .into_iter()
+            .map(|e| Gxt2Entry { hash: e.hash, text: e.text })
+            .collect(),
+    })
 }
 
 /// One page of the open file's bytes.
@@ -1188,6 +1236,34 @@ mod tests {
         assert_eq!(viewer, "hex");
         assert!(!viewers.contains(&"model"));
         assert!(note.unwrap().contains("renderable"));
+    }
+
+    /// A `.gxt2` that parses opens the strings viewer.
+    #[test]
+    fn opens_the_strings_view_for_a_gxt2_table() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&1196971058u32.to_le_bytes()); // "GXT2"
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&0xABCD1234u32.to_le_bytes());
+        data.extend_from_slice(&24u32.to_le_bytes()); // offset of the text
+        data.extend_from_slice(&1196971058u32.to_le_bytes());
+        data.extend_from_slice(&30u32.to_le_bytes()); // end of the blob
+        data.extend_from_slice(b"hola\0");
+        let (viewer, viewers, note) = choose_viewer_for_test(FileKind::Gxt2, &data, None);
+        assert_eq!(viewer, "gxt2");
+        assert!(viewers.contains(&"gxt2"));
+        assert!(note.is_none());
+    }
+
+    /// A `.gxt2` whose first magic is missing is not a text table, and must say
+    /// so rather than opening an empty strings view.
+    #[test]
+    fn does_not_open_the_strings_view_for_bytes_without_the_magic() {
+        let junk = vec![0u8; 64];
+        let (viewer, viewers, note) = choose_viewer_for_test(FileKind::Gxt2, &junk, None);
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"gxt2"));
+        assert!(note.unwrap().contains("text table"));
     }
 
     /// A `.ytd` whose bytes hold no decodable texture must say so rather than

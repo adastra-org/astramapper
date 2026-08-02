@@ -11,6 +11,7 @@ import {
 import { formatBytes } from "../lib/format";
 import { AudioViewer } from "./viewers/AudioViewer";
 import { ClipViewer } from "./viewers/ClipViewer";
+import { Gxt2Viewer } from "./viewers/Gxt2Viewer";
 import { MetaViewer } from "./viewers/MetaViewer";
 import { HexViewer } from "./viewers/HexViewer";
 import { TextureViewer } from "./viewers/TextureViewer";
@@ -34,6 +35,7 @@ const VIEWER_LABELS: Record<ViewerId, string> = {
   meta: "Metadata",
   text: "Text",
   hex: "Hex",
+  gxt2: "Strings",
 };
 
 type Props = {
@@ -222,6 +224,8 @@ function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.E
       return <AudioViewer path={path} />;
     case "clip":
       return <ClipViewer path={path} />;
+    case "gxt2":
+      return <Gxt2Viewer path={path} />;
     case "meta":
       return <MetaViewer path={path} />;
     case "text":

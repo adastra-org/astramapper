@@ -18,7 +18,7 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **175 unit + 30 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **182 unit + 32 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -101,6 +101,10 @@ pwsh -File scripts/bounds-oracle.ps1
 
 ```bash
 pwsh -File scripts/frag-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/gxt2-oracle.ps1
 ```
 
 ---
@@ -455,7 +459,8 @@ entities).
 The rest of `resources/` (Particle, ShaderParams, Clothes,
 ResourceBaseTypes/Builder) — the shared building blocks. Then the remaining file
 types in dependency order: `YtypFile`, `YmapFile`, `YbnFile` (its `Bounds` now
-portable), `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
+portable), `YndFile`, `YmtFile`, then the rest. `Gxt2File` is done — see the
+Explorer viewer below.
 
 Per format: a round-trip byte-equality test on a real fixture **plus** a JSON
 `describe()` snapshot for the phase 2 viewers.
@@ -518,6 +523,9 @@ the payload:
   a container runs to hundreds of them — then played as WAV in an `<audio>`
   element, or saved to disk. ADPCM is decoded in Rust; no browser plays
   Rockstar's framing.
+- **Strings** for `.gxt2`. Every hash → text pair is listed, filterable, with
+  the hash shown so a string can be matched against a script or a mod. The
+  format round-trips byte for byte, the first file type that does.
 - **Text** for anything that sniffs as text, whatever its extension — which is
   most `.meta`, `.xml`, `.ini` and a fair number of `.dat`. Editable, with the
   encoding preserved on save.
