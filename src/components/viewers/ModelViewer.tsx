@@ -36,6 +36,9 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
       .then((model) => {
         if (cancelled) return;
         setPreview(model);
+        // Open on something that draws. A dictionary's first entry is often a
+        // placeholder with no geometry, and landing on it looks like a failure.
+        setSelected(model.drawables.find((d) => d.bundle !== null)?.index ?? 0);
         setError(null);
       })
       .catch((cause: unknown) => {
@@ -46,12 +49,10 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
     };
   }, [path]);
 
-  const bundle = preview?.bundles[selected] ?? null;
-
   if (error) {
     return <p className="p-4 text-xs text-red-400">{error}</p>;
   }
-  if (!preview || !bundle) {
+  if (!preview) {
     return (
       <div className="flex flex-1 items-center justify-center">
         <Loader2 size={16} className="animate-spin text-ink-dim" />
@@ -59,22 +60,22 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
     );
   }
 
+  const drawable = preview.drawables[selected] ?? preview.drawables[0] ?? null;
+  const bundle = drawable?.bundle ?? null;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex h-8 shrink-0 items-center gap-3 border-b border-edge px-4 text-xs text-ink-dim">
-        {preview.bundles.length > 1 && (
+        {preview.drawables.length > 1 && (
           <select
             value={selected}
             onChange={(e) => setSelected(Number(e.target.value))}
             className="max-w-56 rounded bg-surface-2 px-1.5 py-0.5 text-xs text-ink outline-none"
           >
-            {preview.bundles.map((b, i) => (
-              // The index is the identity here, not a stand-in for one: a
-              // dictionary addresses its drawables by position, several can
-              // share a name, and `value` is the index itself.
-              // oxlint-disable-next-line react/no-array-index-key
-              <option key={i} value={i}>
-                {b.name ?? `drawable ${i}`}
+            {preview.drawables.map((d) => (
+              <option key={d.index} value={d.index}>
+                {d.name || `drawable ${d.index}`}
+                {d.bundle === null ? " (empty)" : ""}
               </option>
             ))}
           </select>
@@ -91,31 +92,43 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
           Wireframe
         </button>
 
-        <span className="flex items-center gap-1.5">
-          <Box size={13} strokeWidth={1.75} />
-          {bundle.parts.length} {bundle.parts.length === 1 ? "part" : "parts"},{" "}
-          {bundle.triangleCount.toLocaleString()} triangles,{" "}
-          {bundle.vertexCount.toLocaleString()} vertices
-        </span>
+        {bundle && (
+          <>
+            <span className="flex items-center gap-1.5">
+              <Box size={13} strokeWidth={1.75} />
+              {bundle.parts.length} {bundle.parts.length === 1 ? "part" : "parts"},{" "}
+              {bundle.triangleCount.toLocaleString()} triangles,{" "}
+              {bundle.vertexCount.toLocaleString()} vertices
+            </span>
 
-        <span>LOD {bundle.lod}</span>
-        {bundle.availableLods.length > 1 && (
-          <span>({bundle.availableLods.join(", ")} available)</span>
+            <span>LOD {bundle.lod}</span>
+            {bundle.availableLods.length > 1 && (
+              <span>({bundle.availableLods.join(", ")} available)</span>
+            )}
+          </>
         )}
         {preview.emptyDrawables > 0 && (
           <span>{preview.emptyDrawables} without geometry</span>
         )}
       </div>
 
-      <Canvas bundle={bundle} wireframe={wireframe} />
+      {bundle ? (
+        <Canvas bundle={bundle} wireframe={wireframe} />
+      ) : (
+        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-dim">
+          {drawable?.name || "This drawable"} holds no renderable geometry.
+        </div>
+      )}
 
-      <div className="shrink-0 overflow-x-auto border-t border-edge px-4 py-1.5 text-xs text-ink-dim">
-        <span className="font-mono">
-          {bundle.parts
-            .map((p) => `${p.name} ${formatHash(p.shader)}`)
-            .join("   ")}
-        </span>
-      </div>
+      {bundle && (
+        <div className="shrink-0 overflow-x-auto border-t border-edge px-4 py-1.5 text-xs text-ink-dim">
+          <span className="font-mono">
+            {bundle.parts
+              .map((p) => `${p.name} ${formatHash(p.shader)}`)
+              .join("   ")}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

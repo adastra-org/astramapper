@@ -14,11 +14,11 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF and the drawable, texture and audio slices of 1.4 done, all gates cleared |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio and clip slices of 1.4 done, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **136 unit + 21 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **167 unit + 25 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -85,6 +85,14 @@ pwsh -File scripts/awc-oracle.ps1
 
 ```bash
 pwsh -File scripts/texture-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/clip-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/meta-oracle.ps1
 ```
 
 ---
@@ -289,11 +297,74 @@ Not ported: writing, encoding, big-endian console files, the `peak`/`markers`/
 `seektable`/granular chunks, and `RelFile.cs` — so streams are identified by
 hash, with no names and no `_left`/`_right` pairing.
 
-### 1.3 MetaTypes
+### 1.4d Resources — clips — **DONE, gate cleared**
 
-`meta/` ← `MetaTypes/`. `PsoTypes.cs` (1.5 MB) and `MetaNames.cs` (870 KB) are
-generated tables — write a script that reads the `.cs` and emits Rust. Do not
-hand-port them.
+A `.ycd` is self-contained like the three before it, and it is what `YddFile`
+and the scenario metadata point at.
+
+Files: `crates/cw-core/src/resources/clip.rs`, gate at
+`crates/cw-core/tests/clip_gate.rs`, oracle at `scripts/clip-oracle.ps1`.
+
+Proven against the real install:
+
+```
+24 dictionaries, 180 clips and 117 animations agree with CodeWalker
+24,840 dictionaries, 315,964 clips, 250,205 animations resolve across the
+  whole install
+```
+
+**Two things worth knowing before touching this code:**
+
+1. **The map entry names the animation, not the block.** An animation block has
+   no hash of its own; the hash table entry pointing at it does, and a clip
+   points straight at the block. The reference gets the link from a position
+   cache inside `ReadBlockAt`; this reads the animation map first and keys the
+   animations on their block address.
+2. **The tag count is the second `u16` of `ClipPropertyMap`.** The first is the
+   bucket capacity and is larger.
+
+Not ported: the animation channel codecs, the tags and the properties, so there
+is no playback and will not be until the skeleton lands too. Four destruction
+`.ycd` do not read, for the same truncated-payload reason as the six `.ytd`.
+
+### 1.3 MetaTypes — **DONE, gate cleared**
+
+`meta/` ← `MetaTypes/`. All three container encodings and the walk that turns any
+of them into named values.
+
+Files: `crates/cw-core/src/meta/{mod,rsc,pso,rbf,tree}.rs` and
+`crates/cw-core/src/utils/names.rs`, gate at
+`crates/cw-core/tests/meta_gate.rs`, oracles at `scripts/meta-oracle.ps1` and
+`scripts/metanames.ps1`.
+
+Proven against the real install:
+
+```
+50 files across all three encodings and 30 root structures, 90,895 leaves
+  agree with CodeWalker value for value
+4,713 .ymt files, 14,217,919 nodes walk across the whole install
+  (2,190 PSO, 2,326 RSC, 197 RBF, 42 distinct root structures)
+```
+
+**Four things worth knowing before touching this code:**
+
+1. **`MetaTypes.SwapBytes(ulong)` swaps within each 32-bit half only**, under
+   the reference's own `[not swapping 32bit blocks! careful!]`. Every PSO
+   pointer goes through it, so getting it wrong sends every array to block 0.
+2. **The files carry their own schema.** That is why `PsoTypes.cs` (1.5 MB) is
+   not ported: only four nodes in two `.ymt` in the whole install need its
+   fallback definitions. `MetaNames.cs` (870 KB) *is* needed, and is generated
+   into `assets/metanames.bin` by `scripts/metanames.ps1` rather than
+   hand-written.
+3. **Floats follow `FloatUtil.ToString`**: seven significant digits if they read
+   back, nine otherwise, with ties rounded away from zero. Rust's shortest
+   round-trip prints eight and the reference never tries eight.
+4. **Strings are decoded as UTF-8 here and as ASCII there.** The one deliberate
+   divergence in the layer; see `formats.md`.
+
+Not ported: writing (`MetaBuilder`, `PsoBuilder`), and the typed models above
+the tree (`YmapFile`, `YtypFile` and friends still open as trees, not as
+entities).
 
 ### 1.4 Resources, then FileTypes
 
@@ -336,7 +407,8 @@ install browses as one tree — nested archives included, with no visible seam a
 an `.rpf` boundary. Gate at `src-tauri/tests/explorer_gate.rs`.
 
 **Viewing.** `src-tauri/src/viewer.rs` (`open_entry`, `read_text`, `read_hex`,
-`read_model`, `read_texture`, `extract_to`, `save_text`), `src/lib/viewer.ts`,
+`read_model`, `read_texture`, `read_clips`, `read_meta`, `extract_to`,
+`save_text`), `src/lib/viewer.ts`,
 `src/components/FileViewer.tsx` and `src/components/viewers/`. One file is open
 at a time and its extracted payload is held on the Rust side, so paging a 20 MB
 file does not re-decrypt and re-inflate it per scroll.

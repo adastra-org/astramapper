@@ -20,6 +20,7 @@ import {
   type Listing,
 } from "../lib/explorer";
 import { formatBytes } from "../lib/format";
+import { getLastGameFolder, setLastGameFolder } from "../lib/settings";
 import { FileViewer } from "./FileViewer";
 
 const ICONS: Record<EntryKind, typeof Folder> = {
@@ -72,21 +73,7 @@ export function Explorer(): React.JSX.Element {
     [navigate],
   );
 
-  // A folder opened earlier in this session survives a remount of this panel,
-  // since the scan lives in Rust state rather than here.
-  useEffect(() => {
-    gameIsOpen()
-      .then((isOpen) => (isOpen ? navigate("") : undefined))
-      .catch((cause: unknown) => setError(String(cause)));
-  }, [navigate]);
-
-  const pick = useCallback(async () => {
-    const folder = await openDialog({
-      directory: true,
-      title: "Select the GTA V folder",
-    });
-    if (typeof folder !== "string") return;
-
+  const openFolder = useCallback(async (folder: string) => {
     setBusy(true);
     setError(null);
     setSelected(null);
@@ -94,12 +81,36 @@ export function Explorer(): React.JSX.Element {
       setSummary(await openGameFolder(folder));
       setRows(await listDir(""));
       setPath("");
+      await setLastGameFolder(folder);
     } catch (cause) {
       setError(String(cause));
     } finally {
       setBusy(false);
     }
   }, []);
+
+  // A folder opened earlier in this session survives a remount of this panel,
+  // since the scan lives in Rust state rather than here. Across app restarts
+  // there is no Rust state to recover, so fall back to the last folder saved
+  // to disk and rescan it.
+  useEffect(() => {
+    gameIsOpen()
+      .then(async (isOpen) => {
+        if (isOpen) return navigate("");
+        const last = await getLastGameFolder();
+        if (last) await openFolder(last);
+      })
+      .catch((cause: unknown) => setError(String(cause)));
+  }, [navigate, openFolder]);
+
+  const pick = useCallback(async () => {
+    const folder = await openDialog({
+      directory: true,
+      title: "Select the GTA V folder",
+    });
+    if (typeof folder !== "string") return;
+    await openFolder(folder);
+  }, [openFolder]);
 
   const crumbs = breadcrumb(path);
 

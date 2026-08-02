@@ -21,6 +21,7 @@ files back.
 | `utils/crypto.rs` | `Utils/GTACrypto.cs` | **done** | AES-256 ECB, NG decrypt, `GTA5Hash`. NG *encrypt* still todo. |
 | `image.rs` | `Utils/DDSIO.cs` | **partial** | `GetPixels` and `GetDDSFile`. BC1–BC7 decode via `bcdec_rs`; DDS bytes byte-identical. Reading a `.dds` back in, and the D3DX legacy-format conversions, are not ported. |
 | math | SharpDX.Mathematics | todo | `glam` aliases. `f32` only in serialized layouts. |
+| `utils/names.rs` | `MetaTypes/MetaNames.cs` (870 KB) | **done** | The 20292-name hash table, generated into `assets/metanames.bin` by `scripts/metanames.ps1` and binary-searched. Not hand-written. |
 | `text.rs` | — | n/a | Not a port. Encoding sniffing for the Explorer's text viewer. |
 | `filetype.rs` | `GameFileType` + `GameFileCache.cs` switches | n/a | Extension-to-family table, collected rather than ported. |
 | `mesh.rs` | `CodeWalker/Rendering` buffer upload | n/a | Not a port. Flattens a `Drawable` into buffers for the WebView. |
@@ -100,10 +101,53 @@ file; listing it steps through into the archive transparently.
 
 | Unit | C# reference | Status | Notes |
 | --- | --- | --- | --- |
-| `meta/` | `MetaTypes/Meta.cs`, `MetaTypes.cs`, `MetaXml.cs` | todo | |
-| `meta/pso.rs` | `Pso.cs`, `PsoTypes.cs` (1.5 MB) | todo | Generated table — emit Rust from the `.cs` with a script, do not hand-port. |
-| `meta/names.rs` | `MetaNames.cs` (870 KB) | todo | Same: generated. |
-| `meta/rbf.rs` | `Rbf.cs` | todo | |
+| `meta/mod.rs` | `YmtFile.Load` | **partial** | Picks the container: resource ⇒ RSC, else `RBF0`, else `PSIN`. Reads only. |
+| `meta/rsc.rs` | `Meta.cs`, `MetaTypes.cs` | **partial** | Structure, enum and block tables, packed pointers. The `MetaBuilder` half is not ported. |
+| `meta/pso.rs` | `Pso.cs` | **partial** | Section loop, data map, schema (structures and enums), string tables. Big-endian, as PC stores it. |
+| `meta/rbf.rs` | `Rbf.cs` | **partial** | The token stream, descriptor interning, attribute counts. Writer not ported. |
+| `meta/tree.rs` | `MetaXml.cs` (`MetaXml`, `PsoXml`, `RbfXml`) | **partial** | Walks any of the three into a tree of named values, resolved against the schema the file carries. Values are formatted as the reference formats them. |
+| `PsoTypes.cs` (1.5 MB) | — | not ported | The fallback definitions for structures a PSO file does not declare. Four nodes in two `.ymt` in the install need it; everything else is self-describing. |
+
+### Notes on the metadata layer
+
+**Three encodings, one shape.** A `.ymt` is RSC, PSO or RBF, and which one is
+not a property of the bytes alone: RSC is decided by the *archive entry* being a
+resource, and only then do the magic numbers get a look. All three carry their
+own schema, which is why 4713 files walk without a table of type definitions.
+
+**`MetaTypes.SwapBytes(ulong)` is not a byte swap.** It swaps the bytes within
+each 32-bit half and leaves the halves where they are, under the reference's own
+comment `[not swapping 32bit blocks! careful!]`. Every PSO pointer goes through
+it. Reading it as `u64::swap_bytes` makes every array in every PSO file resolve
+to block 0, which looks like a broken block table rather than a broken swap.
+
+**Floats are printed the way `FloatUtil.ToString` prints them**: seven
+significant digits if that reads back as the same `f32`, nine otherwise. That is
+not Rust's shortest round trip — `1086.60546875` is `1086.6055` at eight digits,
+which the reference never tries, so it writes `1086.60547`. Ties round away from
+zero, which is .NET's rule and not Rust's, so the rounding is done here rather
+than by the formatter.
+
+**Strings decode as UTF-8, and the reference decodes them as ASCII.** A byte
+above `0x7F` becomes `?` in CodeWalker; here it becomes the character it stands
+for, so `credits.ymt` reads `Łukasz Bogaj` rather than `??ukasz Bogaj`. This is
+the one deliberate divergence in the layer; `meta_gate.rs` collapses non-ASCII
+runs on both sides so every ASCII character is still compared exactly.
+
+**An array of an undefined type is empty, not an error.** The reference resolves
+an array's element structure only inside `if (count > 0)`, so a zero-length
+array of a type the file never declares is a self-closing tag. Porting the
+resolution to the top of the branch turned 3028 nodes across 1877 files into
+errors that CodeWalker does not report.
+
+**Both signed and unsigned PSO int arrays print unsigned.** The reference reads
+either through `GetUintArray`, so a hash-like value in a signed array comes out
+as `3431763157` and not as `-863204139`.
+
+**The tree keeps what XML puts in attributes.** A map entry's key and an RBF
+element's attributes are attributes in the reference's output and children here,
+because a tree has nowhere else to put them. `meta_gate.rs` flattens both sides
+by the oracle's own rule so the comparison stays about what was read.
 
 ## Resources
 
@@ -113,8 +157,9 @@ file; listing it steps through into the archive transparently.
 | `resources/vertex.rs` | `VertexType.cs`, `VertexDeclaration` | **partial** | Declaration decode and component extraction. Gen9 declarations not ported. |
 | `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes. Reads, does not write. |
 | `resources/texture.rs` | `Texture.cs` (61 KB) | **partial** | `TextureDictionary`, `TextureBase`, `Texture`, `TextureData` and the mip pitch table. Legacy layout only — the Gen9 branch and `ShaderResourceViewG9` go with the Enhanced edition. Reads, does not write. |
+| `resources/clip.rs` | `Clip.cs` (164 KB) | **partial** | `ClipDictionary`, both hash maps, `Clip` (animation and animation-list) and `Animation` headers. The channel codecs, tags and properties are not read: tags and properties are counted. |
 
-`Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB), `Clip` (164 KB),
+`Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB),
 `Clothes` (111 KB), `ShaderParams`, `Expression`, `Nav`, `Node`,
 `Filter`, `VehicleRecord`, `WaypointRecord`, `ResourceBuilder`,
 `ResourceAnalyzer` — all **todo**.
@@ -217,6 +262,34 @@ catches that with the structural invariant — the name and texture lists are
 parallel, so counts that disagree are not a header — and refuses with the reason
 attached. The remaining 88,868 dictionaries and 335,729 textures parse.
 
+### Notes on clips
+
+**The clip map is what names an animation.** An animation block does not carry
+its own hash: the hash table entry that points at it does, and `Animation.Hash`
+is written by the reader from there. A clip points straight at the block. The
+reference gets the link for free from `ReadBlockAt`, which caches by position;
+this port reads the animation map first and keys the animations on their block
+address so a clip can find the one it plays.
+
+**Two shapes behind one 112-byte block.** `ClipType` 0 is a single animation with
+a rate and a time range; type 1 is a list of animations with weights. Both share
+the first `0x50` bytes, and the count of tags is the *second* `u16` of
+`ClipPropertyMap` — the first is the bucket capacity, which is larger.
+
+**Four `.ycd` do not read, in either implementation**: the destruction archives
+`des_bridge`, `des_setpiece`, `des_fib_ceiling2` and `des_hosp_ceil`, whose
+payloads are shorter than their page flags declare. The same six-file failure
+mode as the textures above, and the reference throws on them too. The remaining
+24840 dictionaries, 315964 clips and 250205 animations resolve.
+
+### Notes on drawable dictionaries
+
+**A `.ydd` names its drawables by hash, and the names are in the drawables.**
+`YddFile` builds its lookup from the dictionary's hash list, and the drawable's
+own `Name` field is only trusted when it hashes back to the entry it sits under.
+Where it does not, the entry shows as `hash_XXXXXXXX`, which is what the
+reference displays. A `.ydr` opens through the same path as a dictionary of one.
+
 ## Audio
 
 | Unit | C# reference | Status | Notes |
@@ -259,11 +332,14 @@ Verified over 132.7 million samples against `GetPcmData`.
 
 ## File types
 
-All 41 **todo** as files, though `YdrFile.cs`, `YddFile.cs`, `YtdFile.cs` and
-`AwcFile.cs` are covered by `resources::read_drawables`,
-`resources::read_textures` and `audio::AwcFile` respectively.
+All 41 **todo** as files, though `YdrFile.cs` and `YddFile.cs` are covered by
+`resources::read_named_drawables`, `YtdFile.cs` by `resources::read_textures`,
+`YcdFile.cs` by `resources::read_clips`, `YmtFile.cs` by `meta::read_meta`, and
+`AwcFile.cs` by `audio::AwcFile`.
 Planned order: `YtypFile`, `YmapFile`, `YbnFile`, `YftFile`, `YndFile`,
-`YmtFile`, `Gxt2File`, then the rest.
+`Gxt2File`, then the rest. `YtypFile` and `YmapFile` are metadata containers, so
+they already open in the Explorer as trees; what is left is the typed model
+above the tree.
 
 `AwcFile` · `Builders` · `CacheDatFile` · `CarColsFile` · `CarModColsFile` ·
 `CarVariationsFile` · `CutFile` · `DistantLightsFile` · `DlcContentFile` ·

@@ -33,7 +33,11 @@ pub enum FileKind {
     Bounds,
     /// Metadata in one of the RSC/PSO/RBF encodings: `.ymap`, `.ytyp`, `.ymt`.
     Meta,
-    /// Animation: `.ycd`, `.yed`, `.yfd`.
+    /// A dictionary of clips and animations: `.ycd`.
+    ClipDictionary,
+    /// The animation formats that are not a clip dictionary: `.yed`, `.yfd`,
+    /// `.yld`, `.ypdb`. Each is a dictionary of its own kind — expressions,
+    /// frame filters, cloth, pose matcher — behind a different reader.
     Clip,
     /// Paths and navigation: `.ynd`, `.ynv`.
     Nav,
@@ -80,7 +84,8 @@ impl FileKind {
 
             "ymap" | "ytyp" | "ymt" | "ymf" | "pso" => Meta,
 
-            "ycd" | "yed" | "yfd" | "yld" | "ypdb" => Clip,
+            "ycd" => ClipDictionary,
+            "yed" | "yfd" | "yld" | "ypdb" => Clip,
             "ynd" | "ynv" | "yvr" | "ywr" => Nav,
 
             "awc" => Audio,
@@ -110,6 +115,7 @@ impl FileKind {
             Image => "image",
             Bounds => "collision bounds",
             Meta => "metadata",
+            ClipDictionary => "clip dictionary",
             Clip => "animation",
             Nav => "navigation",
             Audio => "audio container",
@@ -139,6 +145,19 @@ impl FileKind {
     /// sequences the waves but holds none, and `RelFile.cs` is not ported.
     pub fn has_audio(self) -> bool {
         matches!(self, FileKind::Audio)
+    }
+
+    /// Whether clips and animations can be listed out of this. Only `.ycd`:
+    /// the sibling `.yed`, `.yfd`, `.yld` and `.ypdb` are dictionaries of other
+    /// things behind readers that are not ported.
+    pub fn has_clips(self) -> bool {
+        matches!(self, FileKind::ClipDictionary)
+    }
+
+    /// Whether the file is a metadata container: `.ymt`, and the `.ymap` and
+    /// `.ytyp` that share its encodings.
+    pub fn has_metadata(self) -> bool {
+        matches!(self, FileKind::Meta)
     }
 
     /// Whether the file is *expected* to be readable as text. A false here does
@@ -212,6 +231,8 @@ mod tests {
     /// dictionaries the resource layer walks past.
     #[test]
     fn only_the_texture_dictionary_claims_textures() {
+        assert!(FileKind::Meta.has_metadata());
+        assert!(!FileKind::Text.has_metadata());
         assert!(FileKind::Texture.has_textures());
         assert!(!FileKind::Image.has_textures());
         assert!(!FileKind::Model.has_textures());

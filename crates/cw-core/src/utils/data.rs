@@ -1,25 +1,52 @@
-//! Little-endian reader over an in-memory buffer.
+//! Reader over an in-memory buffer, little-endian by default.
 //!
 //! Port of the `DataReader` half of `CodeWalker.Core/GameFiles/Utils/Data.cs`.
 //!
-//! The C# version wraps a `Stream` and supports big-endian for console files.
-//! Everything AstraMapper targets is PC, which is little-endian throughout, so
-//! this reads LE only — a big-endian path would be dead code that silently
-//! invites a wrong call. It also borrows a slice rather than owning a stream:
-//! archive entries are already decrypted into memory before parsing, so there
-//! is nothing to stream.
+//! The C# version wraps a `Stream` and takes an `Endianess`. Everything on PC
+//! is little-endian *except* the PSO metadata container, which is big-endian
+//! on every platform — `PsoFile.Load` opens its reader with
+//! `Endianess.BigEndian` and reads a PC `.ymt` with it. So both are here, and
+//! the default stays LE so that a caller has to ask for the other one.
+//!
+//! It borrows a slice rather than owning a stream: archive entries are already
+//! decrypted into memory before parsing, so there is nothing to stream.
 
 use crate::{CwError, Result};
 
-/// A cursor over a byte buffer. All multi-byte reads are little-endian.
+/// Which way round a multi-byte read is. `Endianess` in the reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Endian {
+    Little,
+    Big,
+}
+
+/// A cursor over a byte buffer.
 pub struct DataReader<'a> {
     data: &'a [u8],
     pos: usize,
+    endian: Endian,
 }
 
 impl<'a> DataReader<'a> {
     pub fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+        Self {
+            data,
+            pos: 0,
+            endian: Endian::Little,
+        }
+    }
+
+    /// A reader for a big-endian payload. Only the PSO container needs this.
+    pub fn new_big_endian(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            endian: Endian::Big,
+        }
+    }
+
+    pub fn endian(&self) -> Endian {
+        self.endian
     }
 
     pub fn position(&self) -> usize {
@@ -80,7 +107,11 @@ impl<'a> DataReader<'a> {
 
     pub fn read_u16(&mut self) -> Result<u16> {
         let b = self.take(2)?;
-        Ok(u16::from_le_bytes([b[0], b[1]]))
+        let b = [b[0], b[1]];
+        Ok(match self.endian {
+            Endian::Little => u16::from_le_bytes(b),
+            Endian::Big => u16::from_be_bytes(b),
+        })
     }
 
     pub fn read_i16(&mut self) -> Result<i16> {
@@ -89,7 +120,11 @@ impl<'a> DataReader<'a> {
 
     pub fn read_u32(&mut self) -> Result<u32> {
         let b = self.take(4)?;
-        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        let b = [b[0], b[1], b[2], b[3]];
+        Ok(match self.endian {
+            Endian::Little => u32::from_le_bytes(b),
+            Endian::Big => u32::from_be_bytes(b),
+        })
     }
 
     pub fn read_i32(&mut self) -> Result<i32> {
@@ -98,9 +133,11 @@ impl<'a> DataReader<'a> {
 
     pub fn read_u64(&mut self) -> Result<u64> {
         let b = self.take(8)?;
-        Ok(u64::from_le_bytes([
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-        ]))
+        let b = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
+        Ok(match self.endian {
+            Endian::Little => u64::from_le_bytes(b),
+            Endian::Big => u64::from_be_bytes(b),
+        })
     }
 
     pub fn read_i64(&mut self) -> Result<i64> {

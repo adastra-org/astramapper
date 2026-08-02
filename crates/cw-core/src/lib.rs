@@ -13,6 +13,7 @@ pub mod audio;
 pub mod filetype;
 pub mod image;
 pub mod mesh;
+pub mod meta;
 pub mod resources;
 pub mod rpf;
 pub mod text;

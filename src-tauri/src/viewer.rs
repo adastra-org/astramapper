@@ -21,9 +21,14 @@ use cw_core::audio::AwcFile;
 use cw_core::filetype::FileKind;
 use cw_core::image;
 use cw_core::mesh::MeshBundle;
-use cw_core::resources::{read_drawables, read_textures, Drawable, Texture, TextureDictionary};
+use cw_core::meta::{read_meta as read_metadata, MetaNode};
+use cw_core::resources::{
+    read_clips as read_clip_dictionary, read_drawables, read_named_drawables, read_textures,
+    Drawable, Texture, TextureDictionary,
+};
 use cw_core::rpf::EntryKind;
 use cw_core::text::{self, Encoding, TextFile};
+use cw_core::utils::hash_string;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -92,14 +97,27 @@ pub struct HexPage {
     pub total: usize,
 }
 
+/// One drawable in an open `.ydr` or `.ydd`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDrawable {
+    /// Position in the dictionary, and the handle the UI selects by.
+    pub index: usize,
+    /// The name from the dictionary's hash list, or `hash_XXXXXXXX`.
+    pub name: String,
+    pub hash: u32,
+    /// Absent when this drawable holds nothing renderable, which is normal in
+    /// a dictionary: it is still listed, so the count is never silently wrong.
+    pub bundle: Option<MeshBundle>,
+}
+
 /// Everything drawable in one file.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPreview {
     pub path: String,
-    pub bundles: Vec<MeshBundle>,
-    /// Drawables the file holds that produced no geometry — normal in a
-    /// dictionary, and worth showing so the count is not silently wrong.
+    pub drawables: Vec<ModelDrawable>,
+    /// How many of `drawables` produced no geometry.
     pub empty_drawables: usize,
 }
 
@@ -205,6 +223,56 @@ fn choose_viewer(
         };
     }
 
+    if kind.has_clips() {
+        match resource {
+            Some(resource) => match read_clip_dictionary(kind, data, resource.system_size) {
+                Ok(dictionary) if dictionary.has_content() => {
+                    viewers.insert(0, "clip");
+                    return ("clip", viewers, None);
+                }
+                Ok(_) => {
+                    return (
+                        viewers[0],
+                        viewers.clone(),
+                        Some("this dictionary holds no clips or animations".into()),
+                    )
+                }
+                Err(e) => {
+                    let note = format!("could not read the clips: {e}");
+                    return (viewers[0], viewers.clone(), Some(note));
+                }
+            },
+            None => {
+                return (
+                    viewers[0],
+                    viewers.clone(),
+                    Some("a clip dictionary stored as a binary entry, not a resource".into()),
+                )
+            }
+        }
+    }
+
+    if kind.has_metadata() {
+        let system_size = resource.map(|r| r.system_size);
+        match read_metadata(kind, data, system_size) {
+            Ok(meta) if meta.has_content() => {
+                viewers.insert(0, "meta");
+                return ("meta", viewers, None);
+            }
+            Ok(_) => {
+                return (
+                    viewers[0],
+                    viewers.clone(),
+                    Some("this metadata file holds no structures".into()),
+                )
+            }
+            Err(e) => {
+                let note = format!("could not read the metadata: {e}");
+                return (viewers[0], viewers.clone(), Some(note));
+            }
+        }
+    }
+
     if kind.has_textures() {
         match resource {
             Some(resource) => match read_textures(kind, data, resource.system_size) {
@@ -277,7 +345,9 @@ fn choose_viewer(
         FileKind::AudioMetadata if !readable_as_text => {
             Some("RelFile.cs, which names and sequences the waves in the .awc files, is not ported yet".into())
         }
-        FileKind::Meta | FileKind::Clip | FileKind::Nav | FileKind::Bounds if !readable_as_text => {
+        FileKind::Clip | FileKind::Nav | FileKind::Bounds if !readable_as_text => {
+            // `.yed`, `.yfd`, `.yld` and `.ypdb` land here: they are animation
+            // files but not clip dictionaries, and each needs its own reader.
             Some(format!("no {} parser yet, so this opens as bytes", kind.label()))
         }
         _ => None,
@@ -329,25 +399,33 @@ pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String
         .as_ref()
         .ok_or("this file is not a resource, so it has no geometry")?;
 
-    let drawables = read_drawables(open.info.file_kind, &open.data, resource.system_size)
+    let named = read_named_drawables(open.info.file_kind, &open.data, resource.system_size)
         .map_err(|e| format!("could not read the geometry: {e}"))?;
 
-    let mut bundles = Vec::new();
     let mut empty_drawables = 0;
-    for drawable in &drawables {
-        match MeshBundle::best(drawable) {
-            Some(bundle) => bundles.push(bundle),
-            None => empty_drawables += 1,
-        }
-    }
+    let drawables: Vec<ModelDrawable> = named
+        .into_iter()
+        .map(|entry| {
+            let bundle = MeshBundle::best(&entry.drawable);
+            if bundle.is_none() {
+                empty_drawables += 1;
+            }
+            ModelDrawable {
+                index: entry.index,
+                name: entry.name,
+                hash: entry.hash,
+                bundle,
+            }
+        })
+        .collect();
 
-    if bundles.is_empty() {
+    if drawables.iter().all(|d| d.bundle.is_none()) {
         return Err("this file holds no renderable geometry".into());
     }
 
     Ok(ModelPreview {
         path: open.info.path.clone(),
-        bundles,
+        drawables,
         empty_drawables,
     })
 }
@@ -521,6 +599,158 @@ pub fn save_texture(
 
     write_file(&destination, &bytes)?;
     Ok(bytes.len())
+}
+
+/// One clip in an open `.ycd`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipEntry {
+    /// Position in the listing.
+    pub index: usize,
+    /// The clip's short name, or `hash_XXXXXXXX` when it carries no path.
+    pub name: String,
+    /// The full authoring path the clip was built from, when it has one.
+    pub path: Option<String>,
+    /// The hash the game looks this clip up by.
+    pub hash: u32,
+    /// `animation` or `animation list`.
+    pub kind: &'static str,
+    pub duration: f32,
+    pub rate: f32,
+    pub start_time: f32,
+    pub end_time: f32,
+    /// Hashes of the animations this clip plays, resolvable in `animations`.
+    pub animations: Vec<u32>,
+    /// Tags and properties are counted, not read: `ClipTag` and
+    /// `ClipProperty` are not ported. See `docs/formats.md`.
+    pub tag_count: usize,
+    pub property_count: usize,
+}
+
+/// One animation in an open `.ycd`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnimationEntry {
+    pub index: usize,
+    pub hash: u32,
+    /// `hash_XXXXXXXX` unless the name happens to be in the reference's table.
+    pub name: String,
+    pub frames: u16,
+    pub duration: f32,
+    /// Frames divided by duration, as the file's own numbers give it.
+    pub frame_rate: f32,
+    pub sequences: usize,
+    /// One per animated bone track.
+    pub bone_tracks: usize,
+    /// How many clips the file says reference this animation.
+    pub usage_count: u32,
+}
+
+/// What an open `.ycd` contains.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipPreview {
+    pub path: String,
+    pub clips: Vec<ClipEntry>,
+    pub animations: Vec<AnimationEntry>,
+}
+
+/// List the clips and animations in the open `.ycd`.
+///
+/// The animation *data* is not decoded, here or anywhere: the channel codecs
+/// in `Clip.cs` are not ported, and playing an animation would also need a
+/// skeleton. This is the listing, which is what the Explorer needs first.
+#[tauri::command]
+pub fn read_clips(viewer: State<'_, ViewerState>) -> Result<ClipPreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    let resource = open
+        .info
+        .resource
+        .as_ref()
+        .ok_or("this file is not a resource, so it holds no clips")?;
+    let dictionary = read_clip_dictionary(open.info.file_kind, &open.data, resource.system_size)
+        .map_err(|e| format!("could not read the clips: {e}"))?;
+
+    let clips = dictionary
+        .clips
+        .iter()
+        .enumerate()
+        .map(|(index, clip)| ClipEntry {
+            index,
+            name: clip.display_name(),
+            path: clip.name.clone(),
+            hash: clip.hash,
+            kind: clip.clip_type.label(),
+            duration: clip.duration,
+            rate: clip.rate,
+            start_time: clip.start_time,
+            end_time: clip.end_time,
+            animations: clip.animations.clone(),
+            tag_count: clip.tag_count,
+            property_count: clip.property_count,
+        })
+        .collect();
+
+    let animations = dictionary
+        .animations
+        .iter()
+        .enumerate()
+        .map(|(index, animation)| AnimationEntry {
+            index,
+            hash: animation.hash,
+            name: hash_string(animation.hash),
+            frames: animation.frames,
+            duration: animation.duration,
+            frame_rate: animation.frame_rate(),
+            sequences: animation.sequence_frames.len(),
+            bone_tracks: animation.bone_ids.len(),
+            usage_count: animation.usage_count,
+        })
+        .collect();
+
+    Ok(ClipPreview {
+        path: open.info.path.clone(),
+        clips,
+        animations,
+    })
+}
+
+/// What an open `.ymt` contains.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetaPreview {
+    pub path: String,
+    /// `RSC`, `PSO` or `RBF`: which of the three encodings this file uses.
+    pub format: String,
+    /// The name of the root structure, which is what the file *is*.
+    pub root_name: String,
+    /// Total nodes, so the view can say how much it is showing.
+    pub node_count: usize,
+    pub tree: MetaNode,
+}
+
+/// Walk the open metadata file into a tree of named values.
+#[tauri::command]
+pub fn read_meta(viewer: State<'_, ViewerState>) -> Result<MetaPreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    // A metadata file is RSC only when the archive says it is a resource; the
+    // other two encodings are plain binary entries.
+    let system_size = open.info.resource.as_ref().map(|r| r.system_size);
+    let meta = read_metadata(open.info.file_kind, &open.data, system_size)
+        .map_err(|e| format!("could not read the metadata: {e}"))?;
+
+    let tree = meta.to_tree();
+    Ok(MetaPreview {
+        path: open.info.path.clone(),
+        format: meta.format().to_string(),
+        root_name: meta.root_name(),
+        node_count: tree.count(),
+        tree,
+    })
 }
 
 /// One stream in an open `.awc`.
@@ -795,6 +1025,62 @@ mod tests {
         assert_eq!(viewer, "hex");
         assert!(!viewers.contains(&"texture"));
         assert!(note.unwrap().contains("no textures"));
+    }
+
+    /// A `.ycd` whose bytes hold neither a clip nor an animation must say so
+    /// rather than opening an empty listing. Zeros parse into an empty
+    /// dictionary, the same way they parse into a drawable with no models.
+    #[test]
+    fn does_not_open_the_clip_view_for_an_empty_dictionary() {
+        let empty = vec![0u8; 512];
+        let (viewer, viewers, note) =
+            choose_viewer_for_test(FileKind::ClipDictionary, &empty, Some(&resource(512)));
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"clip"));
+        assert!(note.unwrap().contains("no clips"));
+    }
+
+    /// A `.ymt` that is neither a resource nor one of the two binary encodings
+    /// has to say so: it is a metadata file the reader does not recognise, not
+    /// an empty one.
+    #[test]
+    fn does_not_open_the_metadata_view_for_bytes_with_no_container() {
+        let junk: Vec<u8> = (0..512u32).map(|i| (i % 251) as u8).collect();
+        let (viewer, viewers, note) = choose_viewer_for_test(FileKind::Meta, &junk, None);
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"meta"));
+        assert!(note.unwrap().contains("could not read the metadata"));
+    }
+
+    /// An RBF payload is a plain binary entry, so the metadata view has to open
+    /// without any resource information.
+    #[test]
+    fn opens_the_metadata_view_for_a_binary_entry() {
+        // `RBF0`, then a descriptor for an element named `root` with one
+        // uint child, then the two close markers.
+        let mut rbf = b"RBF0".to_vec();
+        rbf.extend_from_slice(&[0, 0, 4, 0]);
+        rbf.extend_from_slice(b"root");
+        rbf.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        rbf.extend_from_slice(&[1, 0x10, 5, 0]);
+        rbf.extend_from_slice(b"count");
+        rbf.extend_from_slice(&7u32.to_le_bytes());
+        rbf.extend_from_slice(&[0xFF, 0xFF]);
+
+        let (viewer, viewers, note) = choose_viewer_for_test(FileKind::Meta, &rbf, None);
+        assert_eq!(viewer, "meta", "{note:?}");
+        assert!(viewers.contains(&"meta"));
+    }
+
+    /// `.yed` and its siblings are animation files with no ported reader, so
+    /// they must fall back with a reason rather than trying the `.ycd` path.
+    #[test]
+    fn does_not_treat_the_other_animation_formats_as_clip_dictionaries() {
+        assert!(!FileKind::from_name("x.yed").has_clips());
+        let (viewer, _, note) =
+            choose_viewer_for_test(FileKind::Clip, &vec![0u8; 512], Some(&resource(512)));
+        assert_eq!(viewer, "hex");
+        assert!(note.is_some());
     }
 
     /// A `.ytd` stored as a binary entry has no page flags, so the payload

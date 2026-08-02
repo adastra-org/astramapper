@@ -20,6 +20,7 @@ export type FileKind =
   | "image"
   | "bounds"
   | "meta"
+  | "clipDictionary"
   | "clip"
   | "nav"
   | "audio"
@@ -30,7 +31,7 @@ export type FileKind =
   | "unknown";
 
 /** Which panel shows the file. */
-export type ViewerId = "text" | "hex" | "model" | "audio" | "texture";
+export type ViewerId = "text" | "hex" | "model" | "audio" | "texture" | "clip" | "meta";
 
 export type ResourceInfo = {
   readonly systemSize: number;
@@ -101,9 +102,20 @@ export type MeshBundle = {
   readonly parts: readonly MeshPart[];
 };
 
+/** One drawable in a `.ydr` or `.ydd`. */
+export type ModelDrawable = {
+  /** Position in the dictionary, and the handle the viewer selects by. */
+  readonly index: number;
+  /** The name from the dictionary's hash list, or `hash_XXXXXXXX`. */
+  readonly name: string;
+  readonly hash: number;
+  /** Null when this drawable holds nothing renderable. */
+  readonly bundle: MeshBundle | null;
+};
+
 export type ModelPreview = {
   readonly path: string;
-  readonly bundles: readonly MeshBundle[];
+  readonly drawables: readonly ModelDrawable[];
   readonly emptyDrawables: number;
 };
 
@@ -140,6 +152,69 @@ export type TextureImage = {
 
 /** What `saveTexture` writes: the stored mip chain, or one decoded mip. */
 export type TextureExport = "dds" | "png";
+
+/** One clip in a `.ycd`. */
+export type ClipEntry = {
+  readonly index: number;
+  /** The clip's short name, or `hash_XXXXXXXX`. */
+  readonly name: string;
+  /** The authoring path the clip was built from, if it carries one. */
+  readonly path: string | null;
+  readonly hash: number;
+  /** `animation` or `animation list`. */
+  readonly kind: string;
+  readonly duration: number;
+  readonly rate: number;
+  readonly startTime: number;
+  readonly endTime: number;
+  /** Hashes of the animations this clip plays. */
+  readonly animations: readonly number[];
+  /** Counted, not read: ClipTag and ClipProperty are not ported. */
+  readonly tagCount: number;
+  readonly propertyCount: number;
+};
+
+/** One animation in a `.ycd`. */
+export type AnimationEntry = {
+  readonly index: number;
+  readonly hash: number;
+  readonly name: string;
+  readonly frames: number;
+  readonly duration: number;
+  readonly frameRate: number;
+  readonly sequences: number;
+  readonly boneTracks: number;
+  readonly usageCount: number;
+};
+
+export type ClipPreview = {
+  readonly path: string;
+  readonly clips: readonly ClipEntry[];
+  readonly animations: readonly AnimationEntry[];
+};
+
+/** One named value in a metadata file, and its children. */
+export type MetaNode = {
+  readonly name: string;
+  /** The structure or element type, when the file names one. */
+  readonly typeName: string | null;
+  /** The formatted value, for a leaf. */
+  readonly value: string | null;
+  /** The lookup name, for an entry of a map. */
+  readonly key: string | null;
+  readonly children: readonly MetaNode[];
+  /** The reader could not walk this node, and the value says why. */
+  readonly error: boolean;
+};
+
+export type MetaPreview = {
+  readonly path: string;
+  /** `RSC`, `PSO` or `RBF`. */
+  readonly format: string;
+  readonly rootName: string;
+  readonly nodeCount: number;
+  readonly tree: MetaNode;
+};
 
 /** One stream in an `.awc`. */
 export type AudioTrack = {
@@ -187,6 +262,16 @@ export function readHex(offset: number, length: number): Promise<HexPage> {
 
 export function readModel(): Promise<ModelPreview> {
   return invoke<ModelPreview>("read_model");
+}
+
+/** List the clips and animations in the open `.ycd`. */
+export function readClips(): Promise<ClipPreview> {
+  return invoke<ClipPreview>("read_clips");
+}
+
+/** Walk the open `.ymt` into a tree of named values. */
+export function readMeta(): Promise<MetaPreview> {
+  return invoke<MetaPreview>("read_meta");
 }
 
 /** List the textures in the open `.ytd`, without decoding any of them. */

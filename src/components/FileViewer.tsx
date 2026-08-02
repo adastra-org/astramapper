@@ -10,6 +10,8 @@ import {
 } from "../lib/viewer";
 import { formatBytes } from "../lib/format";
 import { AudioViewer } from "./viewers/AudioViewer";
+import { ClipViewer } from "./viewers/ClipViewer";
+import { MetaViewer } from "./viewers/MetaViewer";
 import { HexViewer } from "./viewers/HexViewer";
 import { TextureViewer } from "./viewers/TextureViewer";
 import { TextViewer } from "./viewers/TextViewer";
@@ -24,6 +26,8 @@ const VIEWER_LABELS: Record<ViewerId, string> = {
   model: "3D",
   texture: "Texture",
   audio: "Audio",
+  clip: "Clips",
+  meta: "Metadata",
   text: "Text",
   hex: "Hex",
 };
@@ -200,6 +204,10 @@ function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.E
       return <TextureViewer path={path} />;
     case "audio":
       return <AudioViewer path={path} />;
+    case "clip":
+      return <ClipViewer path={path} />;
+    case "meta":
+      return <MetaViewer path={path} />;
     case "text":
       return <TextViewer path={path} />;
     case "hex":
