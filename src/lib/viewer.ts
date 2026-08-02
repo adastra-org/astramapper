@@ -31,7 +31,15 @@ export type FileKind =
   | "unknown";
 
 /** Which panel shows the file. */
-export type ViewerId = "text" | "hex" | "model" | "audio" | "texture" | "clip" | "meta";
+export type ViewerId =
+  | "text"
+  | "hex"
+  | "model"
+  | "bounds"
+  | "audio"
+  | "texture"
+  | "clip"
+  | "meta";
 
 export type ResourceInfo = {
   readonly systemSize: number;
@@ -117,6 +125,29 @@ export type ModelPreview = {
   readonly path: string;
   readonly drawables: readonly ModelDrawable[];
   readonly emptyDrawables: number;
+};
+
+/** One collision geometry in a `.ybn`, as uploadable buffers. */
+export type BoundsPart = {
+  /** The tree path from the bounds root, e.g. `child0`. */
+  readonly name: string;
+  readonly vertexCount: number;
+  readonly triangleCount: number;
+  /** Base64 of packed `f32` triples, in world space. */
+  readonly positions: string;
+  /** Base64 of packed `u32` triples. */
+  readonly indices: string;
+};
+
+export type BoundsPreview = {
+  readonly path: string;
+  /** The root bounds type, e.g. `Composite`. */
+  readonly boundsType: string;
+  /** Number of children in the composite tree, when the root is one. */
+  readonly children: number;
+  readonly vertexCount: number;
+  readonly triangleCount: number;
+  readonly parts: readonly BoundsPart[];
 };
 
 /** One texture in a `.ytd`. */
@@ -262,6 +293,10 @@ export function readHex(offset: number, length: number): Promise<HexPage> {
 
 export function readModel(): Promise<ModelPreview> {
   return invoke<ModelPreview>("read_model");
+}
+
+export function readBounds(): Promise<BoundsPreview> {
+  return invoke<BoundsPreview>("read_bounds");
 }
 
 /** List the clips and animations in the open `.ycd`. */

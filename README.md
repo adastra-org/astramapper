@@ -8,7 +8,7 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 2 in progress — the whole install browses, and five viewers work
+## Status: phase 2 in progress — the whole install browses, and six viewers work
 
 **Works**
 
@@ -21,6 +21,9 @@ archives, view and extract what is inside them, and render and edit the world in
 - **Explorer viewers**, with the backend choosing which one opens because that
   decision needs the payload:
   - **3D** for `.ydr` and `.ydd`, in three.js over mesh buffers decoded in Rust.
+  - **Collision** for `.ybn`, in three.js over the whole composite tree
+    flattened to world space — vertices quantised in Rust, child transforms
+    applied, triangles uploaded as buffers.
   - **Texture** for `.ytd` — BC1–BC7 decoded in Rust, mip picker, alpha
     checkerboard, export as `.dds` or `.png`.
   - **Audio** for `.awc` — every stream listed, decoded on demand, played or
@@ -28,7 +31,7 @@ archives, view and extract what is inside them, and render and edit the world in
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 136 unit tests, 21 install-dependent gate tests, 27 frontend tests. Format
+- 171 unit tests, 28 install-dependent gate tests, 27 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -38,6 +41,8 @@ archives, view and extract what is inside them, and render and edit the world in
              byte; 335,729 textures parse across the whole install
   audio      261 streams, 132,741,415 samples decode identically;
              400 containers open, 104,263 seconds of audio
+  bounds     85 geometries, 127,345 polygons identical, 126,942 triangles
+             flattened one for one; 15,139 .ybn files parse, 104.6M triangles
   ```
 
 **Not yet**
@@ -45,8 +50,8 @@ archives, view and extract what is inside them, and render and edit the world in
 - Writing. Reading only, everywhere: `RpfFile.Write`, `CompressBytes` and NG
   *encryption* are all still open, so a text edit saves a copy to disk rather
   than going back into the archive.
-- Metadata (`.ymap`, `.ytyp`), fragments (`.yft`), collision (`.ybn`) — each
-  opens as hex, with a note saying which parser is missing.
+- Metadata (`.ymap`, `.ytyp`), fragments (`.yft`), particles (`.ypt`) — each
+  opens as hex or a tree, with a note saying which parser is missing.
 - Textures on models: the 3D viewer draws untextured. Both halves exist now;
   matching a material to a texture needs `ShaderParams.cs`.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.

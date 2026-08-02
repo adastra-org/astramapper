@@ -17,13 +17,17 @@ import { TextureViewer } from "./viewers/TextureViewer";
 import { TextViewer } from "./viewers/TextViewer";
 
 // three.js is most of the frontend bundle and is only needed once someone opens
-// a drawable, so it loads on demand rather than at startup.
+// a drawable or a collision file, so it loads on demand rather than at startup.
 const ModelViewer = lazy(async () => ({
   default: (await import("./viewers/ModelViewer")).ModelViewer,
+}));
+const BoundsViewer = lazy(async () => ({
+  default: (await import("./viewers/BoundsViewer")).BoundsViewer,
 }));
 
 const VIEWER_LABELS: Record<ViewerId, string> = {
   model: "3D",
+  bounds: "Collision",
   texture: "Texture",
   audio: "Audio",
   clip: "Clips",
@@ -198,6 +202,18 @@ function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.E
           }
         >
           <ModelViewer path={path} />
+        </Suspense>
+      );
+    case "bounds":
+      return (
+        <Suspense
+          fallback={
+            <div className="flex flex-1 items-center justify-center">
+              <Loader2 size={16} className="animate-spin text-ink-dim" />
+            </div>
+          }
+        >
+          <BoundsViewer path={path} />
         </Suspense>
       );
     case "texture":

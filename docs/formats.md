@@ -158,6 +158,8 @@ by the oracle's own rule so the comparison stays about what was read.
 | `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes. Reads, does not write. |
 | `resources/texture.rs` | `Texture.cs` (61 KB) | **partial** | `TextureDictionary`, `TextureBase`, `Texture`, `TextureData` and the mip pitch table. Legacy layout only — the Gen9 branch and `ShaderResourceViewG9` go with the Enhanced edition. Reads, does not write. |
 | `resources/clip.rs` | `Clip.cs` (164 KB) | **partial** | `ClipDictionary`, both hash maps, `Clip` (animation and animation-list) and `Animation` headers. The channel codecs, tags and properties are not read: tags and properties are counted. |
+| `resources/bounds.rs` | `Bounds.cs` (5488 lines) + `YbnFile.cs` | **partial** | `BoundsDictionary` not ported; a `.ybn` reads one `Bounds` root per `YbnFile.Load`. The type-byte dispatch, the shared 112-byte base, the primitive tails, `BoundGeometry` (quantised vertices, polygons, materials, octants), `BoundBVH` and `BoundComposite` with their transform/bounds/flag arrays and `BVH` blocks. Reads, does not write. |
+| `bounds_mesh` (in `resources/bounds.rs`) | `GetVertexPos` + the world-space walk | n/a | Not a port. Flattens the triangle polygons of the whole tree into uploadable buffers, pushing each vertex through the composite transform chain. |
 
 `Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB),
 `Clothes` (111 KB), `ShaderParams`, `Expression`, `Nav`, `Node`,
@@ -262,9 +264,7 @@ catches that with the structural invariant — the name and texture lists are
 parallel, so counts that disagree are not a header — and refuses with the reason
 attached. The remaining 88,868 dictionaries and 335,729 textures parse.
 
-### Notes on clips
-
-**The clip map is what names an animation.** An animation block does not carry
+### Notes on clips**The clip map is what names an animation.** An animation block does not carry
 its own hash: the hash table entry that points at it does, and `Animation.Hash`
 is written by the reader from there. A clip points straight at the block. The
 reference gets the link for free from `ReadBlockAt`, which caches by position;
@@ -281,6 +281,46 @@ the first `0x50` bytes, and the count of tags is the *second* `u16` of
 payloads are shorter than their page flags declare. The same six-file failure
 mode as the textures above, and the reference throws on them too. The remaining
 24840 dictionaries, 315964 clips and 250205 animations resolve.
+
+### Notes on bounds
+
+**The type byte rides inside a shared base.** `BoundsType` lives at the *first*
+byte of the 112-byte base struct, and `IResourceXXSystemBlock.GetType` peeks it
+by jumping sixteen bytes in — past the `ResourceFileBase` header — and back.
+The whole `BoundSphere`/`BoundBox`/`BoundGeometry`/`BoundBVH`/`BoundComposite`
+hierarchy is one struct plus a per-type tail, which is how `bounds.rs` models
+it: `Bounds` with a `BoundsData` enum. Reading the type from anywhere else —
+an extension table, a heuristics guess — mislabels a `Composite` as a `Box`.
+
+**A polygon record keeps its type in the low bits of its first byte.**
+`ReadPolygons` masks byte 0 of each 16-byte record with `0xF8` before parsing,
+so the area field is read with three bits cleared, and the type is `b0 & 7`.
+Triangle vertex indices carry an `0x8000` flag bit that is not an index; the
+reference masks it off whenever it addresses a vertex, and the flatten does too.
+
+**Materials are padded to four on the way in and truncated back.** The reader
+reads `max(4, MaterialsCount)` entries and then, when the count is below four,
+copies out only the real ones. The array handed to callers is always the short
+one.
+
+**The octant item pointers are a sibling block, not a tail.** The 32 bytes of
+counts are read at `OctantsPointer`; the eight `u64` item pointers live at
+`OctantItemsPointer`, which the caller passes as a parameter. Both pointers come
+from the geometry header, and neither is implied by the other's position.
+
+**BVH lists come in two widths.** `BVH.Nodes` is a `ResourceSimpleList64b_s` —
+32-bit count and capacity, no pad, read by *capacity* — while `BVH.Trees` is a
+`ResourceSimpleList64_s` — 16-bit count and capacity plus a pad word, read by
+*count*. The two are the same block shape only on paper; reading both as the
+`_s` variant makes the node list the wrong length in every geometry that has a
+BVH.
+
+**Vertices are stored quantised to `i16` and relative to their geometry's
+centre.** `BoundVertex_s` is three shorts; the decoded vertex is `vector *
+Quantum`, and its world position adds `CenterGeom` and then pushes through the
+composite's child transform — `Transform * (v + CenterGeom)` in the reference's
+`GetVertexPos`. The flatten composes the child transforms down the tree so every
+triangle lands in the same space.
 
 ### Notes on drawable dictionaries
 
@@ -332,11 +372,12 @@ Verified over 132.7 million samples against `GetPcmData`.
 
 ## File types
 
-All 41 **todo** as files, though `YdrFile.cs` and `YddFile.cs` are covered by
+All **todo** as files, though `YdrFile.cs` and `YddFile.cs` are covered by
 `resources::read_named_drawables`, `YtdFile.cs` by `resources::read_textures`,
-`YcdFile.cs` by `resources::read_clips`, `YmtFile.cs` by `meta::read_meta`, and
+`YcdFile.cs` by `resources::read_clips`, `YmtFile.cs` by `meta::read_meta`,
+`YbnFile.cs` by `resources::read_bounds`, and
 `AwcFile.cs` by `audio::AwcFile`.
-Planned order: `YtypFile`, `YmapFile`, `YbnFile`, `YftFile`, `YndFile`,
+Planned order: `YtypFile`, `YmapFile`, `YftFile`, `YndFile`,
 `Gxt2File`, then the rest. `YtypFile` and `YmapFile` are metadata containers, so
 they already open in the Explorer as trees; what is left is the typed model
 above the tree.
@@ -345,7 +386,7 @@ above the tree.
 `CarVariationsFile` · `CutFile` · `DistantLightsFile` · `DlcContentFile` ·
 `DlcSetupFile` · `FxcFile` · `GtxdFile` · `Gxt2File` · `HeightmapFile` ·
 `JPsoFile` · `MrfFile` · `PedFile` · `PedsFile` · `RelFile` (1.2 MB) · `Stats` ·
-`VehicleLayoutsFile` · `VehiclesFile` · `WatermapFile` · `YbnFile` · `YcdFile` ·
+`VehicleLayoutsFile` · `VehiclesFile` · `WatermapFile` · `YcdFile` ·
 `YddFile` · `YdrFile` · `YedFile` · `YfdFile` · `YftFile` · `YldFile` ·
 `YmapFile` · `YmfFile` · `YmtFile` · `YndFile` · `YnvFile` · `YpdbFile` ·
 `YptFile` · `YtdFile` · `YtypFile` · `YvrFile` · `YwrFile`

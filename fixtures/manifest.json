@@ -103,6 +103,26 @@
         "is compared is the walk, not the printing."
       ],
       "requires": "A GTA V Legacy install and a built CodeWalker at E:\\Ad Astra Tools\\CodeWalker."
+    },
+    {
+      "path": "bounds_oracle.json",
+      "generate": "pwsh -File scripts/bounds-oracle.ps1",
+      "oracle": "CodeWalker.Core.dll, loaded into Windows PowerShell 5.1",
+      "usedBy": [
+        "crates/cw-core/tests/bounds_gate.rs::agrees_with_the_reference_bounds_reader",
+        "crates/cw-core/tests/bounds_gate.rs::flattened_triangles_match_the_oracle"
+      ],
+      "describes": [
+        "For 15 .ybn files: the full composite tree — per bounds the shared fields",
+        "and type, per geometry the quantum, centre, vertices, vertex colours,",
+        "materials, polygon material indices, octant counts and every polygon's",
+        "record, per composite the child transforms, bounding boxes and flags, and",
+        "per BVH the node and tree lists. 85 geometries, 75741 vertices, 127345",
+        "polygons, 126942 triangles.",
+        "The flatten gate recomputes the triangle count the viewer would draw and",
+        "checks it is exactly the number of Triangle polygons the oracle read."
+      ],
+      "requires": "A GTA V Legacy install and a built CodeWalker at E:\\Ad Astra Tools\\CodeWalker."
     }
   ]
 }

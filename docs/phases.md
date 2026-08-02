@@ -14,11 +14,11 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio and clip slices of 1.4 done, all gates cleared |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip and bounds slices of 1.4 done, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **167 unit + 25 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **171 unit + 28 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -93,6 +93,10 @@ pwsh -File scripts/clip-oracle.ps1
 
 ```bash
 pwsh -File scripts/meta-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/bounds-oracle.ps1
 ```
 
 ---
@@ -327,6 +331,45 @@ Not ported: the animation channel codecs, the tags and the properties, so there
 is no playback and will not be until the skeleton lands too. Four destruction
 `.ycd` do not read, for the same truncated-payload reason as the six `.ytd`.
 
+### 1.4e Resources — bounds — **DONE, gate cleared**
+
+Collision geometry. `.ybn` is self-contained like the four before it, and it is
+what the drawable's `BoundPointer` and the fragments point at.
+
+Files: `crates/cw-core/src/resources/bounds.rs`, gate at
+`crates/cw-core/tests/bounds_gate.rs`, oracle at `scripts/bounds-oracle.ps1`.
+
+Proven against the real install:
+
+```
+15 files, 85 geometries, 75,741 vertices and 127,345 polygons agree with
+  CodeWalker field for field
+126,942 flattened triangles match the oracle's Triangle polygons one for one
+15,139 of 15,139 .ybn files parse across the whole install
+  (56,773 composite children, 104,624,274 triangles)
+```
+
+**Four things worth knowing before touching this code:**
+
+1. **The type byte rides inside a shared base.** `BoundsType` is the first byte
+   of the 112-byte base struct; the reference dispatches on it by peeking
+   sixteen bytes in. `Bounds` is one struct with a `BoundsData` tail, not a
+   class hierarchy — every `Bound*` type is the base plus a tail.
+2. **A polygon record keeps its type in the low bits of its first byte.**
+   `ReadPolygons` masks byte 0 with `0xF8` before parsing, so the triangle's
+   area field is read with three bits cleared. Triangle vertex indices carry an
+   `0x8000` flag bit that must be masked off wherever a vertex is addressed.
+3. **BVH lists come in two widths.** `Nodes` is the 32-bit `_b` list variant,
+   read by capacity; `Trees` is the 16-bit `_s` variant with a pad word, read by
+   count. Reading both as one shape silently mis-sizes the node list.
+4. **Materials are padded to four on the way in and truncated back.** The array
+   callers see is always the short one, never the padded one.
+
+Not ported: writing, `BoundsDictionary`, the vertex *shrink* pass (editor-only),
+and every `SphereIntersect`/`RayIntersect` collision routine in `World/`. The
+viewer draws the triangles via `Bounds::triangle_mesh`, which pushes each vertex
+through the composite transform chain the way `GetVertexPos` does.
+
 ### 1.3 MetaTypes — **DONE, gate cleared**
 
 `meta/` ← `MetaTypes/`. All three container encodings and the walk that turns any
@@ -368,10 +411,10 @@ entities).
 
 ### 1.4 Resources, then FileTypes
 
-The rest of `resources/` (Bounds, Frag, Clip, Particle, ShaderParams,
+The rest of `resources/` (Frag, Particle, ShaderParams,
 ResourceBaseTypes/Builder) — the shared building blocks. Then the remaining file
-types in dependency order: `YtypFile`, `YmapFile`, `YbnFile`, `YftFile`,
-`YndFile`, `YmtFile`, `Gxt2File`, then the rest.
+types in dependency order: `YtypFile`, `YmapFile`, `YbnFile` (its `Bounds` now
+portable), `YftFile`, `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
 
 Per format: a round-trip byte-equality test on a real fixture **plus** a JSON
 `describe()` snapshot for the phase 2 viewers.
@@ -420,6 +463,11 @@ the payload:
   `cw_core::mesh`. Orbit, wireframe, LOD and per-drawable selection for a
   dictionary. Positions, normals and texcoords are decoded in Rust; the WebView
   uploads buffers and nothing else.
+- **Collision** for `.ybn`, via three.js over the triangle buffers from
+  `cw_core::bounds::Bounds::triangle_mesh`. The whole composite tree is
+  flattened to world space on the Rust side — every triangle, including the
+  child transforms and each geometry's centre offset — and the toolbar shows the
+  root type, the child count and the totals.
 - **Texture** for `.ytd`. The dictionary is listed on open and one texture is
   decoded at a time, to PNG — a 2048² surface is 16 MB of RGBA and 22 MB once
   base64'd, so PNG is faster to ship than raw pixels and the WebView decodes it

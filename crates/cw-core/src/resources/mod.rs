@@ -4,12 +4,17 @@
 //! texture paths are here so far — see `docs/formats.md` for what each sibling
 //! still owes.
 
+pub mod bounds;
 pub mod clip;
 pub mod drawable;
 pub mod reader;
 pub mod texture;
 pub mod vertex;
 
+pub use bounds::{
+    Bounds, BoundsData, BoundsType, BoundComposite, BoundGeomOctants, BoundGeometry, BoundMaterial,
+    BoundPolygon, Bvh, CollisionMesh, CollisionPart, Matrix4F,
+};
 pub use clip::{Animation, AnimationBoneId, Clip, ClipDictionary, ClipType};
 pub use drawable::{
     Aabb, Drawable, DrawableDictionary, DrawableGeometry, DrawableModel, Lod, ShaderFx,
@@ -155,6 +160,24 @@ pub fn read_textures(kind: FileKind, data: &[u8], system_size: usize) -> Result<
         _ => Err(CwError::Invalid {
             what: "texture dictionary",
             detail: format!("no texture reader for a {} file", kind.label()),
+        }),
+    }
+}
+
+/// Read the single collision bounds block a payload holds.
+///
+/// `.ybn` only. The root of a `.ybn` is one `Bounds`, per `YbnFile.Load`; a
+/// `.ydr` and a `.yft` also carry bounds, but behind pointers the drawable and
+/// fragment readers do not follow yet.
+pub fn read_bounds(kind: FileKind, data: &[u8], system_size: usize) -> Result<Bounds> {
+    match kind {
+        FileKind::Bounds => {
+            let mut r = ResourceReader::new(data, system_size);
+            Bounds::read(&mut r)
+        }
+        _ => Err(CwError::Invalid {
+            what: "bounds",
+            detail: format!("no bounds reader for a {} file", kind.label()),
         }),
     }
 }

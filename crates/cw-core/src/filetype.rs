@@ -154,6 +154,13 @@ impl FileKind {
         matches!(self, FileKind::ClipDictionary)
     }
 
+    /// Whether the file is a collision bounds tree: `.ybn`. The `.ydr` and
+    /// `.yft` that also carry bounds do not qualify yet — their bounds sit
+    /// behind pointers the drawable and fragment readers do not follow.
+    pub fn has_bounds(self) -> bool {
+        matches!(self, FileKind::Bounds)
+    }
+
     /// Whether the file is a metadata container: `.ymt`, and the `.ymap` and
     /// `.ytyp` that share its encodings.
     pub fn has_metadata(self) -> bool {

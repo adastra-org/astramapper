@@ -23,8 +23,8 @@ use cw_core::image;
 use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, MetaNode};
 use cw_core::resources::{
-    read_clips as read_clip_dictionary, read_drawables, read_named_drawables, read_textures,
-    Drawable, Texture, TextureDictionary,
+    read_bounds as read_collision_bounds, read_clips as read_clip_dictionary, read_drawables,
+    read_named_drawables, read_textures, Drawable, Texture, TextureDictionary,
 };
 use cw_core::rpf::EntryKind;
 use cw_core::text::{self, Encoding, TextFile};
@@ -309,6 +309,35 @@ fn choose_viewer(
         }
     }
 
+    if kind.has_bounds() {
+        match resource {
+            Some(resource) => match read_collision_bounds(kind, data, resource.system_size) {
+                Ok(bounds) if bounds.triangle_mesh().is_some() => {
+                    viewers.insert(0, "bounds");
+                    return ("bounds", viewers, None);
+                }
+                Ok(_) => {
+                    return (
+                        viewers[0],
+                        viewers.clone(),
+                        Some("this collision file holds no triangles to draw".into()),
+                    )
+                }
+                Err(e) => {
+                    let note = format!("could not read the collision bounds: {e}");
+                    return (viewers[0], viewers.clone(), Some(note));
+                }
+            },
+            None => {
+                return (
+                    viewers[0],
+                    viewers.clone(),
+                    Some("a bounds file stored as a binary entry, not a resource".into()),
+                )
+            }
+        }
+    }
+
     if kind.has_model() {
         match resource {
             Some(resource) => match read_drawables(kind, data, resource.system_size) {
@@ -428,6 +457,99 @@ pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String
         drawables,
         empty_drawables,
     })
+}
+
+/// One collision geometry in an open `.ybn`, as uploadable buffers.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundsPart {
+    /// The tree path from the bounds root, e.g. `child0`.
+    pub name: String,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    /// Base64 of tightly packed `f32` triples, in world space.
+    pub positions: String,
+    /// Base64 of `u32` triples.
+    pub indices: String,
+}
+
+/// The collision geometry of one file.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundsPreview {
+    pub path: String,
+    /// The root bounds type, e.g. `Composite`.
+    pub bounds_type: &'static str,
+    /// Number of children in the composite tree, when the root is one.
+    pub children: usize,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    pub parts: Vec<BoundsPart>,
+}
+
+/// Flatten the collision geometry of the open `.ybn` for the 3D viewer.
+///
+/// Mirrors `read_model`: the triangles are decoded and transformed in Rust, and
+/// only the buffers cross.
+#[tauri::command]
+pub fn read_bounds(viewer: State<'_, ViewerState>) -> Result<BoundsPreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    let resource = open
+        .info
+        .resource
+        .as_ref()
+        .ok_or("this file is not a resource, so it holds no collision geometry")?;
+
+    let bounds = read_collision_bounds(open.info.file_kind, &open.data, resource.system_size)
+        .map_err(|e| format!("could not read the collision bounds: {e}"))?;
+
+    let children = match &bounds.data {
+        cw_core::resources::BoundsData::Composite(c) => c.children.len(),
+        _ => 0,
+    };
+
+    let mesh = bounds
+        .triangle_mesh()
+        .ok_or("this file holds no triangles to draw")?;
+
+    let parts = mesh
+        .parts
+        .into_iter()
+        .map(|part| BoundsPart {
+            name: part.name,
+            vertex_count: part.vertex_count,
+            triangle_count: part.triangle_count,
+            positions: encode_f32(&part.positions),
+            indices: encode_u32(&part.indices),
+        })
+        .collect();
+
+    Ok(BoundsPreview {
+        path: open.info.path.clone(),
+        bounds_type: bounds.bounds_type.as_str(),
+        children,
+        vertex_count: mesh.vertex_count,
+        triangle_count: mesh.triangle_count,
+        parts,
+    })
+}
+
+fn encode_f32(values: &[f32]) -> String {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    STANDARD.encode(bytes)
+}
+
+fn encode_u32(values: &[u32]) -> String {
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    STANDARD.encode(bytes)
 }
 
 /// One texture in an open `.ytd`.

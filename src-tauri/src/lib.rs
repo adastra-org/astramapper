@@ -52,6 +52,7 @@ pub fn run() {
             viewer::read_text,
             viewer::read_hex,
             viewer::read_model,
+            viewer::read_bounds,
             viewer::read_clips,
             viewer::read_meta,
             viewer::read_texture,
