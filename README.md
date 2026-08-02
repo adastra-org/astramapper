@@ -8,7 +8,7 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 2 in progress — the whole install browses, and six viewers work
+## Status: phase 2 in progress — the whole install browses, and nine viewers work
 
 **Works**
 
