@@ -19,6 +19,11 @@ sha1 = "0.11"
 flate2 = "1.1"
 # Mesh buffers cross the IPC boundary as base64 rather than JSON number arrays.
 base64 = "0.22"
+# BC1-BC7 block decoding. DDSIO.cs has its own, but stops short of BC7 and
+# interpolates in the wrong domain; this is the reference bcdec implementation.
+bcdec_rs = "0.2"
+# Decoded textures cross the IPC boundary as PNG, not as 16 MB of raw RGBA.
+png = "0.18"
 thiserror = "2.0"
 rayon = "1.12"
 serde = { version = "1", features = ["derive"] }

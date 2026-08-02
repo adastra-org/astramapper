@@ -128,6 +128,13 @@ impl FileKind {
         matches!(self, FileKind::Model | FileKind::ModelDictionary)
     }
 
+    /// Whether a texture preview is possible today. Only `.ytd` — a `.ydr` and
+    /// a `.yft` each embed a dictionary too, but behind pointers the drawable
+    /// reader steps past, and `.dds` needs a DDS *reader*, which is not ported.
+    pub fn has_textures(self) -> bool {
+        matches!(self, FileKind::Texture)
+    }
+
     /// Whether audio can be played out of this. Only `.awc` — `.rel` names and
     /// sequences the waves but holds none, and `RelFile.cs` is not ported.
     pub fn has_audio(self) -> bool {
@@ -199,5 +206,15 @@ mod tests {
         assert!(FileKind::ModelDictionary.has_model());
         assert!(!FileKind::Fragment.has_model(), "Frag.cs is not ported");
         assert!(!FileKind::Texture.has_model());
+    }
+
+    /// `.dds` is an image but there is no DDS reader, and the drawables embed
+    /// dictionaries the resource layer walks past.
+    #[test]
+    fn only_the_texture_dictionary_claims_textures() {
+        assert!(FileKind::Texture.has_textures());
+        assert!(!FileKind::Image.has_textures());
+        assert!(!FileKind::Model.has_textures());
+        assert!(!FileKind::Fragment.has_textures());
     }
 }

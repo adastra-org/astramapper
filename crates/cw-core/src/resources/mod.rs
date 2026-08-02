@@ -1,16 +1,19 @@
 //! RSC7 resources: the paged pointer format the geometry and texture files use.
 //!
-//! Port of `CodeWalker.Core/GameFiles/Resources/`. Only the drawable path is
-//! here so far — see `docs/formats.md` for what each sibling still owes.
+//! Port of `CodeWalker.Core/GameFiles/Resources/`. Only the drawable and
+//! texture paths are here so far — see `docs/formats.md` for what each sibling
+//! still owes.
 
 pub mod drawable;
 pub mod reader;
+pub mod texture;
 pub mod vertex;
 
 pub use drawable::{
     Aabb, Drawable, DrawableDictionary, DrawableGeometry, DrawableModel, Lod, ShaderFx,
 };
 pub use reader::{version_from_flags, ResourceReader, GRAPHICS_BASE, SYSTEM_BASE};
+pub use texture::{MipLevel, Texture, TextureDictionary, TextureFormat, TextureUsage};
 pub use vertex::{ComponentType, VertexDeclaration, VertexSemantic};
 
 use crate::filetype::FileKind;
@@ -31,6 +34,24 @@ pub fn read_drawables(kind: FileKind, data: &[u8], system_size: usize) -> Result
         _ => Err(CwError::Invalid {
             what: "drawable",
             detail: format!("no drawable reader for a {} file", kind.label()),
+        }),
+    }
+}
+
+/// Read the texture dictionary a payload holds.
+///
+/// `.ytd` only. A `.ydr` also embeds one — `ShaderGroup.TextureDictionary` —
+/// but that pointer is read past rather than into, so reaching it is a change
+/// in `drawable.rs` rather than a case here.
+pub fn read_textures(kind: FileKind, data: &[u8], system_size: usize) -> Result<TextureDictionary> {
+    match kind {
+        FileKind::Texture => {
+            let mut r = ResourceReader::new(data, system_size);
+            TextureDictionary::read(&mut r)
+        }
+        _ => Err(CwError::Invalid {
+            what: "texture dictionary",
+            detail: format!("no texture reader for a {} file", kind.label()),
         }),
     }
 }
