@@ -19,8 +19,9 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use cw_core::audio::AwcFile;
 use cw_core::filetype::FileKind;
+use cw_core::image;
 use cw_core::mesh::MeshBundle;
-use cw_core::resources::{read_drawables, Drawable};
+use cw_core::resources::{read_drawables, read_textures, Drawable, Texture, TextureDictionary};
 use cw_core::rpf::EntryKind;
 use cw_core::text::{self, Encoding, TextFile};
 use serde::{Deserialize, Serialize};
@@ -204,6 +205,42 @@ fn choose_viewer(
         };
     }
 
+    if kind.has_textures() {
+        match resource {
+            Some(resource) => match read_textures(kind, data, resource.system_size) {
+                Ok(dictionary) if dictionary.textures.iter().any(Texture::is_decodable) => {
+                    viewers.insert(0, "texture");
+                    return ("texture", viewers, None);
+                }
+                Ok(dictionary) if dictionary.textures.is_empty() => {
+                    return (
+                        viewers[0],
+                        viewers.clone(),
+                        Some("this dictionary holds no textures".into()),
+                    )
+                }
+                Ok(_) => {
+                    return (
+                        viewers[0],
+                        viewers.clone(),
+                        Some("none of the textures here are in a format with a decoder".into()),
+                    )
+                }
+                Err(e) => {
+                    let note = format!("could not read the textures: {e}");
+                    return (viewers[0], viewers.clone(), Some(note));
+                }
+            },
+            None => {
+                return (
+                    viewers[0],
+                    viewers.clone(),
+                    Some("a texture dictionary stored as a binary entry, not a resource".into()),
+                )
+            }
+        }
+    }
+
     if kind.has_model() {
         match resource {
             Some(resource) => match read_drawables(kind, data, resource.system_size) {
@@ -236,9 +273,6 @@ fn choose_viewer(
     let note = match kind {
         FileKind::Fragment | FileKind::Particle if !readable_as_text => {
             Some("fragments and particle dictionaries embed drawables, but Frag.cs and Particle.cs are not ported yet".into())
-        }
-        FileKind::Texture if !readable_as_text => {
-            Some("texture decoding needs Texture.cs and the BC decoders, which are not ported yet".into())
         }
         FileKind::AudioMetadata if !readable_as_text => {
             Some("RelFile.cs, which names and sequences the waves in the .awc files, is not ported yet".into())
@@ -316,6 +350,177 @@ pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String
         bundles,
         empty_drawables,
     })
+}
+
+/// One texture in an open `.ytd`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextureEntry {
+    /// Position in the dictionary, and the handle for `read_texture_image`.
+    pub index: usize,
+    /// The name the file carries. Textures are named, unlike AWC streams.
+    pub name: String,
+    pub name_hash: u32,
+    pub width: u16,
+    pub height: u16,
+    pub levels: u8,
+    /// The `D3DFORMAT` name, e.g. `D3DFMT_DXT5`.
+    pub format: String,
+    pub usage: &'static str,
+    /// Size of the pixel payload, all mips together.
+    pub byte_length: usize,
+    /// False when the format has no decoder or the payload is short. The entry
+    /// is still listed — a dictionary showing eight of nine textures with no
+    /// explanation for the ninth is worse than showing it greyed out.
+    pub decodable: bool,
+}
+
+/// What an open `.ytd` contains.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TexturePreview {
+    pub path: String,
+    pub textures: Vec<TextureEntry>,
+}
+
+/// One decoded mip, as a PNG.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextureImage {
+    pub index: usize,
+    pub level: usize,
+    pub width: usize,
+    pub height: usize,
+    /// Base64 of a complete PNG, ready for an `<img>` element.
+    pub png: String,
+}
+
+/// Parse the open file as a texture dictionary. Kept private so all three
+/// texture commands agree on what "the open file" means.
+fn open_ytd(open: &OpenFile) -> Result<TextureDictionary, String> {
+    let resource = open
+        .info
+        .resource
+        .as_ref()
+        .ok_or("this file is not a resource, so it holds no textures")?;
+    read_textures(open.info.file_kind, &open.data, resource.system_size)
+        .map_err(|e| format!("could not read the textures: {e}"))
+}
+
+/// List the textures in the open `.ytd`.
+///
+/// The pixels are not decoded here: a dictionary runs to dozens of textures and
+/// tens of megabytes, and the listing is what the UI needs first — the same
+/// split as `read_audio`.
+#[tauri::command]
+pub fn read_texture(viewer: State<'_, ViewerState>) -> Result<TexturePreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    let dictionary = open_ytd(open)?;
+
+    let textures = dictionary
+        .textures
+        .iter()
+        .enumerate()
+        .map(|(index, texture)| TextureEntry {
+            index,
+            name: texture
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
+            name_hash: texture.name_hash,
+            width: texture.width,
+            height: texture.height,
+            levels: texture.levels,
+            format: texture
+                .format
+                .map(|f| f.label().to_string())
+                .unwrap_or_else(|| format!("unknown ({:#x})", texture.format_raw)),
+            usage: texture.usage.label(),
+            byte_length: texture.data.len(),
+            decodable: texture.is_decodable(),
+        })
+        .collect();
+
+    Ok(TexturePreview {
+        path: open.info.path.clone(),
+        textures,
+    })
+}
+
+/// Decode one texture's mip level to a PNG.
+///
+/// Decoded in Rust rather than in the WebView, per the boundary rule: no
+/// browser reads BC-compressed blocks, and shipping the raw payload across
+/// would be handing the frontend archive bytes to parse. PNG rather than raw
+/// RGBA because a 2048² texture is 16 MB of pixels and 22 MB once base64'd.
+#[tauri::command]
+pub fn read_texture_image(
+    index: usize,
+    level: usize,
+    viewer: State<'_, ViewerState>,
+) -> Result<TextureImage, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    let dictionary = open_ytd(open)?;
+
+    let texture = dictionary
+        .textures
+        .get(index)
+        .ok_or_else(|| format!("texture {index} is not in this dictionary"))?;
+
+    let decoded = image::decode_mip(texture, level).map_err(|e| format!("{e}"))?;
+    let png = image::to_png(&decoded).map_err(|e| format!("{e}"))?;
+
+    Ok(TextureImage {
+        index,
+        level,
+        width: decoded.width,
+        height: decoded.height,
+        png: STANDARD.encode(png),
+    })
+}
+
+/// The file format `save_texture` writes.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextureExport {
+    /// The stored pixels with a DDS header in front — no decode, no loss, and
+    /// the whole mip chain.
+    Dds,
+    /// One decoded mip as RGBA. Lossless as an encoding, but a projection of
+    /// the source format onto four 8-bit channels.
+    Png,
+}
+
+/// Write one texture to disk as a `.dds` or a `.png`.
+#[tauri::command]
+pub fn save_texture(
+    index: usize,
+    level: usize,
+    format: TextureExport,
+    destination: String,
+    viewer: State<'_, ViewerState>,
+) -> Result<usize, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+    let dictionary = open_ytd(open)?;
+
+    let texture = dictionary
+        .textures
+        .get(index)
+        .ok_or_else(|| format!("texture {index} is not in this dictionary"))?;
+
+    let bytes = match format {
+        TextureExport::Dds => image::to_dds(texture).map_err(|e| format!("{e}"))?,
+        TextureExport::Png => {
+            let decoded = image::decode_mip(texture, level).map_err(|e| format!("{e}"))?;
+            image::to_png(&decoded).map_err(|e| format!("{e}"))?
+        }
+    };
+
+    write_file(&destination, &bytes)?;
+    Ok(bytes.len())
 }
 
 /// One stream in an open `.awc`.
@@ -579,6 +784,28 @@ mod tests {
         assert!(note.unwrap().contains("renderable"));
     }
 
+    /// A `.ytd` whose bytes hold no decodable texture must say so rather than
+    /// opening an empty gallery. Zeros parse into an empty dictionary, the same
+    /// way they parse into a drawable with no models.
+    #[test]
+    fn does_not_open_the_texture_view_for_an_empty_dictionary() {
+        let empty = vec![0u8; 512];
+        let (viewer, viewers, note) =
+            choose_viewer_for_test(FileKind::Texture, &empty, Some(&resource(512)));
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"texture"));
+        assert!(note.unwrap().contains("no textures"));
+    }
+
+    /// A `.ytd` stored as a binary entry has no page flags, so the payload
+    /// cannot be split into its two segments.
+    #[test]
+    fn refuses_a_texture_dictionary_with_no_resource_header() {
+        let (viewer, _, note) = choose_viewer_for_test(FileKind::Texture, &[0u8; 256], None);
+        assert_eq!(viewer, "hex");
+        assert!(note.unwrap().contains("binary entry"));
+    }
+
     /// The formats that are not ported yet each get a note, so "opens as hex"
     /// never looks like a bug.
     #[test]
@@ -586,7 +813,6 @@ mod tests {
         for kind in [
             FileKind::Fragment,
             FileKind::Particle,
-            FileKind::Texture,
             FileKind::Meta,
             FileKind::Bounds,
         ] {

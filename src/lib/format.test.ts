@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { formatBytes, formatHash, formatOffset, hexLines, HEX_ROW } from "./format";
+import {
+  formatBytes,
+  formatHash,
+  formatOffset,
+  hexLines,
+  shortFormat,
+  HEX_ROW,
+} from "./format";
 
 describe("formatHash", () => {
   test("pads to eight uppercase hex digits", () => {
@@ -61,5 +68,16 @@ describe("formatOffset", () => {
   test("pads to eight uppercase hex digits", () => {
     expect(formatOffset(0)).toBe("00000000");
     expect(formatOffset(0x1f4)).toBe("000001F4");
+  });
+});
+
+describe("shortFormat", () => {
+  test("drops the D3DFMT_ prefix", () => {
+    expect(shortFormat("D3DFMT_DXT5")).toBe("DXT5");
+    expect(shortFormat("D3DFMT_A8R8G8B8")).toBe("A8R8G8B8");
+  });
+
+  test("leaves an unmapped format's raw value visible", () => {
+    expect(shortFormat("unknown (0x3e7)")).toBe("unknown (0x3e7)");
   });
 });

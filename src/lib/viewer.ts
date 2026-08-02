@@ -30,7 +30,7 @@ export type FileKind =
   | "unknown";
 
 /** Which panel shows the file. */
-export type ViewerId = "text" | "hex" | "model" | "audio";
+export type ViewerId = "text" | "hex" | "model" | "audio" | "texture";
 
 export type ResourceInfo = {
   readonly systemSize: number;
@@ -107,6 +107,40 @@ export type ModelPreview = {
   readonly emptyDrawables: number;
 };
 
+/** One texture in a `.ytd`. */
+export type TextureEntry = {
+  /** Position in the dictionary, and the handle for `readTextureImage`. */
+  readonly index: number;
+  readonly name: string;
+  readonly nameHash: number;
+  readonly width: number;
+  readonly height: number;
+  readonly levels: number;
+  /** The `D3DFORMAT` name, e.g. `D3DFMT_DXT5`. */
+  readonly format: string;
+  readonly usage: string;
+  readonly byteLength: number;
+  /** False when the format has no decoder or the payload is short. */
+  readonly decodable: boolean;
+};
+
+export type TexturePreview = {
+  readonly path: string;
+  readonly textures: readonly TextureEntry[];
+};
+
+export type TextureImage = {
+  readonly index: number;
+  readonly level: number;
+  readonly width: number;
+  readonly height: number;
+  /** Base64 of a complete PNG. */
+  readonly png: string;
+};
+
+/** What `saveTexture` writes: the stored mip chain, or one decoded mip. */
+export type TextureExport = "dds" | "png";
+
 /** One stream in an `.awc`. */
 export type AudioTrack = {
   /** Position in the container, and the handle for `readAudioTrack`. */
@@ -153,6 +187,26 @@ export function readHex(offset: number, length: number): Promise<HexPage> {
 
 export function readModel(): Promise<ModelPreview> {
   return invoke<ModelPreview>("read_model");
+}
+
+/** List the textures in the open `.ytd`, without decoding any of them. */
+export function readTexture(): Promise<TexturePreview> {
+  return invoke<TexturePreview>("read_texture");
+}
+
+/** Decode one texture's mip level to a PNG. */
+export function readTextureImage(index: number, level: number): Promise<TextureImage> {
+  return invoke<TextureImage>("read_texture_image", { index, level });
+}
+
+/** Write one texture to disk. Returns the bytes written. */
+export function saveTexture(
+  index: number,
+  level: number,
+  format: TextureExport,
+  destination: string,
+): Promise<number> {
+  return invoke<number>("save_texture", { index, level, format, destination });
 }
 
 /** List the streams in the open `.awc`, without decoding any of them. */

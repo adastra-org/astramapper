@@ -11,6 +11,7 @@ import {
 import { formatBytes } from "../lib/format";
 import { AudioViewer } from "./viewers/AudioViewer";
 import { HexViewer } from "./viewers/HexViewer";
+import { TextureViewer } from "./viewers/TextureViewer";
 import { TextViewer } from "./viewers/TextViewer";
 
 // three.js is most of the frontend bundle and is only needed once someone opens
@@ -21,6 +22,7 @@ const ModelViewer = lazy(async () => ({
 
 const VIEWER_LABELS: Record<ViewerId, string> = {
   model: "3D",
+  texture: "Texture",
   audio: "Audio",
   text: "Text",
   hex: "Hex",
@@ -194,6 +196,8 @@ function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.E
           <ModelViewer path={path} />
         </Suspense>
       );
+    case "texture":
+      return <TextureViewer path={path} />;
     case "audio":
       return <AudioViewer path={path} />;
     case "text":

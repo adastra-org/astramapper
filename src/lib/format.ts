@@ -56,6 +56,17 @@ export function formatOffset(offset: number): string {
   return offset.toString(16).toUpperCase().padStart(8, "0");
 }
 
+/**
+ * A texture format for a narrow column: `D3DFMT_DXT5` becomes `DXT5`.
+ *
+ * The prefix is on every mapped format and on none of the fallbacks, which read
+ * `unknown (0x...)` — so an unmapped format keeps its raw value visible rather
+ * than being trimmed into something that looks like a real name.
+ */
+export function shortFormat(format: string): string {
+  return format.startsWith("D3DFMT_") ? format.slice("D3DFMT_".length) : format;
+}
+
 /** Byte counts for archive listings: `1.4 GB`, `26.4 MB`, `512 B`. */
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
