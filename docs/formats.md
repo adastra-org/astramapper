@@ -19,7 +19,7 @@ files back.
 | `utils/net_random.rs` | .NET `System.Random` | **done** | Not a game format; the key loader needs it. Pinned against .NET Framework 4.8. |
 | `utils/keys.rs` | `Utils/GTAKeys.cs` | **done** | `LoadFromPath` path only. `magic.dat` embedded from `assets/`. |
 | `utils/crypto.rs` | `Utils/GTACrypto.cs` | **done** | AES-256 ECB, NG decrypt, `GTA5Hash`. NG *encrypt* still todo. |
-| `utils/dds.rs` | `Utils/DDSIO.cs` | todo | 124 KB; BC1–BC7. |
+| `image.rs` | `Utils/DDSIO.cs` | **partial** | `GetPixels` and `GetDDSFile`. BC1–BC7 decode via `bcdec_rs`; DDS bytes byte-identical. Reading a `.dds` back in, and the D3DX legacy-format conversions, are not ported. |
 | math | SharpDX.Mathematics | todo | `glam` aliases. `f32` only in serialized layouts. |
 | `text.rs` | — | n/a | Not a port. Encoding sniffing for the Explorer's text viewer. |
 | `filetype.rs` | `GameFileType` + `GameFileCache.cs` switches | n/a | Extension-to-family table, collected rather than ported. |
@@ -112,9 +112,10 @@ file; listing it steps through into the archive transparently.
 | `resources/reader.rs` | `ResourceData.cs` | **partial** | `ResourceDataReader` only. The writer lands with the first format that serializes. |
 | `resources/vertex.rs` | `VertexType.cs`, `VertexDeclaration` | **partial** | Declaration decode and component extraction. Gen9 declarations not ported. |
 | `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes. Reads, does not write. |
+| `resources/texture.rs` | `Texture.cs` (61 KB) | **partial** | `TextureDictionary`, `TextureBase`, `Texture`, `TextureData` and the mip pitch table. Legacy layout only — the Gen9 branch and `ShaderResourceViewG9` go with the Enhanced edition. Reads, does not write. |
 
 `Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB), `Clip` (164 KB),
-`Clothes` (111 KB), `ShaderParams`, `Expression`, `Texture`, `Nav`, `Node`,
+`Clothes` (111 KB), `ShaderParams`, `Expression`, `Nav`, `Node`,
 `Filter`, `VehicleRecord`, `WaypointRecord`, `ResourceBuilder`,
 `ResourceAnalyzer` — all **todo**.
 
@@ -153,6 +154,68 @@ to a shorter stride instead of failing.
 716k vertices: a fifth fall outside it, two thirds for skinned models. The
 per-geometry AABB from `DrawableModel.BoundsPointer` *is* exact — not one vertex
 outside — and is what `drawable_gate.rs` validates against.
+
+### Notes on textures
+
+**The payload length and the mip layout are two different calculations.**
+`TextureData.Read` sizes its read as `stride * height`, quartered per level.
+`DDSIO.GetMipmapImages` finds each mip with `ComputePitch`, which clamps a
+block-compressed level to one whole 4x4 block. The two disagree for the tail
+mips of every compressed texture — a 1x1 DXT1 mip costs 8 bytes, not the 0 the
+first arithmetic reaches. Both are ported and both are needed: `Texture::data`
+is read the first way, `Texture::mips` addresses it the second. A port that used
+one for both would read the right bytes and index them wrongly, or the reverse.
+
+**BC decoding is not a port, and the output differs by a rounding unit.**
+`DecompressDxt1Block` expands the two endpoint colours to 8 bits and *then*
+interpolates with truncating integer division. The D3D spec, and every GPU,
+interpolates in the packed 5/6-bit domain and rounds. `image.rs` uses
+`bcdec_rs`, which does the latter. The endpoints agree exactly — both use the
+same 565→888 expansion — so only block indices 2 and 3 can move, and the worst
+deviation measured over the oracle sample is **1/255**. `texture_gate.rs`
+asserts a bound of 4 and prints the worst it saw, so a real decode error cannot
+hide under it: a swapped channel or a shifted mip moves a value by tens.
+
+**CodeWalker cannot decode BC7.** `GetPixels` has an empty
+`case DXGI_FORMAT_BC7_UNORM: //BC7 TODO!!` and returns null, so a BC7 texture
+shows as nothing in the reference. This port decodes it. There is no oracle for
+that format; the gate checks it against its own DDS round trip instead.
+
+**Two divergences in the channel mapping, both deliberate.** `D3DFMT_X8R8G8B8`
+has no alpha channel — the `X` byte is undefined — and the reference passes the
+stored byte through, so a texture with zeroes there renders invisible. This port
+forces it opaque, and the gate compares RGB only for that format.
+`ConvertBGR5A1ToRGBA8` in the reference computes `v1 * 255 + v0` where the byte
+pair means `v1 * 256 + v0`, and advances its output index by `i * 4` while
+stepping `i` by 2. Both look like slips rather than format rules; `A1R5G5B5` is
+decoded correctly here. It is a rare format and no oracle file uses it.
+
+**The single-channel formats *do* follow the reference, including where that is
+lossy.** `D3DFMT_L8` and `D3DFMT_ATI1` carry one channel and land in red alone
+rather than spread across RGB as a grey. Matching what CodeWalker draws matters
+more than second-guessing what the texture meant, and the gate is exact there.
+
+**Six stock `.ytd` files do not read, in either implementation.** Every one is a
+resource whose payload does not inflate to the size its page flags declare — two
+extract to zero bytes, the rest to about two thirds:
+
+```text
+x64a.rpf\textures\parachute_decals.ytd                 794624 declared,  73349 extracted
+x64f.rpf\...\des_setpiece.rpf\v_des_truck_txd.ytd      188416 declared, 123256
+x64f.rpf\...\des_fib_ceiling2.rpf\v_des_ceil2_txd.ytd   49152 declared,  28123
+x64f.rpf\...\des_hosp_ceil.rpf\des_hosp_ceil.ytd         8192 declared,      0
+x64f.rpf\...\des_hosp_ceil.rpf\des_hosp_ceil_txd.ytd   139264 declared,  84675
+x64f.rpf\...\des_hosp_ceil2.rpf\des_hosp_ceil2_txd.ytd   8192 declared,      0
+```
+
+The reference throws an `ArgumentException` on all six:
+`ResourceDataReader`'s constructor slices two `MemoryStream`s out of a buffer
+too short for them, and the clamping that would avoid it is commented out. This
+port clamps instead, so the header is read out of whatever bytes are there and
+comes back as a plausible-looking pile of hashes. `TextureDictionary::read`
+catches that with the structural invariant — the name and texture lists are
+parallel, so counts that disagree are not a header — and refuses with the reason
+attached. The remaining 88,868 dictionaries and 335,729 textures parse.
 
 ## Audio
 
@@ -196,10 +259,11 @@ Verified over 132.7 million samples against `GetPcmData`.
 
 ## File types
 
-All 41 **todo** as files, though `YdrFile.cs`, `YddFile.cs` and `AwcFile.cs` are
-covered by `resources::read_drawables` and `audio::AwcFile` respectively.
-Planned order: `YtdFile`, `YtypFile`, `YmapFile`, `YdrFile`, `YddFile`,
-`YbnFile`, `YftFile`, `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
+All 41 **todo** as files, though `YdrFile.cs`, `YddFile.cs`, `YtdFile.cs` and
+`AwcFile.cs` are covered by `resources::read_drawables`,
+`resources::read_textures` and `audio::AwcFile` respectively.
+Planned order: `YtypFile`, `YmapFile`, `YbnFile`, `YftFile`, `YndFile`,
+`YmtFile`, `Gxt2File`, then the rest.
 
 `AwcFile` · `Builders` · `CacheDatFile` · `CarColsFile` · `CarModColsFile` ·
 `CarVariationsFile` · `CutFile` · `DistantLightsFile` · `DlcContentFile` ·

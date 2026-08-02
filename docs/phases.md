@@ -14,11 +14,11 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF and the drawable and audio slices of 1.4 done, all gates cleared |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF and the drawable, texture and audio slices of 1.4 done, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **112 unit + 18 gate + 25 frontend**.
+Branch: work happens on `dev`. Current tests: **136 unit + 21 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -64,7 +64,7 @@ The gates (need the game; override the path with `ASTRAMAPPER_GTA_PATH`):
 cargo test --workspace -- --ignored --nocapture
 ```
 
-Four of them compare against oracles whose data is gitignored. Regenerate before
+Five of them compare against oracles whose data is gitignored. Regenerate before
 running, or they skip with a message:
 
 ```bash
@@ -81,6 +81,10 @@ pwsh -File scripts/drawable-oracle.ps1
 
 ```bash
 pwsh -File scripts/awc-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/texture-oracle.ps1
 ```
 
 ---
@@ -207,7 +211,54 @@ Not ported: writing, Gen9 declarations, and everything a drawable points at that
 is not geometry — texture dictionary, skeleton, joints, light attributes,
 bounds, shader parameters.
 
-### 1.4b Audio — AWC — **DONE, gate cleared**
+### 1.4b Resources — textures — **DONE, gate cleared**
+
+Out of order for the same reason as the drawables: a `.ytd` is self-contained,
+and a texture is the second-shortest path from an archive entry to a picture.
+
+Files: `crates/cw-core/src/resources/texture.rs` and
+`crates/cw-core/src/image.rs`, gate at
+`crates/cw-core/tests/texture_gate.rs`, oracle at
+`scripts/texture-oracle.ps1`.
+
+Proven against the real install:
+
+```
+36 files, 198 textures agree with CodeWalker field for field
+198 DDS files byte-identical, 198 decodes within 1/255 per channel
+200 files, 1,000 textures, 368,119,504 pixels decode
+88,868 dictionaries, 335,729 textures parse across the whole install
+```
+
+**Five things worth knowing before touching this code:**
+
+1. **The payload length and the mip layout are two different calculations.**
+   `TextureData.Read` sizes its read as `stride * height` quartered per level;
+   `GetMipmapImages` finds each mip with `ComputePitch`, which clamps a
+   compressed level to one whole 4x4 block. They disagree for the tail mips of
+   every compressed texture. Both are needed — one reads the right bytes, the
+   other indexes them.
+2. **BC decoding is `bcdec_rs`, not a port, and the output differs by a
+   rounding unit.** The reference interpolates block colours in 8-bit space with
+   truncating division; the D3D spec interpolates in the packed 5/6-bit domain
+   and rounds. The endpoints agree exactly, so only indices 2 and 3 move, by at
+   most 1/255 over the whole oracle sample. The gate pins the bound.
+3. **CodeWalker cannot decode BC7** — `GetPixels` has an empty case for it. This
+   port can, so there is no oracle for that format and the gate checks it
+   against its own DDS round trip.
+4. **Six stock `.ytd` files do not read, in either implementation.** They are
+   resources whose payload does not inflate to the size their page flags
+   declare. The reference throws; this port refuses on the structural invariant
+   that the name and texture lists are parallel. See `formats.md` for the list.
+5. **`TextureBase` and `Texture` are one struct read in two halves.** The
+   reference declares width, height, format and the data pointer on the *base*
+   class for Gen9's sake, but the Legacy reader only fills them in the subclass
+   at offset 0x50.
+
+Not ported: writing, the Gen9 layout, reading a `.dds` back in, and the D3DX
+legacy-format conversions in `DDSIO`.
+
+### 1.4c Audio — AWC — **DONE, gate cleared**
 
 Also out of order, for the same reason: `.awc` is self-contained, so a viewer
 can play it without any of `1.3` landing first.
@@ -246,11 +297,10 @@ hand-port them.
 
 ### 1.4 Resources, then FileTypes
 
-`resources/` first (Drawable, Bounds, Frag, Texture, Clip, Particle,
-ShaderParams, VertexType, ResourceBaseTypes/Data/Builder) — the shared building
-blocks. Then the 41 file types in dependency order: `YtdFile`, `YtypFile`,
-`YmapFile`, `YdrFile`, `YddFile`, `YbnFile`, `YftFile`, `YndFile`, `YmtFile`,
-`Gxt2File`, then the rest.
+The rest of `resources/` (Bounds, Frag, Clip, Particle, ShaderParams,
+ResourceBaseTypes/Builder) — the shared building blocks. Then the remaining file
+types in dependency order: `YtypFile`, `YmapFile`, `YbnFile`, `YftFile`,
+`YndFile`, `YmtFile`, `Gxt2File`, then the rest.
 
 Per format: a round-trip byte-equality test on a real fixture **plus** a JSON
 `describe()` snapshot for the phase 2 viewers.
@@ -286,18 +336,23 @@ install browses as one tree — nested archives included, with no visible seam a
 an `.rpf` boundary. Gate at `src-tauri/tests/explorer_gate.rs`.
 
 **Viewing.** `src-tauri/src/viewer.rs` (`open_entry`, `read_text`, `read_hex`,
-`read_model`, `extract_to`, `save_text`), `src/lib/viewer.ts`,
+`read_model`, `read_texture`, `extract_to`, `save_text`), `src/lib/viewer.ts`,
 `src/components/FileViewer.tsx` and `src/components/viewers/`. One file is open
 at a time and its extracted payload is held on the Rust side, so paging a 20 MB
 file does not re-decrypt and re-inflate it per scroll.
 
-Four viewers, and the backend picks which one opens because that decision needs
+Five viewers, and the backend picks which one opens because that decision needs
 the payload:
 
 - **3D** for `.ydr` and `.ydd`, via three.js over the mesh buffers from
   `cw_core::mesh`. Orbit, wireframe, LOD and per-drawable selection for a
   dictionary. Positions, normals and texcoords are decoded in Rust; the WebView
   uploads buffers and nothing else.
+- **Texture** for `.ytd`. The dictionary is listed on open and one texture is
+  decoded at a time, to PNG — a 2048² surface is 16 MB of RGBA and 22 MB once
+  base64'd, so PNG is faster to ship than raw pixels and the WebView decodes it
+  natively. Mip picker, an alpha checkerboard, and export as `.dds` (the stored
+  mip chain, lossless) or `.png` (the mip on screen).
 - **Audio** for `.awc`. Streams are listed on open and decoded one at a time —
   a container runs to hundreds of them — then played as WAV in an `<audio>`
   element, or saved to disk. ADPCM is decoded in Rust; no browser plays
@@ -320,8 +375,11 @@ something else.
 
 - **Writing back into an archive.** The blocker for a real editor. Needs
   `RpfFile.Write`, `CompressBytes` and NG *encryption* (`RandomGauss.Solve`).
-- **Texture previews.** `.ytd` needs `Texture.cs` plus BC1–BC7 decoding in Rust
-  (`bcdec`), then RGBA across the boundary.
+- **Textures on models.** The 3D viewer draws untextured. A `.ydr` names its
+  materials by hash and points at an embedded texture dictionary the drawable
+  reader steps past; both halves now exist, so wiring them together is reading
+  `ShaderGroup.TextureDictionary` and `ShaderParams.cs` for which texture fills
+  which slot.
 - **Fragments and particles.** `.yft` and `.ypt` embed drawables the 3D viewer
   could already draw; reaching them needs `Frag.cs` and `Particle.cs`.
 - **Meta viewers.** `.ymap`/`.ytyp`/`.ymt` need 1.3, and would then show as XML

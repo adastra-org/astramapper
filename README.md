@@ -8,7 +8,7 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 2 in progress — the whole install browses, and four viewers work
+## Status: phase 2 in progress — the whole install browses, and five viewers work
 
 **Works**
 
@@ -21,17 +21,21 @@ archives, view and extract what is inside them, and render and edit the world in
 - **Explorer viewers**, with the backend choosing which one opens because that
   decision needs the payload:
   - **3D** for `.ydr` and `.ydd`, in three.js over mesh buffers decoded in Rust.
+  - **Texture** for `.ytd` — BC1–BC7 decoded in Rust, mip picker, alpha
+    checkerboard, export as `.dds` or `.png`.
   - **Audio** for `.awc` — every stream listed, decoded on demand, played or
     saved as WAV.
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 112 unit tests, 18 install-dependent gate tests, 25 frontend tests. Format
+- 136 unit tests, 21 install-dependent gate tests, 27 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
   drawables  213 geometries, 80,350 vertices identical; 716,436 vertices
              inside their own AABB across 300 files
+  textures   198 textures identical field for field, 198 .dds files byte for
+             byte; 335,729 textures parse across the whole install
   audio      261 streams, 132,741,415 samples decode identically;
              400 containers open, 104,263 seconds of audio
   ```
@@ -41,8 +45,10 @@ archives, view and extract what is inside them, and render and edit the world in
 - Writing. Reading only, everywhere: `RpfFile.Write`, `CompressBytes` and NG
   *encryption* are all still open, so a text edit saves a copy to disk rather
   than going back into the archive.
-- Textures (`.ytd`), metadata (`.ymap`, `.ytyp`), fragments (`.yft`), collision
-  (`.ybn`) — each opens as hex, with a note saying which parser is missing.
+- Metadata (`.ymap`, `.ytyp`), fragments (`.yft`), collision (`.ybn`) — each
+  opens as hex, with a note saying which parser is missing.
+- Textures on models: the 3D viewer draws untextured. Both halves exist now;
+  matching a material to a texture needs `ShaderParams.cs`.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
 - World and Project are placeholder panels; `crates/cw-render` does not exist.
 
@@ -71,11 +77,11 @@ Tests that need a real GTA V install are marked `#[ignore]`:
 cargo test --workspace -- --ignored
 ```
 
-Three of those gates compare against data dumped from the reference DLL. The
+Four of those gates compare against data dumped from the reference DLL. The
 dumps are gitignored; regenerate them first or the gates skip with a message:
 
 ```bash
-pwsh -File scripts/rpf-oracle.ps1; pwsh -File scripts/drawable-oracle.ps1; pwsh -File scripts/awc-oracle.ps1
+pwsh -File scripts/rpf-oracle.ps1; pwsh -File scripts/drawable-oracle.ps1; pwsh -File scripts/awc-oracle.ps1; pwsh -File scripts/texture-oracle.ps1
 ```
 
 ## Docs
