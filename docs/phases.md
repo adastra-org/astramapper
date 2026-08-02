@@ -14,11 +14,11 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip and bounds slices of 1.4 done, all gates cleared |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **171 unit + 28 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **175 unit + 30 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -97,6 +97,10 @@ pwsh -File scripts/meta-oracle.ps1
 
 ```bash
 pwsh -File scripts/bounds-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/frag-oracle.ps1
 ```
 
 ---
@@ -370,6 +374,43 @@ and every `SphereIntersect`/`RayIntersect` collision routine in `World/`. The
 viewer draws the triangles via `Bounds::triangle_mesh`, which pushes each vertex
 through the composite transform chain the way `GetVertexPos` does.
 
+### 1.4f Resources — fragments — **DONE, gate cleared**
+
+`.yft` is self-contained like the five before it, and it is what the drawable's
+`BoundPointer` and most of the game's prop, vehicle and ped models live in.
+
+Files: `crates/cw-core/src/resources/frag.rs`, gate at
+`crates/cw-core/tests/frag_gate.rs`, oracle at `scripts/frag-oracle.ps1`.
+
+Proven against the real install:
+
+```
+8 files, 228 drawables, 13 renderable geometries agree with CodeWalker field
+  for field across the whole physics LOD tree
+61,430 of 61,430 .yft files parse across the whole install
+  (223,359 embedded drawables, 459,734 geometries)
+```
+
+**Three things worth knowing before touching this code:**
+
+1. **A `.yft` is a shell, not a drawable.** `FragType` holds a main
+   `FragDrawable`, a cloth, an alternative array and a physics LOD tree whose
+   children each carry up to two more drawables. `all_drawables` flattens that
+   tree in the order the reference walks it, so the viewer draws a `.yft` the
+   way `YftFile.Load` + `AssignChildrenShaders` do.
+2. **`FragDrawable` is a `DrawableBase` plus a fixed 168-byte tail.** The base
+   is the same 168 bytes a `.ydr`'s drawable opens with, so the geometry reader
+   is reused verbatim; the tail adds the fragment matrix, a bounds pointer and
+   optional transform arrays. Treating it as a full 208-byte `Drawable` would
+   misread the tail as geometry.
+3. **The physics chain is read through even when only the drawables matter.**
+   The joint types dispatch on a byte at offset 0x15 of the block (0 → 1-DOF,
+   1 → 3-DOF, anything else → null). Group names are ten little-endian uints
+   packing forty ASCII characters.
+
+Not ported: writing, the articulated body and joint structures beyond the type
+dispatch, `EnvironmentCloth`, `LightAttributes`, and `FragPhysTransforms`.
+
 ### 1.3 MetaTypes — **DONE, gate cleared**
 
 `meta/` ← `MetaTypes/`. All three container encodings and the walk that turns any
@@ -411,10 +452,10 @@ entities).
 
 ### 1.4 Resources, then FileTypes
 
-The rest of `resources/` (Frag, Particle, ShaderParams,
+The rest of `resources/` (Particle, ShaderParams, Clothes,
 ResourceBaseTypes/Builder) — the shared building blocks. Then the remaining file
 types in dependency order: `YtypFile`, `YmapFile`, `YbnFile` (its `Bounds` now
-portable), `YftFile`, `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
+portable), `YndFile`, `YmtFile`, `Gxt2File`, then the rest.
 
 Per format: a round-trip byte-equality test on a real fixture **plus** a JSON
 `describe()` snapshot for the phase 2 viewers.

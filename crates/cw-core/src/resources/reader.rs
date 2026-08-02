@@ -210,6 +210,34 @@ impl<'a> ResourceReader<'a> {
         ))
     }
 
+    pub fn read_f32s_at(&mut self, at: u64, count: usize) -> Result<Option<Vec<f32>>> {
+        let Some(bytes) = self.read_bytes_at(at, count * 4)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ))
+    }
+
+    /// `count` little-endian `Vector4`s (`[f32; 4]`, 16 bytes each) at `at`.
+    pub fn read_vec4s_at(&mut self, at: u64, count: usize) -> Result<Option<Vec<[f32; 4]>>> {
+        let Some(bytes) = self.read_bytes_at(at, count * 16)? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            bytes
+                .chunks_exact(16)
+                .map(|c| {
+                    let f = |i: usize| f32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]);
+                    [f(0), f(4), f(8), f(12)]
+                })
+                .collect(),
+        ))
+    }
+
     /// A NUL-terminated string at `at`, read out of whichever segment it lands
     /// in. Absent for a null pointer.
     pub fn read_string_at(&mut self, at: u64) -> Result<Option<String>> {

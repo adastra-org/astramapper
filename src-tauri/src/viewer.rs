@@ -24,7 +24,8 @@ use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, MetaNode};
 use cw_core::resources::{
     read_bounds as read_collision_bounds, read_clips as read_clip_dictionary, read_drawables,
-    read_named_drawables, read_textures, Drawable, Texture, TextureDictionary,
+    read_named_drawables, read_named_fragments, read_textures, Drawable, Texture,
+    TextureDictionary,
 };
 use cw_core::rpf::EntryKind;
 use cw_core::text::{self, Encoding, TextFile};
@@ -339,6 +340,42 @@ fn choose_viewer(
     }
 
     if kind.has_model() {
+        let system_size = resource.map(|r| r.system_size);
+        // A `.yft` has no top-level drawable: its geometry lives in the embedded
+        // `FragDrawable`s, read via `Frag.cs`.
+        if kind == FileKind::Fragment {
+            return match system_size {
+                Some(system_size) => {
+                    match cw_core::resources::read_fragments(kind, data, system_size) {
+                        Ok(fragment)
+                            if fragment
+                                .all_drawables()
+                                .iter()
+                                .any(|d| d.drawable.has_geometry()) =>
+                        {
+                            viewers.insert(0, "model");
+                            ("model", viewers, None)
+                        }
+                        Ok(_) => (
+                            viewers[0],
+                            viewers.clone(),
+                            Some("this fragment holds no renderable geometry".into()),
+                        ),
+                        Err(e) => (
+                            viewers[0],
+                            viewers.clone(),
+                            Some(format!("could not read the fragment: {e}")),
+                        ),
+                    }
+                }
+                None => (
+                    viewers[0],
+                    viewers.clone(),
+                    Some("a fragment stored as a binary entry, not a resource".into()),
+                ),
+            };
+        }
+
         match resource {
             Some(resource) => match read_drawables(kind, data, resource.system_size) {
                 Ok(drawables) if drawables.iter().any(Drawable::has_geometry) => {
@@ -368,8 +405,8 @@ fn choose_viewer(
     }
 
     let note = match kind {
-        FileKind::Fragment | FileKind::Particle if !readable_as_text => {
-            Some("fragments and particle dictionaries embed drawables, but Frag.cs and Particle.cs are not ported yet".into())
+        FileKind::Particle if !readable_as_text => {
+            Some("particle dictionaries embed drawables, but Particle.cs is not ported yet".into())
         }
         FileKind::AudioMetadata if !readable_as_text => {
             Some("RelFile.cs, which names and sequences the waves in the .awc files, is not ported yet".into())
@@ -428,8 +465,12 @@ pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String
         .as_ref()
         .ok_or("this file is not a resource, so it has no geometry")?;
 
-    let named = read_named_drawables(open.info.file_kind, &open.data, resource.system_size)
-        .map_err(|e| format!("could not read the geometry: {e}"))?;
+    let named = match open.info.file_kind {
+        FileKind::Fragment => read_named_fragments(open.info.file_kind, &open.data, resource.system_size)
+            .map_err(|e| format!("could not read the geometry: {e}"))?,
+        _ => read_named_drawables(open.info.file_kind, &open.data, resource.system_size)
+            .map_err(|e| format!("could not read the geometry: {e}"))?,
+    };
 
     let mut empty_drawables = 0;
     let drawables: Vec<ModelDrawable> = named
@@ -1131,6 +1172,19 @@ mod tests {
         let empty = vec![0u8; 512];
         let (viewer, viewers, note) =
             choose_viewer_for_test(FileKind::Model, &empty, Some(&resource(512)));
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"model"));
+        assert!(note.unwrap().contains("renderable"));
+    }
+
+    /// A `.yft` whose bytes hold no renderable drawable must say so rather than
+    /// opening an empty 3D view. Zeros parse into a fragment with nothing in it,
+    /// the same way they parse into a drawable with no models.
+    #[test]
+    fn does_not_open_the_3d_view_for_a_fragment_with_no_geometry() {
+        let empty = vec![0u8; 512];
+        let (viewer, viewers, note) =
+            choose_viewer_for_test(FileKind::Fragment, &empty, Some(&resource(512)));
         assert_eq!(viewer, "hex");
         assert!(!viewers.contains(&"model"));
         assert!(note.unwrap().contains("renderable"));

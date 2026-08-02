@@ -123,6 +123,23 @@
         "checks it is exactly the number of Triangle polygons the oracle read."
       ],
       "requires": "A GTA V Legacy install and a built CodeWalker at E:\\Ad Astra Tools\\CodeWalker."
+    },
+    {
+      "path": "frag_oracle.json",
+      "generate": "pwsh -File scripts/frag-oracle.ps1",
+      "oracle": "CodeWalker.Core.dll, loaded into Windows PowerShell 5.1",
+      "usedBy": [
+        "crates/cw-core/tests/frag_gate.rs::agrees_with_the_reference_fragment_reader",
+        "crates/cw-core/tests/frag_gate.rs::every_fragment_in_the_install_parses"
+      ],
+      "describes": [
+        "For .yft files: the fragment header name and bounding sphere, the main",
+        "drawable, the cloth, the alternative drawable array and its names, and",
+        "the whole physics LOD tree — per LOD the groups and every child's masses,",
+        "tags and up to two drawables, each with its geometry, shaders, LOD models",
+        "and fragment matrix. 8 files sampled from x64a, x64b and common."
+      ],
+      "requires": "A GTA V Legacy install and a built CodeWalker at E:\\Ad Astra Tools\\CodeWalker."
     }
   ]
 }

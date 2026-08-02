@@ -127,11 +127,11 @@ impl FileKind {
         }
     }
 
-    /// Whether a 3D preview is possible today. `Fragment` and `Particle` embed
-    /// drawables too, but reaching them needs `Frag.cs` and `Particle.cs`, which
-    /// are not ported — see `docs/formats.md`.
+    /// Whether a 3D preview is possible today. `Fragment` embeds its own
+    /// drawables, reached through `Frag.cs`; `Particle` embeds drawables too,
+    /// but behind `Particle.cs`, which is not ported.
     pub fn has_model(self) -> bool {
-        matches!(self, FileKind::Model | FileKind::ModelDictionary)
+        matches!(self, FileKind::Model | FileKind::ModelDictionary | FileKind::Fragment)
     }
 
     /// Whether a texture preview is possible today. Only `.ytd` — a `.ydr` and
@@ -230,7 +230,8 @@ mod tests {
     fn only_the_two_ported_formats_claim_a_model() {
         assert!(FileKind::Model.has_model());
         assert!(FileKind::ModelDictionary.has_model());
-        assert!(!FileKind::Fragment.has_model(), "Frag.cs is not ported");
+        assert!(FileKind::Fragment.has_model(), "Frag.cs is now ported");
+        assert!(!FileKind::Particle.has_model(), "Particle.cs is not ported");
         assert!(!FileKind::Texture.has_model());
     }
 

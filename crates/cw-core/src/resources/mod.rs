@@ -7,6 +7,7 @@
 pub mod bounds;
 pub mod clip;
 pub mod drawable;
+pub mod frag;
 pub mod reader;
 pub mod texture;
 pub mod vertex;
@@ -18,6 +19,10 @@ pub use bounds::{
 pub use clip::{Animation, AnimationBoneId, Clip, ClipDictionary, ClipType};
 pub use drawable::{
     Aabb, Drawable, DrawableDictionary, DrawableGeometry, DrawableModel, Lod, ShaderFx,
+};
+pub use frag::{
+    FragBoneTransforms, FragDrawable, FragGlassWindow, FragPhysicsLOD, FragPhysicsLODGroup,
+    FragPhysArchetype, FragPhysTypeChild, FragPhysTypeGroup, FragType, FragVehicleGlassWindows,
 };
 pub use reader::{version_from_flags, ResourceReader, GRAPHICS_BASE, SYSTEM_BASE};
 pub use texture::{MipLevel, Texture, TextureDictionary, TextureFormat, TextureUsage};
@@ -180,6 +185,83 @@ pub fn read_bounds(kind: FileKind, data: &[u8], system_size: usize) -> Result<Bo
             detail: format!("no bounds reader for a {} file", kind.label()),
         }),
     }
+}
+
+/// Read the single fragment type a payload holds.
+///
+/// `.yft` only. The fragment embeds its own drawables — the main one, a cloth,
+/// an alternative array and the physics children — which is how the 3D viewer
+/// draws a `.yft` the way `YftFile.Load` + `AssignChildrenShaders` do.
+pub fn read_fragments(kind: FileKind, data: &[u8], system_size: usize) -> Result<FragType> {
+    match kind {
+        FileKind::Fragment => {
+            let mut r = ResourceReader::new(data, system_size);
+            FragType::read(&mut r)
+        }
+        _ => Err(CwError::Invalid {
+            what: "fragment",
+            detail: format!("no fragment reader for a {} file", kind.label()),
+        }),
+    }
+}
+
+/// Read a fragment as a flat list of named drawables.
+///
+/// `YftFile.Load` leaves the drawables where the fragment holds them; the
+/// viewer wants one list. Every renderable drawable reachable from the fragment
+/// is named after the part of the fragment that holds it, so the source shows
+/// in the viewer's dropdown the way a `.ydd`'s dictionary names show.
+pub fn read_named_fragments(
+    kind: FileKind,
+    data: &[u8],
+    system_size: usize,
+) -> Result<Vec<NamedDrawable>> {
+    let fragment = read_fragments(kind, data, system_size)?;
+
+    let mut out: Vec<NamedDrawable> = Vec::new();
+    let push = |name: String, drawable: Drawable, out: &mut Vec<NamedDrawable>| {
+        let hash = drawable
+            .name
+            .as_ref()
+            .map(|n| gen_hash(n))
+            .unwrap_or_else(|| gen_hash(&name));
+        out.push(NamedDrawable {
+            index: out.len(),
+            hash,
+            name,
+            drawable,
+        });
+    };
+
+    if let Some(d) = &fragment.drawable {
+        push("drawable".into(), d.drawable.clone(), &mut out);
+    }
+    if let Some(d) = &fragment.drawable_cloth {
+        push("cloth".into(), d.drawable.clone(), &mut out);
+    }
+    for (i, d) in fragment.drawable_array.iter().enumerate() {
+        let name = fragment
+            .drawable_array_names
+            .get(i)
+            .and_then(|n| n.as_deref())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("drawable{i}"));
+        push(name, d.drawable.clone(), &mut out);
+    }
+    if let Some(group) = &fragment.physics_lod_group {
+        for (li, lod) in group.all_lods().iter().enumerate() {
+            for (ci, child) in lod.children.iter().enumerate() {
+                if let Some(d) = &child.drawable1 {
+                    push(format!("lod{li}.child{ci}.drawable1"), d.drawable.clone(), &mut out);
+                }
+                if let Some(d) = &child.drawable2 {
+                    push(format!("lod{li}.child{ci}.drawable2"), d.drawable.clone(), &mut out);
+                }
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]

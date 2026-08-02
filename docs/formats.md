@@ -156,15 +156,15 @@ by the oracle's own rule so the comparison stays about what was read.
 | `resources/reader.rs` | `ResourceData.cs` | **partial** | `ResourceDataReader` only. The writer lands with the first format that serializes. |
 | `resources/vertex.rs` | `VertexType.cs`, `VertexDeclaration` | **partial** | Declaration decode and component extraction. Gen9 declarations not ported. |
 | `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes. Reads, does not write. |
+| `resources/frag.rs` | `Frag.cs` (190 KB) | **partial** | `FragType`, `FragDrawable` (a `DrawableBase` plus a 168-byte fragment tail), `FragBoneTransforms`, `FragGlassWindow`, `FragVehicleGlassWindows`, and the physics LOD tree: `FragPhysicsLODGroup` → `FragPhysicsLOD` → `FragPhysTypeChild`/`FragPhysTypeGroup`/`FragPhysArchetype`. The joint types, articulated body, evt sets and transforms are read through for the pointer chain but not kept. Reads, does not write. |
 | `resources/texture.rs` | `Texture.cs` (61 KB) | **partial** | `TextureDictionary`, `TextureBase`, `Texture`, `TextureData` and the mip pitch table. Legacy layout only — the Gen9 branch and `ShaderResourceViewG9` go with the Enhanced edition. Reads, does not write. |
 | `resources/clip.rs` | `Clip.cs` (164 KB) | **partial** | `ClipDictionary`, both hash maps, `Clip` (animation and animation-list) and `Animation` headers. The channel codecs, tags and properties are not read: tags and properties are counted. |
 | `resources/bounds.rs` | `Bounds.cs` (5488 lines) + `YbnFile.cs` | **partial** | `BoundsDictionary` not ported; a `.ybn` reads one `Bounds` root per `YbnFile.Load`. The type-byte dispatch, the shared 112-byte base, the primitive tails, `BoundGeometry` (quantised vertices, polygons, materials, octants), `BoundBVH` and `BoundComposite` with their transform/bounds/flag arrays and `BVH` blocks. Reads, does not write. |
 | `bounds_mesh` (in `resources/bounds.rs`) | `GetVertexPos` + the world-space walk | n/a | Not a port. Flattens the triangle polygons of the whole tree into uploadable buffers, pushing each vertex through the composite transform chain. |
 
-`Particle` (264 KB), `Bounds` (212 KB), `Frag` (190 KB),
-`Clothes` (111 KB), `ShaderParams`, `Expression`, `Nav`, `Node`,
+`Particle` (264 KB), `Clothes` (111 KB), `Expression`, `Nav`, `Node`,
 `Filter`, `VehicleRecord`, `WaypointRecord`, `ResourceBuilder`,
-`ResourceAnalyzer` — all **todo**.
+`ResourceAnalyzer` — all **todo**. (`ShaderParams` is a name table, see below.)
 
 Not read by `resources/drawable.rs`, though their pointers are kept: the
 embedded texture dictionary, the skeleton, joints, light attributes, collision
@@ -330,6 +330,35 @@ own `Name` field is only trusted when it hashes back to the entry it sits under.
 Where it does not, the entry shows as `hash_XXXXXXXX`, which is what the
 reference displays. A `.ydr` opens through the same path as a dictionary of one.
 
+### Notes on fragments
+
+**A `.yft` is a shell around drawables, not a drawable itself.** `FragType`
+holds one main `FragDrawable`, one cloth, an alternative array and a physics
+LOD tree whose children each carry up to two more drawables (intact/damaged).
+The reference's `YftFile.Load` reads the root, then `AssignChildrenShaders`
+walks the physics tree giving each child the main drawable's shader group; the
+viewer enumerates the same set via `all_drawables`, named by where they sit
+(`drawable`, `cloth`, `drawable0`, `lod1.child3.drawable2`).
+
+**`FragDrawable` is a `DrawableBase` plus a fixed 168-byte tail.** The base is
+the same 168 bytes a `.ydr`'s drawable opens with — shader group, bounds, LOD
+model pointers — so the geometry reader is reused verbatim and the tail adds
+the fragment matrix, a bounds pointer and optional transform arrays. The whole
+thing is 336 bytes; a port that treated a `FragDrawable` as a full `Drawable`
+(208 bytes) would misread the tail as geometry.
+
+**The physics chain is read through even when only the drawables matter.** The
+joint types dispatch on a byte at offset 0x15 of the block (0 → 1-DOF, 1 →
+3-DOF, anything else → null), and `FragPhysGroupNamesBlock` re-reads each
+group's embedded name struct from its own pointers. Vanilla files embed the
+names in the groups, so the sibling block is skipped; the group name struct is
+ten little-endian uints packing forty ASCII characters, which `ToString` emits
+LSB-first and trims at the first NUL.
+
+**Not ported:** the articulated body and joint structures beyond the type
+dispatch (they are read through, not kept), `EnvironmentCloth`, `LightAttributes`,
+`FragPhysTransforms` (the joint matrices), and writing.
+
 ## Audio
 
 | Unit | C# reference | Status | Notes |
@@ -373,11 +402,12 @@ Verified over 132.7 million samples against `GetPcmData`.
 ## File types
 
 All **todo** as files, though `YdrFile.cs` and `YddFile.cs` are covered by
-`resources::read_named_drawables`, `YtdFile.cs` by `resources::read_textures`,
-`YcdFile.cs` by `resources::read_clips`, `YmtFile.cs` by `meta::read_meta`,
-`YbnFile.cs` by `resources::read_bounds`, and
+`resources::read_named_drawables`, `YftFile.cs` by `resources::read_fragments`,
+`YtdFile.cs` by `resources::read_textures`, `YcdFile.cs` by
+`resources::read_clips`, `YmtFile.cs` by `meta::read_meta`, `YbnFile.cs` by
+`resources::read_bounds`, and
 `AwcFile.cs` by `audio::AwcFile`.
-Planned order: `YtypFile`, `YmapFile`, `YftFile`, `YndFile`,
+Planned order: `YtypFile`, `YmapFile`, `YndFile`,
 `Gxt2File`, then the rest. `YtypFile` and `YmapFile` are metadata containers, so
 they already open in the Explorer as trees; what is left is the typed model
 above the tree.

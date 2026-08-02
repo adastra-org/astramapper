@@ -21,6 +21,9 @@ archives, view and extract what is inside them, and render and edit the world in
 - **Explorer viewers**, with the backend choosing which one opens because that
   decision needs the payload:
   - **3D** for `.ydr` and `.ydd`, in three.js over mesh buffers decoded in Rust.
+  - **Fragments** for `.yft`, the physics-wrapped drawables that make up most of
+    the game's props, vehicles and peds — the main drawable, the cloth, the
+    alternative array and every physics child, each named by where it sits.
   - **Collision** for `.ybn`, in three.js over the whole composite tree
     flattened to world space — vertices quantised in Rust, child transforms
     applied, triangles uploaded as buffers.
@@ -31,7 +34,7 @@ archives, view and extract what is inside them, and render and edit the world in
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 171 unit tests, 28 install-dependent gate tests, 27 frontend tests. Format
+- 175 unit tests, 30 install-dependent gate tests, 27 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -43,6 +46,8 @@ archives, view and extract what is inside them, and render and edit the world in
              400 containers open, 104,263 seconds of audio
   bounds     85 geometries, 127,345 polygons identical, 126,942 triangles
              flattened one for one; 15,139 .ybn files parse, 104.6M triangles
+  fragments  228 drawables across the physics LOD tree identical; 61,430 .yft
+             files parse, 223,359 embedded drawables, 459,734 geometries
   ```
 
 **Not yet**
@@ -50,8 +55,8 @@ archives, view and extract what is inside them, and render and edit the world in
 - Writing. Reading only, everywhere: `RpfFile.Write`, `CompressBytes` and NG
   *encryption* are all still open, so a text edit saves a copy to disk rather
   than going back into the archive.
-- Metadata (`.ymap`, `.ytyp`), fragments (`.yft`), particles (`.ypt`) — each
-  opens as hex or a tree, with a note saying which parser is missing.
+- Metadata (`.ymap`, `.ytyp`), particles (`.ypt`) — each opens as hex or a
+  tree, with a note saying which parser is missing.
 - Textures on models: the 3D viewer draws untextured. Both halves exist now;
   matching a material to a texture needs `ShaderParams.cs`.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
