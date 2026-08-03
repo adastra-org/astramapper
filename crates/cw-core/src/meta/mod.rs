@@ -29,11 +29,22 @@ pub mod pso;
 pub mod rbf;
 pub mod rsc;
 pub mod tree;
+pub mod typed;
 
 pub use pso::PsoFile;
 pub use rbf::RbfStructure;
 pub use rsc::Meta;
 pub use tree::MetaNode;
+pub use typed::{
+    convert_data_array, convert_data_array_ptr, decode_at, get_byte_array, get_float_array,
+    get_hash_array, get_pointer_array, get_string, get_strings, get_typed_data,
+    get_typed_pointer_array, get_uint_array, get_vec4_array, Array, AssetType, BaseArchetypeDef,
+    BlockDesc, BoxOccluder, CarGen, CompositeEntityType, DataBlockPointer, Decode, DistantLodLight,
+    EntityDef, GrassInstanceData, GrassInstanceListDef, InstancedMapData, LodLevel, LodLight,
+    MapData, MloArchetypeDef, MloEntitySet, MloInstanceDef, MloPortalDef, MloRoomDef,
+    MloTimeCycleModifier, OccludeModel, PriorityLevel, SpdAabb, TimeArchetypeDef,
+    TimeCycleModifier, MapTypes,
+};
 
 use crate::filetype::FileKind;
 use crate::resources::reader::ResourceReader;

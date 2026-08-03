@@ -11,6 +11,7 @@
 
 pub mod audio;
 pub mod filetype;
+pub mod filetypes;
 pub mod gxt2;
 pub mod image;
 pub mod mesh;

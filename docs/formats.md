@@ -106,6 +106,7 @@ file; listing it steps through into the archive transparently.
 | `meta/pso.rs` | `Pso.cs` | **partial** | Section loop, data map, schema (structures and enums), string tables. Big-endian, as PC stores it. |
 | `meta/rbf.rs` | `Rbf.cs` | **partial** | The token stream, descriptor interning, attribute counts. Writer not ported. |
 | `meta/tree.rs` | `MetaXml.cs` (`MetaXml`, `PsoXml`, `RbfXml`) | **partial** | Walks any of the three into a tree of named values, resolved against the schema the file carries. Values are formatted as the reference formats them. |
+| `meta/typed.rs` | `MetaTypes.Get*` helpers | **partial** | The typed layer `YtypFile` and `YmapFile` build on: `GetTypedData`, `GetPointerArray`, `GetTypedPointerArray`, `ConvertDataArray`, `GetHashArray`/`GetUintArray`/`GetFloatArray`/`GetByteArray`, `GetString(s)`, and the packed records (`CMapData`, `CEntityDef`, `CBaseArchetypeDef`, `CMloArchetypeDef`, `CMloRoomDef`, `CMloPortalDef`, `CMloEntitySet`, `CMloTimeCycleModifier`, `CMloInstanceDef`, `CMapTypes`, `CCompositeEntityType`, `CCarGen`, `CTimeCycleModifier`, `BoxOccluder`, `OccludeModel`, `CLODLight`, `CDistantLODLight`, `CBlockDesc`, the grass records). Read only. |
 | `PsoTypes.cs` (1.5 MB) | — | not ported | The fallback definitions for structures a PSO file does not declare. Four nodes in two `.ymt` in the install need it; everything else is self-describing. |
 
 ### Notes on the metadata layer
@@ -148,6 +149,25 @@ as `3431763157` and not as `-863204139`.
 element's attributes are attributes in the reference's output and children here,
 because a tree has nowhere else to put them. `meta_gate.rs` flattens both sides
 by the oracle's own rule so the comparison stays about what was read.
+
+**A typed record may straddle a block's last byte.** `MetaTypes` decodes records
+with `Marshal.PtrToStructure`, which checks only that the record *starts* inside
+the block and reads the tail regardless of where it lands — real files rely on
+it, e.g. the second archetype of a two-archetype block runs past the block's end
+in stock `.ytyp`. `meta/typed.rs` reproduces the bounds rule: a record that
+starts past the end is absent, a record that starts inside but runs past it
+decodes with the missing tail zero-filled, matching this crate's short-read rule
+elsewhere. The fields before the end are real; the fields after it are whatever
+the reference read out of adjacent memory, so the gate compares only in-bounds
+fields.
+
+**The typed layer decodes by field offset, not by schema.** `GetTypedData<T>`
+finds the first block whose structure name matches and reads the raw bytes at
+the offsets `MetaTypes.cs` documents. The schema the file carries (the
+`MetaStructure` tables) is not consulted for these records — the C# struct layout
+is the layout. `meta/typed.rs` keeps a `Decode` impl per record with the
+reference's offsets verbatim, and the `.ytyp`/`.ymap` gates compare against the
+reference structure for structure.
 
 ## Resources
 
@@ -429,10 +449,15 @@ All **todo** as files, though `YdrFile.cs` and `YddFile.cs` are covered by
 `resources::read_clips`, `YmtFile.cs` by `meta::read_meta`, `YbnFile.cs` by
 `resources::read_bounds`, `Gxt2File.cs` by `gxt2::Gxt2File`, and
 `AwcFile.cs` by `audio::AwcFile`.
-Planned order: `YtypFile`, `YmapFile`, `YndFile`,
-then the rest. `YtypFile` and `YmapFile` are metadata containers, so
-they already open in the Explorer as trees; what is left is the typed model
-above the tree.
+
+| Unit | C# reference | Status | Notes |
+| --- | --- | --- | --- |
+| `filetypes/ytyp.rs` | `YtypFile.cs` | **partial** | The typed model over the meta tree: `CMapTypes`, the archetype pointer array dispatched by target structure (`CBaseArchetypeDef`/`CTimeArchetypeDef`/`CMloArchetypeDef`), MLO children (rooms, portals, entity sets, timecycle modifiers), `GetExtensions` results and `CCompositeEntityType`. 2759 `.ytyp` across the install read. Reads, does not write. |
+| `filetypes/ymap.rs` | `YmapFile.cs` | **partial** | `CMapData`, the entity pointer array split into `CEntityDef`/`CMloInstanceDef` and the `EnsureEntities` hierarchy, car gens, timecycle modifiers, box occluders, occlude models, LOD and distant-LOD lights, grass batches, physics dictionaries and strings. 19,383 `.ymap` across the install read, 3.07M entities. Reads, does not write. |
+
+Planned order: `YndFile`, then the rest. `YmapFile` and `YtypFile` are metadata
+containers, so they already open in the Explorer as trees; what these readers
+add is the typed model above the tree.
 
 ### Notes on GXT2
 
@@ -461,9 +486,8 @@ them, by hash.
 `JPsoFile` · `MrfFile` · `PedFile` · `PedsFile` · `RelFile` (1.2 MB) · `Stats` ·
 `VehicleLayoutsFile` · `VehiclesFile` · `WatermapFile` · `YcdFile` ·
 `YddFile` · `YdrFile` · `YedFile` · `YfdFile` · `YftFile` · `YldFile` ·
-`YmapFile` · `YmfFile` · `YmtFile` · `YndFile` · `YnvFile` · `YpdbFile` ·
-`YptFile` · `YtdFile` · `YtypFile` · `YvrFile` · `YwrFile`
-
+`YmfFile` · `YmtFile` · `YndFile` · `YnvFile` · `YpdbFile` ·
+`YptFile` · `YtdFile` · `YvrFile` · `YwrFile`
 ## World models
 
 `Entity`, `Space`, `Camera`, `Ped`, `Vehicle`, `Water`, `Weather`, `Timecycle`,

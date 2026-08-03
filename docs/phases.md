@@ -14,11 +14,11 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | Phase | State |
 | --- | --- |
 | 0 — Scaffolding | **complete** |
-| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, all gates cleared |
+| 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **182 unit + 32 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **186 unit + 35 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -105,6 +105,14 @@ pwsh -File scripts/frag-oracle.ps1
 
 ```bash
 pwsh -File scripts/gxt2-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/ytyp-oracle.ps1
+```
+
+```bash
+pwsh -File scripts/ymap-oracle.ps1
 ```
 
 ---
@@ -453,16 +461,61 @@ Proven against the real install:
    divergence in the layer; see `formats.md`.
 
 Not ported: writing (`MetaBuilder`, `PsoBuilder`), and the typed models above
-the tree (`YmapFile`, `YtypFile` and friends still open as trees, not as
-entities).
+the tree — those that have landed are below.
+
+### 1.4g File types — Ytyp and Ymap — **DONE, gates cleared**
+
+The typed models above the meta tree, taken next because Phase 3's world view
+cannot place anything without them. Both build on a shared typed-reader layer
+(`meta/typed.rs`), a port of the `MetaTypes.Get*` helpers that decode records
+by the field offsets `MetaTypes.cs` documents rather than by the file's own
+schema.
+
+Files: `crates/cw-core/src/filetypes/{mod,ytyp,ymap}.rs`, gate at
+`crates/cw-core/tests/ymap_gate.rs`, oracles at `scripts/ytyp-oracle.ps1` and
+`scripts/ymap-oracle.ps1`.
+
+Proven against the real install:
+
+```
+30 files, 118 archetypes agree with CodeWalker field for field
+2,759 .ytyp files, 316,962 archetypes parse across the whole install
+15 files, 3,681 entities and their hierarchy agree with CodeWalker
+19,383 .ymap files, 3,074,696 entities parse across the whole install
+```
+
+**Four things worth knowing before touching this code:**
+
+1. **The archetype array is a pointer array dispatched by target structure.**
+   `YtypFile.Load` reads `CMapTypes.archetypes` as `MetaPOINTER[]`, then
+   switches on each target block's `StructureNameHash` to build a `Base`, a
+   `Time` or an `Mlo` archetype. An unknown target is skipped, the reference's
+   `default: continue`.
+2. **A `.ymap`'s entity array is two types in one list.** `CEntityDef` and
+   `CMloInstanceDef` (interior instances) sit in the same pointer array, and
+   `GetTypedPointerArray` filters them apart — order-preserving, null when
+   empty. `parentIndex` indexes the *combined* list (CEntityDefs first), and
+   the hierarchy pass treats an out-of-range parent as a root, exactly the
+   reference's `EnsureEntities` rule.
+3. **The typed layer decodes by offset, and a record can straddle a block.**
+   `Marshal.PtrToStructure` checks only that a record starts inside its block;
+   real `.ytyp` rely on it. `decode` reproduces the bounds rule — a short tail
+   decodes zero-filled. See `formats.md`.
+4. **Not all `.ytyp`/`.ymap` are RSC.** A handful of non-resource entries are
+   RBF or PSO, which `YtypFile.Load`/`YmapFile.Load` handle through
+   `NonMetaLoad` and yield no typed data; the gate skips them the same way.
+
+Not ported: writing (the `MetaBuilder` side), so neither format round-trips yet.
+The MLO *children* are read, but the entity-set → entity expansion that builds
+world-space MLO entities (`MloInstanceData.CreateYmapEntities`) is editor logic
+that belongs with Phase 3.
 
 ### 1.4 Resources, then FileTypes
 
 The rest of `resources/` (Particle, ShaderParams, Clothes,
 ResourceBaseTypes/Builder) — the shared building blocks. Then the remaining file
-types in dependency order: `YtypFile`, `YmapFile`, `YbnFile` (its `Bounds` now
-portable), `YndFile`, `YmtFile`, then the rest. `Gxt2File` is done — see the
-Explorer viewer below.
+types in dependency order: `YndFile`, `YmtFile`, then the rest. `Gxt2File` is
+done — see the Explorer viewer below.
 
 Per format: a round-trip byte-equality test on a real fixture **plus** a JSON
 `describe()` snapshot for the phase 2 viewers.
@@ -559,8 +612,9 @@ something else.
   through VeryLow) and shadowed key lighting came with it.
 - **Fragments and particles.** `.yft` and `.ypt` embed drawables the 3D viewer
   could already draw; reaching them needs `Frag.cs` and `Particle.cs`.
-- **Meta viewers.** `.ymap`/`.ytyp`/`.ymt` need 1.3, and would then show as XML
-  the way the reference does.
+- **Meta viewers.** `.ymap`/`.ytyp`/`.ymt` already show as XML trees. With 1.3
+  and the typed readers in 1.4g, a `.ymap` viewer could list the entities and
+  their hierarchy, and a `.ytyp` viewer the archetypes and their MLO interiors.
 - **Audio names.** `RelFile.cs` would give the streams in an `.awc` names
   instead of hashes, and pair `_left`/`_right` channels into stereo.
 - **Lazy pagination.** `list_dir` still returns a whole directory. Fine at the
