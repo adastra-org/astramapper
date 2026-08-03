@@ -15,6 +15,8 @@ use tauri::State;
 
 /// A scanned game folder. Held for the life of the app once opened.
 pub struct Loaded {
+    /// The folder that was scanned, so other modes can say what is mounted.
+    pub folder: String,
     /// Held rather than recovered on demand: the keys come from a SHA-1 scan
     /// over the whole of `GTA5.exe`, which is far too slow to repeat per
     /// extraction.
@@ -104,7 +106,14 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
         elapsed_ms: started.elapsed().as_millis() as u64,
     };
 
-    Ok((Loaded { keys, manager }, summary))
+    Ok((
+        Loaded {
+            folder: folder.display().to_string(),
+            keys,
+            manager,
+        },
+        summary,
+    ))
 }
 
 /// List a directory. An empty or absent `path` lists the top-level archives.

@@ -3,6 +3,7 @@ import { Boxes, FolderTree, Globe2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatHash } from "./lib/format";
 import { Explorer } from "./components/Explorer";
+import { World } from "./components/World";
 
 /** Mirrors the `AppInfo` struct returned by the `app_info` Tauri command. */
 type AppInfo = {
@@ -61,6 +62,8 @@ function App(): React.JSX.Element {
         <main className="flex min-w-0 flex-1 flex-col">
           {mode === "explorer" ? (
             <Explorer />
+          ) : mode === "world" ? (
+            <World />
           ) : (
             <div className="flex flex-1 items-center justify-center p-8">
               <div className="text-center">

@@ -9,6 +9,7 @@
 // scan without a Tauri runtime.
 pub mod explorer;
 pub mod viewer;
+pub mod world;
 
 use serde::Serialize;
 
@@ -48,6 +49,11 @@ pub fn run() {
             explorer::open_game_folder,
             explorer::list_dir,
             explorer::game_is_open,
+            world::world_status,
+            world::world_dlc_ymaps,
+            world::world_map,
+            world::world_asset,
+            world::world_model,
             viewer::open_entry,
             viewer::read_text,
             viewer::read_gxt2,
