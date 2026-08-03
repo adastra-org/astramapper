@@ -122,7 +122,7 @@ fn reads_a_ymap_into_world_placements() {
         })
         .expect("the install should have a city map");
 
-    let map = read_world_map(candidate, &keys, &manager).expect("read the map");
+    let map = read_world_map(candidate, &keys, &manager, None).expect("read the map");
     assert!(map.entity_count > 0, "{} places nothing", map.path);
 
     let hd = map.entities.iter().filter(|e| e.lod_level == "HD").count();
@@ -149,6 +149,50 @@ fn reads_a_ymap_into_world_placements() {
     );
 }
 
+/// An MLO instance's interior has to expand into world-space entities whose
+/// archetypes resolve to names, sitting at finite positions around the instance.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn expands_an_mlo_instances_interior_into_the_world() {
+    let (manager, keys) = scan();
+
+    let map = manager
+        .archives
+        .iter()
+        .flat_map(|a| a.entries.iter())
+        .map(|e| &e.path)
+        .filter(|p| p.ends_with(".ymap") && p.contains(r"\levels\gta5\_city"))
+        .filter_map(|p| read_world_map(p, &keys, &manager, None).ok())
+        .find(|m| m.mlo_expanded > 0)
+        .expect("a city map with MLO interiors");
+
+    let expanded: Vec<_> = map.entities.iter().filter(|e| e.from_mlo).collect();
+    assert_eq!(expanded.len(), map.mlo_expanded);
+    assert!(map.mlo_entities > 0, "expansion needs MLO instances");
+
+    let resolvable = expanded
+        .iter()
+        .filter(|e| !e.name.starts_with("hash_"))
+        .count();
+    assert!(
+        resolvable > 0,
+        "expanded interior entities should name their archetypes"
+    );
+
+    for entity in &expanded {
+        assert!(
+            entity.position.iter().all(|v| v.is_finite()),
+            "non-finite expanded position on {}",
+            entity.name
+        );
+    }
+
+    println!(
+        "{}: {} MLO instances, {} interior entities expanded ({} nameable)",
+        map.name, map.mlo_entities, map.mlo_expanded, resolvable,
+    );
+}
+
 fn format_3(v: &[f32; 3]) -> String {
     format!("({}, {}, {})", v[0], v[1], v[2])
 }
@@ -168,7 +212,7 @@ fn streams_an_entitys_archetype_to_real_geometry() {
         .map(|e| &e.path)
         .find(|p| p.ends_with(".ymap") && p.contains(r"\levels\gta5\_city"))
         .expect("the install should have a city map");
-    let map = read_world_map(candidate, &keys, &manager).expect("read the map");
+    let map = read_world_map(candidate, &keys, &manager, None).expect("read the map");
 
     // Take the first entity whose archetype resolved to a real name; only those
     // can name a file on disk.

@@ -19,7 +19,7 @@
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use cw_core::filetype::FileKind;
-use cw_core::filetypes::read_ymap;
+use cw_core::filetypes::{expand_mlo_entities, index_mlo_archetypes, read_ymap, MloArchetype};
 use cw_core::image;
 use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, LodLevel, MetaFile};
@@ -95,6 +95,9 @@ pub struct WorldEntity {
     pub name_hash: u32,
     /// True for a `CMloInstanceDef`, an interior instance.
     pub is_mlo: bool,
+    /// True for an interior entity expanded out of an MLO archetype, into the
+    /// world at its instance's transform.
+    pub from_mlo: bool,
     pub position: [f32; 3],
     /// The stored quaternion, as the file carries it — the world view hands it
     /// to three.js unchanged. Whether the stored form needs conjugating to
@@ -128,6 +131,8 @@ pub struct WorldMap {
     pub extents_min: [f32; 3],
     pub extents_max: [f32; 3],
     pub entities: Vec<WorldEntity>,
+    /// How many interior entities were expanded out of the map's MLO instances.
+    pub mlo_expanded: usize,
 }
 
 /// The content group an archive belongs to, from its lowercase path.
@@ -523,15 +528,30 @@ pub fn world_dlc_ymaps(
 pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
     let guard = game.0.lock().map_err(|_| "game state is poisoned")?;
     let loaded = guard.as_ref().ok_or("no game folder is open")?;
-    read_world_map(&path, &loaded.keys, &loaded.manager)
+
+    // The MLO archetype index is built once and kept: scanning every `.ytyp`
+    // is the expensive part, and only a map that places interiors needs it.
+    let mut cache = loaded
+        .mlo_archetypes
+        .lock()
+        .map_err(|_| "mlo index is poisoned")?;
+    if cache.is_none() {
+        *cache = Some(index_mlo_archetypes(&loaded.manager, &loaded.keys));
+    }
+    read_world_map(&path, &loaded.keys, &loaded.manager, cache.as_ref())
 }
 
 /// The placement read itself, free of Tauri state so the gate can drive it
 /// against a real scan. See `tests/world_gate.rs`.
+///
+/// `mlo_index` resolves each MLO instance to its archetype's interior. When
+/// `None`, one is built from the manager on the spot — convenient for the
+/// gate; the app command passes its cached index.
 pub fn read_world_map(
     path: &str,
     keys: &GtaKeys,
     manager: &RpfManager,
+    mlo_index: Option<&std::collections::HashMap<u32, MloArchetype>>,
 ) -> Result<WorldMap, String> {
     let entry_ref = manager
         .find(path)
@@ -555,7 +575,7 @@ pub fn read_world_map(
         _ => return Err("this .ymap is not an RSC resource".into()),
     };
 
-    let entities = ymap
+    let mut entities: Vec<WorldEntity> = ymap
         .entities
         .iter()
         .enumerate()
@@ -564,6 +584,7 @@ pub fn read_world_map(
             name: hash_string(entity.def.archetype_name),
             name_hash: entity.def.archetype_name,
             is_mlo: entity.is_mlo,
+            from_mlo: false,
             position: entity.def.position,
             rotation: entity.def.rotation,
             scale_xy: entity.def.scale_xy,
@@ -575,6 +596,53 @@ pub fn read_world_map(
         })
         .collect();
 
+    // Expand every MLO instance's interior into world space. The instance's
+    // `archetypeName` is the index key; an instance whose archetype does not
+    // resolve (a destroyed/modded reference) just contributes nothing.
+    let mut mlo_expanded = 0;
+    let owned_index: std::collections::HashMap<u32, MloArchetype>;
+    let index: &std::collections::HashMap<u32, MloArchetype> = match mlo_index {
+        Some(index) => index,
+        None if !ymap.mlo_entities.is_empty() => {
+            owned_index = index_mlo_archetypes(manager, keys);
+            &owned_index
+        }
+        None => {
+            owned_index = std::collections::HashMap::new();
+            &owned_index
+        }
+    };
+
+    for mlo_index_in_map in &ymap.mlo_entities {
+        let instance = &ymap.entities[*mlo_index_in_map];
+        let Some(interior) = index.get(&instance.def.archetype_name) else {
+            continue;
+        };
+        let expanded = expand_mlo_entities(
+            instance.def.position,
+            instance.def.rotation,
+            &interior.entities,
+        );
+        for entity in &expanded {
+            entities.push(WorldEntity {
+                index: entities.len(),
+                name: hash_string(entity.archetype_name),
+                name_hash: entity.archetype_name,
+                is_mlo: false,
+                from_mlo: true,
+                position: entity.position,
+                rotation: entity.rotation,
+                scale_xy: entity.scale_xy,
+                scale_z: entity.scale_z,
+                parent_index: -1,
+                lod_level: lod_level_label(entity.lod_level),
+                lod_dist: entity.lod_dist,
+                children: 0,
+            });
+        }
+        mlo_expanded += expanded.len();
+    }
+
     Ok(WorldMap {
         path: path.to_string(),
         name: hash_string(ymap.name),
@@ -585,6 +653,7 @@ pub fn read_world_map(
         extents_min: ymap.entities_extents_min,
         extents_max: ymap.entities_extents_max,
         entities,
+        mlo_expanded,
     })
 }
 

@@ -47,6 +47,8 @@ export type Placed = {
   readonly name: string;
   readonly nameHash: number;
   readonly isMlo: boolean;
+  /** True for an interior entity expanded out of an MLO archetype. */
+  readonly fromMlo: boolean;
   readonly position: readonly [number, number, number];
   /** The stored quaternion `(x, y, z, w)`, handed to three.js unchanged. */
   readonly rotation: readonly [number, number, number, number];
@@ -70,6 +72,8 @@ export type WorldMap = {
   readonly extentsMin: readonly [number, number, number];
   readonly extentsMax: readonly [number, number, number];
   readonly entities: readonly Placed[];
+  /** How many interior entities were expanded out of the map's MLO instances. */
+  readonly mloExpanded: number;
 };
 
 export function worldStatus(): Promise<WorldStatus> {
@@ -523,6 +527,7 @@ export function demoWorld(): { name: string; placements: Placed[] } {
       name,
       nameHash: 0,
       isMlo,
+      fromMlo: false,
       position,
       rotation: [0, 0, 0, 1],
       scaleXy,

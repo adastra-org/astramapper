@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use cw_core::filetypes::MloArchetype;
 use cw_core::rpf::{EntryKind, RpfManager};
 use cw_core::utils::GtaKeys;
 use serde::Serialize;
@@ -22,6 +23,10 @@ pub struct Loaded {
     /// extraction.
     pub keys: GtaKeys,
     pub manager: RpfManager,
+    /// The MLO archetype index, built once when the first interior-bearing map
+    /// is placed. Scanning every `.ytyp` is expensive, so it is kept, not
+    /// rebuilt per map.
+    pub mlo_archetypes: Mutex<Option<std::collections::HashMap<u32, MloArchetype>>>,
 }
 
 #[derive(Default)]
@@ -111,6 +116,7 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
             folder: folder.display().to_string(),
             keys,
             manager,
+            mlo_archetypes: Mutex::new(None),
         },
         summary,
     ))

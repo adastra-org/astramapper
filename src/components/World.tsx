@@ -596,6 +596,11 @@ export function World(): React.JSX.Element {
                         interior instance
                       </span>
                     )}
+                    {selectedPlacement.placement.fromMlo && (
+                      <span className="rounded bg-surface-2 px-1 py-px text-[10px] text-ink-dim">
+                        interior entity
+                      </span>
+                    )}
                     <div className="flex items-center gap-1 pt-1">
                       {(["move", "rotate", "scale"] as const).map((mode) => (
                         <button
