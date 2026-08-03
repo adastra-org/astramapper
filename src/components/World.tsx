@@ -11,9 +11,12 @@ import {
 import { formatHash } from "../lib/format";
 import { decodeBase64, decodeFloats, decodeUints, type ModelPreview } from "../lib/viewer";
 import {
+  applyEdit,
   boundsOf,
   colorForLod,
+  commitHistory,
   demoWorld,
+  editOf,
   gtaToWorld,
   keyFor,
   lodBandForDistance,
@@ -27,7 +30,9 @@ import {
   worldToGta,
   type ContentGroup,
   type GeometryLoad,
+  type HistoryEntry,
   type Placed,
+  type TransformEdit,
   type WorldMap,
   type WorldStatus,
   type YmapListingPage,
@@ -77,6 +82,10 @@ export function World(): React.JSX.Element {
   /** Entities whose real geometry is loaded, streamed or asked for by hand. */
   const [geometry, setGeometry] = useState<readonly GeometryLoad[]>([]);
   const [streaming, setStreaming] = useState(false);
+  /** In-progress transform edits, applied live by the canvas, per entity key. */
+  const [edits, setEdits] = useState<ReadonlyMap<string, TransformEdit>>(new Map());
+  const [undo, setUndo] = useState<readonly HistoryEntry[]>([]);
+  const [redo, setRedo] = useState<readonly HistoryEntry[]>([]);
 
   // Asset and model reads are cached so that a street of a hundred identical
   // streetlamps resolves and loads its model once, not a hundred times. The
@@ -185,6 +194,50 @@ export function World(): React.JSX.Element {
     );
   }, []);
 
+  // Live transform edits from the gizmo. Stable callbacks so the canvas can
+  // call them from its pointer handlers without re-running its setup.
+  const onEdit = useCallback((key: string, edit: TransformEdit) => {
+    setEdits((current) => new Map(current).set(key, edit));
+  }, []);
+
+  const onEditCommit = useCallback((key: string, before: TransformEdit, after: TransformEdit) => {
+    setUndo((current) => commitHistory(current, { key, before, after }));
+    setRedo([]);
+  }, []);
+
+  const undoEdit = useCallback(() => {
+    if (undo.length === 0) return;
+    const last = undo[undo.length - 1];
+    setEdits((current) => new Map(current).set(last.key, last.before));
+    setUndo(undo.slice(0, -1));
+    setRedo((current) => [...current, last]);
+  }, [undo]);
+
+  const redoEdit = useCallback(() => {
+    if (redo.length === 0) return;
+    const last = redo[redo.length - 1];
+    setEdits((current) => new Map(current).set(last.key, last.after));
+    setRedo(redo.slice(0, -1));
+    setUndo((current) => [...current, last]);
+  }, [redo]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        if (event.shiftKey) redoEdit();
+        else undoEdit();
+        event.preventDefault();
+      } else if (key === "y") {
+        redoEdit();
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undoEdit, redoEdit]);
+
   // When no game folder is open, the same renderer shows the demo plaza so the
   // pipeline is visible (and testable) without the game.
   const demo = useMemo(
@@ -214,8 +267,12 @@ export function World(): React.JSX.Element {
       const entry = entries.find((e) => e.key === selected.mapKey);
       if (!entry) return null;
       const placement = findPlacement(entry.placements, selected.entityIndex);
-      return placement ? { entry, placement } : null;
-    }, [entries, selected]);
+      if (!placement) return null;
+      return {
+        entry,
+        placement: applyEdit(placement, edits.get(keyFor(selected.mapKey, selected.entityIndex))),
+      };
+    }, [entries, selected, edits]);
 
   // The streaming pass: every interval, load the nearest unloaded entities
   // within a radius of the camera, and unload the ones that have drifted too
@@ -375,6 +432,34 @@ export function World(): React.JSX.Element {
                 )}
               </Section>
 
+              <Section title="History">
+                <div className="flex items-center gap-2 px-4 py-1">
+                  <button
+                    type="button"
+                    onClick={undoEdit}
+                    disabled={undo.length === 0}
+                    className="rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-40"
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={redoEdit}
+                    disabled={redo.length === 0}
+                    className="rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-40"
+                  >
+                    Redo
+                  </button>
+                  <span className="ml-auto text-[11px] text-ink-dim">
+                    Ctrl+Z / Ctrl+Y
+                  </span>
+                </div>
+                <p className="px-4 pb-1 text-[11px] text-ink-dim">
+                  Drag a gizmo axis to move the selected entity; each drag is one
+                  undo step.
+                </p>
+              </Section>
+
               <Section title="Selection">
                 {selectedPlacement ? (
                   <div className="space-y-1 px-4 py-2 text-xs">
@@ -441,6 +526,9 @@ export function World(): React.JSX.Element {
           entries={entries}
           geometry={geometry}
           cameraRef={cameraRef}
+          edits={edits}
+          onEdit={onEdit}
+          onEditCommit={onEditCommit}
           selected={selected}
           onSelect={setSelected}
           shadowed={totalPlaced <= SHADOW_LIMIT}
@@ -537,6 +625,9 @@ type CanvasProps = {
   entries: readonly CanvasEntry[];
   geometry: readonly GeometryLoad[];
   cameraRef: { readonly current: { position: [number, number, number] | null } };
+  edits: ReadonlyMap<string, TransformEdit>;
+  onEdit: (key: string, edit: TransformEdit) => void;
+  onEditCommit: (key: string, before: TransformEdit, after: TransformEdit) => void;
   selected: Selection | null;
   onSelect: (selection: Selection | null) => void;
   shadowed: boolean;
@@ -563,16 +654,37 @@ type LoadedGeometry = {
   readonly positionGta: readonly [number, number, number];
 };
 
+/** One move-gizmo axis, in the game's Z-up space. */
+type GizmoAxis = {
+  /** The axis in GTA space, the direction an edit moves along. */
+  readonly dirGta: readonly [number, number, number];
+  readonly color: number;
+};
+
 /**
  * The three.js surface. Set up once per `entries` change: instanced boxes for
  * every placement bucketed by colour, a grid, and a Y-up fly camera. The loaded
  * geometry is managed by a separate effect so streaming a model in or out does
  * not rebuild the scene — and so the camera never resets mid-flight.
  */
-function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: CanvasProps): React.JSX.Element {
+function Canvas({
+  entries,
+  geometry,
+  cameraRef,
+  edits,
+  onEdit,
+  onEditCommit,
+  selected,
+  onSelect,
+  shadowed,
+}: CanvasProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
   const entriesRef = useRef(entries);
   entriesRef.current = entries;
+  const editsRef = useRef(edits);
+  editsRef.current = edits;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
 
   const worldGroup = useRef<THREE.Group | null>(null);
   const geometryGroup = useRef<THREE.Group | null>(null);
@@ -581,6 +693,10 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
   const geometryMeshes = useRef<{ mesh: THREE.Mesh; mapKey: string; entityIndex: number }[]>([]);
   const loadedState = useRef(new Map<string, LoadedGeometry>());
   const lodUpdate = useRef<((cameraWorld: THREE.Vector3) => void) | null>(null);
+  /** Selected entity key → its map and entity index, for the gizmo and edits. */
+  const keyLookup = useRef(new Map<string, { mapKey: string; entityIndex: number }>());
+  /** The gizmo's world-space origin, kept for screen-space axis picking. */
+  const gizmoOriginWorld = useRef<THREE.Vector3 | null>(null);
 
   useEffect(() => {
     const container = host.current;
@@ -599,13 +715,13 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
     camera.position.set(80, 120, 160);
 
     scene.add(new THREE.HemisphereLight(0xdfe8f5, 0x33383f, 0.9));
-    const key = new THREE.DirectionalLight(0xffffff, 1.6);
-    key.position.set(200, 400, 300);
+    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    sun.position.set(200, 400, 300);
     if (shadowed) {
-      key.castShadow = true;
-      key.shadow.mapSize.set(2048, 2048);
+      sun.castShadow = true;
+      sun.shadow.mapSize.set(2048, 2048);
     }
-    scene.add(key);
+    scene.add(sun);
 
     // The whole world lives in a Z-up group, rotated into three.js's Y-up world
     // exactly as the model viewer rotates a single drawable.
@@ -686,13 +802,58 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
     }
     boxByMap.current = boxes;
 
+    // Every placement's identity, so edits can be applied by key each frame.
+    const lookup = new Map<string, { mapKey: string; entityIndex: number }>();
+    for (const entry of entries) {
+      for (const placement of entry.placements) {
+        lookup.set(keyFor(entry.key, placement.index), {
+          mapKey: entry.key,
+          entityIndex: placement.index,
+        });
+      }
+    }
+    keyLookup.current = lookup;
+
+    // The move gizmo: three coloured axis lines in the game's Z-up space,
+    // hidden until an entity is selected. Picking is done in screen space, so
+    // the lines carry no hit geometry.
+    const GIZMO_AXES: GizmoAxis[] = [
+      { dirGta: [1, 0, 0], color: 0xff4d4d },
+      { dirGta: [0, 1, 0], color: 0x4dff4d },
+      { dirGta: [0, 0, 1], color: 0x4d8dff },
+    ];
+    const gizmo = new THREE.Group();
+    gizmo.visible = false;
+    world.add(gizmo);
+    const GIZMO_LENGTH = 30;
+    for (const axis of GIZMO_AXES) {
+      const points = [
+        new THREE.Vector3(),
+        new THREE.Vector3(
+          axis.dirGta[0] * GIZMO_LENGTH,
+          axis.dirGta[1] * GIZMO_LENGTH,
+          axis.dirGta[2] * GIZMO_LENGTH,
+        ),
+      ];
+      const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
+      const line = new THREE.Line(
+        lineGeometry,
+        new THREE.LineBasicMaterial({ color: axis.color, linewidth: 2 }),
+      );
+      gizmo.add(line);
+    }
+    gizmoOriginWorld.current = null;
+
     // Frame the camera over everything that was placed.
     const { center, radius } = boundsOf(entries.flatMap((entry) => entry.placements));
-    const [cx, cy, cz] = gtaToWorld(center);
-    const framed = new THREE.Vector3(cx, cy, cz);
+    const [fx, fy, fz] = gtaToWorld(center);
+    const framed = new THREE.Vector3(fx, fy, fz);
     const offset = new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(radius * 1.6);
     camera.position.copy(framed).add(offset);
     camera.lookAt(framed);
+
+    const raycaster = new THREE.Raycaster();
+    const pointer = new THREE.Vector2();
 
     // The fly camera. Yaw spins around world Y, pitch tilts the view; WASD
     // moves in the ground plane, Space/Ctrl climb, Shift sprints.
@@ -705,6 +866,14 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
       moved: 0,
       lastX: 0,
       lastY: 0,
+      // A gizmo axis drag, when one is live.
+      gizmoAxis: -1,
+      gizmoKey: "",
+      gizmoStart: null as TransformEdit | null,
+      gizmoCurrent: null as TransformEdit | null,
+      gizmoPlane: null as THREE.Plane | null,
+      gizmoLastPoint: null as THREE.Vector3 | null,
+      gizmoMoved: false,
     };
 
     const keys = new Map<string, string>([
@@ -730,14 +899,132 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
+    /** The current effective edit for an entity, or the base transform. */
+    const effectiveEdit = (key: string): TransformEdit | null => {
+      const target = keyLookup.current.get(key);
+      if (!target) return null;
+      const entry = entriesRef.current.find((e) => e.key === target.mapKey);
+      const placement = entry && findPlacement(entry.placements, target.entityIndex);
+      if (!placement) return null;
+      return editsRef.current.get(key) ?? editOf(placement);
+    };
+
+    const projectToScreen = (point: THREE.Vector3): [number, number] => {
+      const ndc = point.clone().project(camera);
+      return [
+        (ndc.x * 0.5 + 0.5) * renderer.domElement.clientWidth,
+        (-ndc.y * 0.5 + 0.5) * renderer.domElement.clientHeight,
+      ];
+    };
+
+    const distanceToSegment = (
+      px: number,
+      py: number,
+      ax: number,
+      ay: number,
+      bx: number,
+      by: number,
+    ): number => {
+      const dx = bx - ax;
+      const dy = by - ay;
+      const lengthSq = dx * dx + dy * dy;
+      const t =
+        lengthSq === 0
+          ? 0
+          : THREE.MathUtils.clamp(((px - ax) * dx + (py - ay) * dy) / lengthSq, 0, 1);
+      const cx = ax + t * dx;
+      const cy = ay + t * dy;
+      return Math.hypot(px - cx, py - cy);
+    };
+
+    /** Which gizmo axis is under the pointer, by screen distance. */
+    const pickGizmoAxis = (clientX: number, clientY: number): number => {
+      const origin = gizmoOriginWorld.current;
+      if (!origin) return -1;
+      let best = -1;
+      let bestDistance = 14;
+      for (let i = 0; i < GIZMO_AXES.length; i += 1) {
+        const dir = GIZMO_AXES[i].dirGta;
+        const [wx, wy, wz] = gtaToWorld(dir);
+        const end = new THREE.Vector3(origin.x + wx * GIZMO_LENGTH, origin.y + wy * GIZMO_LENGTH, origin.z + wz * GIZMO_LENGTH);
+        const [sx0, sy0] = projectToScreen(origin);
+        const [sx1, sy1] = projectToScreen(end);
+        const distance = distanceToSegment(clientX, clientY, sx0, sy0, sx1, sy1);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          best = i;
+        }
+      }
+      return best;
+    };
+
+    /** The ray through the pointer, for gizmo plane math. */
+    const rayThrough = (clientX: number, clientY: number): THREE.Ray => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      return raycaster.ray;
+    };
+
     const onPointerDown = (event: PointerEvent): void => {
       if (event.button !== 0) return;
-      state.dragging = true;
       state.moved = 0;
       state.lastX = event.clientX;
       state.lastY = event.clientY;
+
+      // A selected entity owns the left button: grab its gizmo axis, or fall
+      // back to rotating the camera.
+      const selection = selectedRef.current;
+      if (selection) {
+        const axis = pickGizmoAxis(event.clientX, event.clientY);
+        if (axis >= 0) {
+          const key = keyFor(selection.mapKey, selection.entityIndex);
+          const start = effectiveEdit(key);
+          if (start) {
+            state.gizmoAxis = axis;
+            state.gizmoKey = key;
+            state.gizmoStart = start;
+            state.gizmoCurrent = start;
+            const origin = gizmoOriginWorld.current!;
+            const normal = camera.getWorldDirection(new THREE.Vector3());
+            state.gizmoPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin);
+            state.gizmoLastPoint = new THREE.Vector3();
+            rayThrough(event.clientX, event.clientY).intersectPlane(state.gizmoPlane, state.gizmoLastPoint);
+            state.gizmoMoved = false;
+            return;
+          }
+        }
+      }
+      state.dragging = true;
     };
+
     const onPointerMove = (event: PointerEvent): void => {
+      if (state.gizmoAxis >= 0) {
+        const point = new THREE.Vector3();
+        if (!state.gizmoPlane || !rayThrough(event.clientX, event.clientY).intersectPlane(state.gizmoPlane, point)) {
+          return;
+        }
+        state.moved += Math.abs(event.clientX - state.lastX) + Math.abs(event.clientY - state.lastY);
+        state.lastX = event.clientX;
+        state.lastY = event.clientY;
+        const axis = GIZMO_AXES[state.gizmoAxis];
+        const [wx, wy, wz] = gtaToWorld(axis.dirGta);
+        const direction = new THREE.Vector3(wx, wy, wz);
+        const delta = point.sub(state.gizmoLastPoint!).dot(direction);
+        state.gizmoLastPoint = point;
+        state.gizmoMoved = state.gizmoMoved || Math.abs(delta) > 1e-6;
+        const start = state.gizmoStart!;
+        const position: [number, number, number] = [
+          start.position[0] + axis.dirGta[0] * delta,
+          start.position[1] + axis.dirGta[1] * delta,
+          start.position[2] + axis.dirGta[2] * delta,
+        ];
+        const edit: TransformEdit = { ...start, position };
+        state.gizmoCurrent = edit;
+        onEdit(state.gizmoKey, edit);
+        return;
+      }
       if (!state.dragging) return;
       const dx = event.clientX - state.lastX;
       const dy = event.clientY - state.lastY;
@@ -747,7 +1034,22 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
       state.yaw -= dx * 0.005;
       state.pitch = THREE.MathUtils.clamp(state.pitch + dy * 0.005, -1.55, 1.55);
     };
+
     const onPointerUp = (): void => {
+      if (state.gizmoAxis >= 0) {
+        if (state.gizmoMoved && state.gizmoStart && state.gizmoCurrent) {
+          onEditCommit(state.gizmoKey, state.gizmoStart, state.gizmoCurrent);
+        }
+        state.dragging = false;
+        state.gizmoAxis = -1;
+        state.gizmoKey = "";
+        state.gizmoStart = null;
+        state.gizmoCurrent = null;
+        state.gizmoPlane = null;
+        state.gizmoLastPoint = null;
+        state.gizmoMoved = false;
+        return;
+      }
       state.dragging = false;
     };
     const onWheel = (event: WheelEvent): void => {
@@ -760,8 +1062,6 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
     window.addEventListener("pointerup", onPointerUp);
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
-    const raycaster = new THREE.Raycaster();
-    const pointer = new THREE.Vector2();
     const frameAt = (gta: readonly [number, number, number], r: number): void => {
       const [wx, wy, wz] = gtaToWorld(gta);
       const target = new THREE.Vector3(wx, wy, wz);
@@ -843,8 +1143,54 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
       cameraRef.current.position = [camera.position.x, camera.position.y, camera.position.z];
 
       lodUpdate.current?.(camera.position);
+      applyEdits();
+      updateGizmo();
       renderer.render(scene, camera);
     };
+
+    /** Lay every live edit onto its box instance or geometry holder. */
+    const applyEdits = (): void => {
+      for (const [key, edit] of editsRef.current) {
+        const target = keyLookup.current.get(key);
+        if (!target) continue;
+        const loaded = loadedState.current.get(key);
+        if (loaded) {
+          loaded.holder.position.set(edit.position[0], edit.position[1], edit.position[2]);
+          loaded.holder.quaternion.set(
+            edit.rotation[0],
+            edit.rotation[1],
+            edit.rotation[2],
+            edit.rotation[3],
+          );
+          const [sx, sy, sz] = placementScale(edit.scaleXy, edit.scaleZ);
+          loaded.holder.scale.set(sx, sy, sz);
+        } else {
+          const box = boxByMap.current.get(target.mapKey);
+          if (box) setInstanceEdit(box.mesh, box.instances, target.entityIndex, edit);
+        }
+      }
+    };
+
+    /** Park the move gizmo on the selected entity's edited position. */
+    const updateGizmo = (): void => {
+      const selection = selectedRef.current;
+      if (!selection) {
+        gizmo.visible = false;
+        gizmoOriginWorld.current = null;
+        return;
+      }
+      const edit = effectiveEdit(keyFor(selection.mapKey, selection.entityIndex));
+      if (!edit) {
+        gizmo.visible = false;
+        gizmoOriginWorld.current = null;
+        return;
+      }
+      gizmo.position.set(edit.position[0], edit.position[1], edit.position[2]);
+      gizmo.visible = true;
+      const [wx, wy, wz] = gtaToWorld(edit.position);
+      gizmoOriginWorld.current = new THREE.Vector3(wx, wy, wz);
+    };
+
     tick();
 
     const resize = () => {
@@ -870,6 +1216,7 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
       renderer.domElement.removeEventListener("click", onClick);
       renderer.domElement.removeEventListener("dblclick", onDoubleClick);
       disposeObject3D(geometryGroupObject);
+      disposeObject3D(gizmo);
       worldGroup.current = null;
       geometryGroup.current = null;
       highlight.current = null;
@@ -883,7 +1230,7 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
         mesh.dispose();
       }
       grid.dispose();
-      key.shadow?.map?.dispose();
+      sun.shadow?.map?.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
     };
@@ -999,11 +1346,13 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
       return;
     }
     const entry = entriesRef.current.find((e) => e.key === selected.mapKey);
-    const placement = findPlacement(entry?.placements, selected.entityIndex);
-    if (!placement) {
+    const base = findPlacement(entry?.placements, selected.entityIndex);
+    if (!base) {
       outline.visible = false;
       return;
     }
+    // The outline follows the edit, so it tracks the gizmo while dragging.
+    const placement = applyEdit(base, edits.get(keyFor(selected.mapKey, selected.entityIndex)));
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3(placement.position[0], placement.position[1], placement.position[2]);
     const quaternion = new THREE.Quaternion(
@@ -1017,7 +1366,7 @@ function Canvas({ entries, geometry, cameraRef, selected, onSelect, shadowed }: 
     outline.matrixAutoUpdate = false;
     outline.matrix.copy(matrix);
     outline.visible = true;
-  }, [selected]);
+  }, [selected, edits]);
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -1165,6 +1514,29 @@ function setInstanceTransform(
     placement.rotation[3],
   );
   const [sx, sy, sz] = placementScale(placement.scaleXy, placement.scaleZ);
+  matrix.compose(position, quaternion, new THREE.Vector3(sx, sy, sz));
+  mesh.setMatrixAt(i, matrix);
+  mesh.instanceMatrix.needsUpdate = true;
+}
+
+/** Lay a live edit onto one instance's matrix. */
+function setInstanceEdit(
+  mesh: THREE.InstancedMesh,
+  instances: readonly number[],
+  entityIndex: number,
+  edit: TransformEdit,
+): void {
+  const i = instances.indexOf(entityIndex);
+  if (i < 0) return;
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3(edit.position[0], edit.position[1], edit.position[2]);
+  const quaternion = new THREE.Quaternion(
+    edit.rotation[0],
+    edit.rotation[1],
+    edit.rotation[2],
+    edit.rotation[3],
+  );
+  const [sx, sy, sz] = placementScale(edit.scaleXy, edit.scaleZ);
   matrix.compose(position, quaternion, new THREE.Vector3(sx, sy, sz));
   mesh.setMatrixAt(i, matrix);
   mesh.instanceMatrix.needsUpdate = true;

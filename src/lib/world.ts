@@ -107,6 +107,63 @@ export type GeometryLoad = {
   readonly model: ModelPreview;
 };
 
+/** An edited transform, overriding a placement's stored one. */
+export type TransformEdit = {
+  readonly position: readonly [number, number, number];
+  readonly rotation: readonly [number, number, number, number];
+  readonly scaleXy: number;
+  readonly scaleZ: number;
+};
+
+/** One undo step: the transform of one entity before and after a drag. */
+export type HistoryEntry = {
+  readonly key: string;
+  readonly before: TransformEdit;
+  readonly after: TransformEdit;
+};
+
+/**
+ * A placement with an edit applied on top. The edit replaces the stored
+ * transform wholesale, so it is the source of truth while a drag is live and
+ * the placement file itself stays untouched.
+ */
+export function applyEdit(placement: Placed, edit: TransformEdit | undefined): Placed {
+  if (!edit) return placement;
+  return {
+    ...placement,
+    position: edit.position,
+    rotation: edit.rotation,
+    scaleXy: edit.scaleXy,
+    scaleZ: edit.scaleZ,
+  };
+}
+
+/** A placement's transform as an edit, for history before/after values. */
+export function editOf(placement: Placed): TransformEdit {
+  return {
+    position: placement.position,
+    rotation: placement.rotation,
+    scaleXy: placement.scaleXy,
+    scaleZ: placement.scaleZ,
+  };
+}
+
+/** Record a completed drag, clearing the redo stack the way editors do. */
+export function commitHistory(
+  undo: readonly HistoryEntry[],
+  entry: HistoryEntry,
+): readonly HistoryEntry[] {
+  return [...undo, entry];
+}
+
+/** Step back one edit. Returns the popped entry, or `null` at the bottom. */
+export function popHistory(
+  stack: readonly HistoryEntry[],
+): { stack: readonly HistoryEntry[]; entry: HistoryEntry | null } {
+  if (stack.length === 0) return { stack, entry: null };
+  return { stack: stack.slice(0, -1), entry: stack[stack.length - 1] };
+}
+
 /** The stable identity of one placed entity, across maps and reloads. */
 export function keyFor(mapKey: string, entityIndex: number): string {
   return `${mapKey}:${entityIndex}`;

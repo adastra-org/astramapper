@@ -1,15 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
+  applyEdit,
   boundsOf,
   colorForLod,
+  commitHistory,
   demoWorld,
+  editOf,
   gtaToWorld,
   keyFor,
   lodBandForDistance,
   nearestCandidates,
   placementScale,
+  popHistory,
   worldToGta,
   type Placed,
+  type TransformEdit,
 } from "./world";
 
 /** A map entry with one placed entity per position, for the streamer tests. */
@@ -110,7 +115,6 @@ describe("nearestCandidates", () => {
     ]),
     entry("m2", [[30, 0, 0]]),
   ];
-
   test("returns the nearest unexcluded entities, nearest first", () => {
     const got = nearestCandidates([0, 0, 0], entries, new Set(), 200, 10);
     // Per-map indexes: m1's second entity (index 1) is farthest.
@@ -202,3 +206,72 @@ describe("demoWorld", () => {
     expect(placements.some((p) => p.isMlo)).toBe(true);
   });
 });
+
+describe("applyEdit and editOf", () => {
+  const placement: Placed = {
+    index: 0,
+    name: "x",
+    nameHash: 0,
+    isMlo: false,
+    position: [1, 2, 3],
+    rotation: [0, 0, 0, 1],
+    scaleXy: 1,
+    scaleZ: 1,
+    parentIndex: -1,
+    lodLevel: "HD",
+    lodDist: 100,
+    children: 0,
+  };
+
+  test("is the identity for no edit", () => {
+    expect(applyEdit(placement, undefined)).toBe(placement);
+  });
+
+  test("replaces the stored transform when edited", () => {
+    const edit: TransformEdit = {
+      position: [10, 20, 30],
+      rotation: [0, 0, 1, 0],
+      scaleXy: 2,
+      scaleZ: 3,
+    };
+    const edited = applyEdit(placement, edit);
+    expect(edited.position).toEqual([10, 20, 30]);
+    expect(edited.rotation).toEqual([0, 0, 1, 0]);
+    expect(edited.scaleXy).toBe(2);
+    expect(edited.scaleZ).toBe(3);
+    expect(edited.name).toBe("x");
+    expect(placement.position).toEqual([1, 2, 3]);
+  });
+
+  test("round-trips through editOf", () => {
+    const edit = editOf(placement);
+    expect(applyEdit(placement, edit)).toEqual(placement);
+  });
+});
+
+describe("history", () => {
+  test("committing appends and clears redo", () => {
+    const undo = commitHistory([], step("a", editOfPlace(0), editOfPlace(1)));
+    const undone = popHistory(undo);
+    expect(undone.entry?.after.position).toEqual([1, 0, 0]);
+    expect(undone.stack).toHaveLength(0);
+  });
+
+  test("popping an empty stack yields nothing", () => {
+    expect(popHistory([])).toEqual({ stack: [], entry: null });
+  });
+});
+
+/** A one-axis move for building history fixtures. */
+function editOfPlace(x: number): TransformEdit {
+  return { position: [x, 0, 0], rotation: [0, 0, 0, 1], scaleXy: 1, scaleZ: 1 };
+}
+
+/** A history entry fixture. */
+function step(key: string, before: TransformEdit, after: TransformEdit): {
+  key: string;
+  before: TransformEdit;
+  after: TransformEdit;
+} {
+  return { key, before, after };
+}
