@@ -366,7 +366,7 @@ fn resolve_world_textures(
     let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
         std::collections::HashMap::new();
     for dictionary in embedded {
-        resolve_from_dictionary(dictionary, wanted, &mut by_hash);
+        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None);
         if by_hash.len() == wanted.len() {
             break;
         }
@@ -381,7 +381,12 @@ fn resolve_world_textures(
                         if let Ok(dictionary) =
                             cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
                         {
-                            resolve_from_dictionary(&dictionary, wanted, &mut by_hash);
+                            resolve_from_dictionary(
+                                &dictionary,
+                                wanted,
+                                &mut by_hash,
+                                Some(sibling.as_str()),
+                            );
                         }
                     }
                 }
@@ -397,6 +402,7 @@ fn resolve_from_dictionary(
     dictionary: &TextureDictionary,
     wanted: &std::collections::BTreeSet<u32>,
     by_hash: &mut std::collections::HashMap<u32, ModelTexture>,
+    source: Option<&str>,
 ) {
     for hash in wanted {
         if by_hash.contains_key(hash) {
@@ -422,6 +428,7 @@ fn resolve_from_dictionary(
                 width: decoded.width,
                 height: decoded.height,
                 png: STANDARD.encode(png),
+                source: source.map(str::to_string),
             },
         );
     }
