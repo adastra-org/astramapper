@@ -22,12 +22,12 @@ import {
   gtaToWorld,
   keyFor,
   lodBandForDistance,
-  nearestCandidates,
   parseProject,
   placementScale,
   projectLoad,
   projectSave,
   serializeProject,
+  streamingDecision,
   worldAsset,
   worldDlcYmaps,
   worldMap,
@@ -38,6 +38,7 @@ import {
   type GeometryLoad,
   type HistoryEntry,
   type Placed,
+  type RegionEntry,
   type TransformEdit,
   type WorldMap,
   type WorldStatus,
@@ -48,10 +49,6 @@ import {
 const SHADOW_LIMIT = 5_000;
 /** How many `.ymap` rows a group's expanded list shows. */
 const MAX_YMAP_ROWS = 40;
-/** Entities inside this distance of the camera get geometry streamed. */
-const STREAM_RADIUS = 400;
-/** Entities beyond this distance have their geometry unloaded again. */
-const STREAM_UNLOAD_RADIUS = 700;
 /** How many entities one streaming pass may start loading. */
 const STREAM_BATCH = 4;
 /** How often the streaming pass re-decides what is loaded. */
@@ -343,44 +340,50 @@ export function World(): React.JSX.Element {
       };
     }, [entries, selected, edits]);
 
-  // The streaming pass: every interval, load the nearest unloaded entities
-  // within a radius of the camera, and unload the ones that have drifted too
-  // far out. The camera position comes from the canvas via `cameraRef`.
+  // The scheduler's view of the placed maps: each one's declared streaming box
+  // and its entities. The demo has no assets to stream, so it stays out.
+  const regionEntries: readonly RegionEntry[] = useMemo(
+    () =>
+      placed.map((map) => ({
+        key: map.path,
+        extentsMin: map.extentsMin,
+        extentsMax: map.extentsMax,
+        placements: map.entities,
+      })),
+    [placed],
+  );
+
+  // The streaming pass: every interval, decide what to load and unload from the
+  // camera's position. The decision is pure (`streamingDecision`); the effect
+  // just carries it out against the load caches and geometry state.
   useEffect(() => {
     if (!streaming || !status?.gameOpen) return;
     const interval = window.setInterval(async () => {
       const cam = cameraRef.current.position;
-      if (!cam || entries.length === 0) return;
+      if (!cam || regionEntries.length === 0) return;
       const cameraGta = worldToGta(cam);
-      const excluded = new Set<string>();
-      for (const g of geometry) excluded.add(keyFor(g.mapKey, g.entity.index));
-      for (const key of pending.current) excluded.add(key);
-
-      const candidates = nearestCandidates(
+      const loadedKeys = new Set(
+        geometry.map((g) => keyFor(g.mapKey, g.entity.index)),
+      );
+      const { load, unload } = streamingDecision(
         cameraGta,
-        entries,
-        excluded,
-        STREAM_RADIUS,
+        regionEntries,
+        loadedKeys,
+        pending.current,
         STREAM_BATCH,
       );
-      for (const candidate of candidates) {
-        const entry = entries.find((e) => e.key === candidate.mapKey);
-        const entity = entry?.placements[candidate.entityIndex];
+      for (const candidate of load) {
+        const entry = regionEntries.find((e) => e.key === candidate.mapKey);
+        const entity = entry?.placements.find((p) => p.index === candidate.entityIndex);
         if (entry && entity) void loadEntity(candidate.mapKey, entity);
       }
-
-      setGeometry((current) => {
-        const next = current.filter((g) => {
-          const dx = g.entity.position[0] - cameraGta[0];
-          const dy = g.entity.position[1] - cameraGta[1];
-          const dz = g.entity.position[2] - cameraGta[2];
-          return Math.hypot(dx, dy, dz) <= STREAM_UNLOAD_RADIUS;
-        });
-        return next.length === current.length ? current : next;
-      });
+      if (unload.length > 0) {
+        const dropped = new Set(unload);
+        setGeometry((current) => current.filter((g) => !dropped.has(keyFor(g.mapKey, g.entity.index))));
+      }
     }, STREAM_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [streaming, status?.gameOpen, entries, geometry, loadEntity]);
+  }, [streaming, status?.gameOpen, regionEntries, geometry, loadEntity]);
 
   const selectionLoaded =
     selected !== null &&

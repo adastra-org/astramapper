@@ -308,7 +308,7 @@ export function lodBandForDistance(
 }
 
 /**
- * The unloaded entities nearest the camera, for the streamer.
+ * The nearest unloaded entities for the streamer, per-map load regions.
  *
  * Returns up to `limit` candidates within `radius` of the camera (all in the
  * game's Z-up space, where rotation preserves distance) whose keys are not in
@@ -338,6 +338,85 @@ export function nearestCandidates(
   candidates.sort((a, b) => a.distance - b.distance);
   return candidates.slice(0, limit);
 }
+
+/** A placed map as the scheduler sees it: its streaming box and its entities. */
+export type RegionEntry = {
+  readonly key: string;
+  readonly extentsMin: readonly [number, number, number];
+  readonly extentsMax: readonly [number, number, number];
+  readonly placements: readonly Placed[];
+};
+
+/** How far out an entity's geometry streams, by its placement LOD tier. */
+export function entityStreamRadius(entity: Placed): number {
+  const base = Math.max(entity.lodDist, 50);
+  switch (entity.lodLevel) {
+    case "ORPHAN_HD":
+      return base * 1.5;
+    case "HD":
+      return base * 3;
+    case "LOD":
+      return base * 6;
+    default:
+      return base * 9;
+  }
+}
+
+/**
+ * The streaming decision for one pass: what to load, and what to unload.
+ *
+ * A map streams only while the camera is inside its declared streaming box
+ * (plus a margin); out of range, its loaded geometry is dropped. In range,
+ * the nearest unloaded entities within their own LOD-tier radius load, up to
+ * `batchLimit`. Loaded entities unload once they drift beyond their radius
+ * with hysteresis so a camera parked on a boundary does not thrash.
+ */
+export function streamingDecision(
+  cameraGta: readonly [number, number, number],
+  entries: readonly RegionEntry[],
+  loadedKeys: ReadonlySet<string>,
+  pendingKeys: ReadonlySet<string>,
+  batchLimit: number,
+): { load: readonly { mapKey: string; entityIndex: number; distance: number }[]; unload: readonly string[] } {
+  const load: { mapKey: string; entityIndex: number; distance: number }[] = [];
+  const unload: string[] = [];
+
+  for (const entry of entries) {
+    const inRange =
+      cameraGta[0] >= entry.extentsMin[0] - STREAM_REGION_MARGIN &&
+      cameraGta[0] <= entry.extentsMax[0] + STREAM_REGION_MARGIN &&
+      cameraGta[1] >= entry.extentsMin[1] - STREAM_REGION_MARGIN &&
+      cameraGta[1] <= entry.extentsMax[1] + STREAM_REGION_MARGIN &&
+      cameraGta[2] >= entry.extentsMin[2] - STREAM_REGION_MARGIN &&
+      cameraGta[2] <= entry.extentsMax[2] + STREAM_REGION_MARGIN;
+
+    for (const placement of entry.placements) {
+      const key = keyFor(entry.key, placement.index);
+      const radius = entityStreamRadius(placement);
+      const distance = Math.hypot(
+        placement.position[0] - cameraGta[0],
+        placement.position[1] - cameraGta[1],
+        placement.position[2] - cameraGta[2],
+      );
+
+      if (!inRange) {
+        if (loadedKeys.has(key)) unload.push(key);
+        continue;
+      }
+      if (loadedKeys.has(key) || pendingKeys.has(key)) {
+        if (loadedKeys.has(key) && distance > radius * 1.5) unload.push(key);
+      } else if (distance <= radius) {
+        load.push({ mapKey: entry.key, entityIndex: placement.index, distance });
+      }
+    }
+  }
+
+  load.sort((a, b) => a.distance - b.distance);
+  return { load: load.slice(0, batchLimit), unload };
+}
+
+/** The margin around a map's streaming box in which it still streams. */
+export const STREAM_REGION_MARGIN = 300;
 
 /**
  * The three.js scale for one placement.

@@ -7,6 +7,7 @@ import {
   commitHistory,
   demoWorld,
   editOf,
+  entityStreamRadius,
   gtaToWorld,
   keyFor,
   lodBandForDistance,
@@ -15,8 +16,10 @@ import {
   placementScale,
   popHistory,
   serializeProject,
+  streamingDecision,
   worldToGta,
   type Placed,
+  type RegionEntry,
   type TransformEdit,
 } from "./world";
 
@@ -321,6 +324,65 @@ describe("project files", () => {
   });
 });
 
+describe("entityStreamRadius", () => {
+  test("grows with the LOD tier", () => {
+    const near = entityStreamRadius({ ...entryFixture, lodLevel: "ORPHAN_HD" });
+    const hd = entityStreamRadius({ ...entryFixture, lodLevel: "HD" });
+    const lod = entityStreamRadius({ ...entryFixture, lodLevel: "LOD" });
+    const slod = entityStreamRadius({ ...entryFixture, lodLevel: "SLOD2" });
+    expect(near).toBeLessThan(hd);
+    expect(hd).toBeLessThan(lod);
+    expect(lod).toBeLessThan(slod);
+  });
+
+  test("floors a degenerate LOD distance", () => {
+    expect(entityStreamRadius({ ...entryFixture, lodDist: 0 })).toBe(50 * 3);
+  });
+});
+
+describe("streamingDecision", () => {
+  const region = (
+    key: string,
+    placements: Placed[],
+  ): ReturnType<typeof regionEntryOf> => regionEntryOf(key, placements);
+
+  test("loads the nearest in-range entities, capped by the batch", () => {
+    const entries = [region("m1", [placedAt("m1", 0, 0), placedAt("m1", 0, 1000)])];
+    const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 1);
+    expect(decision.load).toHaveLength(1);
+    expect(decision.load[0]).toMatchObject({ mapKey: "m1", entityIndex: 0 });
+    expect(decision.unload).toEqual([]);
+  });
+
+  test("unloads entities beyond their radius with hysteresis", () => {
+    const entries = [region("m1", [placedAt("m1", 0, 1000)])];
+    // 1000 is well beyond HD radius * 1.5 (450).
+    const decision = streamingDecision([0, 0, 0], entries, new Set(["m1:0"]), new Set(), 4);
+    expect(decision.unload).toEqual(["m1:0"]);
+  });
+
+  test("drops a map whose streaming box the camera has left", () => {
+    const entries = [region("m1", [placedAt("m1", 0, 10)])];
+    // Camera far beyond the box and its margin: nothing loads, all unload.
+    const decision = streamingDecision([5000, 0, 0], entries, new Set(["m1:0"]), new Set(), 4);
+    expect(decision.load).toEqual([]);
+    expect(decision.unload).toEqual(["m1:0"]);
+  });
+
+  test("never re-queues a loaded or pending entity", () => {
+    const entries = [region("m1", [placedAt("m1", 0, 10)])];
+    const decision = streamingDecision(
+      [0, 0, 0],
+      entries,
+      new Set(["m1:0"]),
+      new Set(["m1:0"]),
+      4,
+    );
+    expect(decision.load).toEqual([]);
+    expect(decision.unload).toEqual([]);
+  });
+});
+
 describe("history", () => {
   test("committing appends and clears redo", () => {
     const undo = commitHistory([], step("a", editOfPlace(0), editOfPlace(1)));
@@ -346,4 +408,35 @@ function step(key: string, before: TransformEdit, after: TransformEdit): {
   after: TransformEdit;
 } {
   return { key, before, after };
+}
+
+/** A plausible placed entity, for the streamer tests. */
+const entryFixture: Placed = {
+  index: 0,
+  name: "x",
+  nameHash: 0,
+  isMlo: false,
+  position: [0, 0, 0],
+  rotation: [0, 0, 0, 1],
+  scaleXy: 1,
+  scaleZ: 1,
+  parentIndex: -1,
+  lodLevel: "HD",
+  lodDist: 100,
+  children: 0,
+};
+
+/** A placed entity at a given position, for the streamer tests. */
+function placedAt(name: string, x: number, y: number, index = 0): Placed {
+  return { ...entryFixture, name, index, position: [x, y, 0] };
+}
+
+/** A placed map with a small streaming box around the origin. */
+function regionEntryOf(key: string, placements: Placed[]): RegionEntry {
+  return {
+    key,
+    extentsMin: [0, 0, 0],
+    extentsMax: [100, 100, 100],
+    placements,
+  };
 }
