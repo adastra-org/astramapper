@@ -148,6 +148,32 @@ export function editOf(placement: Placed): TransformEdit {
   };
 }
 
+/**
+ * Rotate a stored quaternion around an axis, in the game's Z-up space.
+ *
+ * `axis` is a unit vector in GTA space; the result is the input quaternion
+ * rotated by `angle` radians about that axis in world (parent) space, which is
+ * what a gizmo ring drag should feel like. Computed with the Hamilton product
+ * so the helper stays free of any three.js dependency.
+ */
+export function axisRotate(
+  quaternion: readonly [number, number, number, number],
+  axis: readonly [number, number, number],
+  angle: number,
+): [number, number, number, number] {
+  const half = angle / 2;
+  const s = Math.sin(half);
+  const [ax, ay, az, aw] = quaternion;
+  // The delta quaternion for `angle` about `axis`.
+  const [dx, dy, dz, dw] = [axis[0] * s, axis[1] * s, axis[2] * s, Math.cos(half)];
+  return [
+    dw * ax + dx * aw + dy * az - dz * ay,
+    dw * ay - dx * az + dy * aw + dz * ax,
+    dw * az + dx * ay - dy * ax + dz * aw,
+    dw * aw - dx * ax - dy * ay - dz * az,
+  ];
+}
+
 /** Record a completed drag, clearing the redo stack the way editors do. */
 export function commitHistory(
   undo: readonly HistoryEntry[],

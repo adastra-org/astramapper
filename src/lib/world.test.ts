@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   applyEdit,
+  axisRotate,
   boundsOf,
   colorForLod,
   commitHistory,
@@ -246,6 +247,28 @@ describe("applyEdit and editOf", () => {
   test("round-trips through editOf", () => {
     const edit = editOf(placement);
     expect(applyEdit(placement, edit)).toEqual(placement);
+  });
+});
+
+describe("axisRotate", () => {
+  test("rotates the identity around Z", () => {
+    const q = axisRotate([0, 0, 0, 1], [0, 0, 1], Math.PI / 2);
+    expect(q[0]).toBeCloseTo(0, 5);
+    expect(q[1]).toBeCloseTo(0, 5);
+    expect(q[2]).toBeCloseTo(Math.SQRT1_2, 5);
+    expect(q[3]).toBeCloseTo(Math.SQRT1_2, 5);
+  });
+
+  test("is the identity for a zero angle", () => {
+    const q = axisRotate([0.1, 0.2, 0.3, 0.9], [1, 0, 0], 0);
+    expect(q).toEqual([0.1, 0.2, 0.3, 0.9]);
+  });
+
+  test("stays a unit quaternion", () => {
+    const start: [number, number, number, number] = [0, 0, Math.SQRT1_2, Math.SQRT1_2];
+    const q = axisRotate(start, [0, 1, 0], 0.7);
+    const norm = Math.hypot(q[0], q[1], q[2], q[3]);
+    expect(norm).toBeCloseTo(1, 5);
   });
 });
 

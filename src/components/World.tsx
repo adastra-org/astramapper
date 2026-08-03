@@ -12,6 +12,7 @@ import { formatHash } from "../lib/format";
 import { decodeBase64, decodeFloats, decodeUints, type ModelPreview } from "../lib/viewer";
 import {
   applyEdit,
+  axisRotate,
   boundsOf,
   colorForLod,
   commitHistory,
@@ -56,6 +57,9 @@ export type Selection = {
   readonly entityIndex: number;
 };
 
+/** Which gizmo the selected entity gets. */
+export type GizmoMode = "move" | "rotate" | "scale";
+
 /**
  * World Mode: the phase 3 renderer in three.js over placements the Rust side
  * already decoded.
@@ -86,6 +90,7 @@ export function World(): React.JSX.Element {
   const [edits, setEdits] = useState<ReadonlyMap<string, TransformEdit>>(new Map());
   const [undo, setUndo] = useState<readonly HistoryEntry[]>([]);
   const [redo, setRedo] = useState<readonly HistoryEntry[]>([]);
+  const [gizmoMode, setGizmoMode] = useState<GizmoMode>("move");
 
   // Asset and model reads are cached so that a street of a hundred identical
   // streetlamps resolves and loads its model once, not a hundred times. The
@@ -491,6 +496,27 @@ export function World(): React.JSX.Element {
                         interior instance
                       </span>
                     )}
+                    <div className="flex items-center gap-1 pt-1">
+                      {(["move", "rotate", "scale"] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setGizmoMode(mode)}
+                          className={`rounded px-2 py-1 text-xs transition-colors hover:bg-surface-2 ${
+                            gizmoMode === mode
+                              ? "bg-surface-2 text-accent"
+                              : "text-ink-dim hover:text-ink"
+                          }`}
+                        >
+                          {mode}
+                        </button>
+                      ))}
+                      {edits.has(keyFor(selectedPlacement.entry.key, selectedPlacement.placement.index)) && (
+                        <span className="ml-auto rounded bg-surface-2 px-1 py-px text-[10px] text-ink-dim">
+                          edited
+                        </span>
+                      )}
+                    </div>
                     {status?.gameOpen && !selectedPlacement.placement.name.startsWith("hash_") && (
                       <button
                         type="button"
@@ -529,6 +555,7 @@ export function World(): React.JSX.Element {
           edits={edits}
           onEdit={onEdit}
           onEditCommit={onEditCommit}
+          gizmoMode={gizmoMode}
           selected={selected}
           onSelect={setSelected}
           shadowed={totalPlaced <= SHADOW_LIMIT}
@@ -628,6 +655,7 @@ type CanvasProps = {
   edits: ReadonlyMap<string, TransformEdit>;
   onEdit: (key: string, edit: TransformEdit) => void;
   onEditCommit: (key: string, before: TransformEdit, after: TransformEdit) => void;
+  gizmoMode: GizmoMode;
   selected: Selection | null;
   onSelect: (selection: Selection | null) => void;
   shadowed: boolean;
@@ -674,6 +702,7 @@ function Canvas({
   edits,
   onEdit,
   onEditCommit,
+  gizmoMode,
   selected,
   onSelect,
   shadowed,
@@ -685,6 +714,8 @@ function Canvas({
   editsRef.current = edits;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  const gizmoModeRef = useRef(gizmoMode);
+  gizmoModeRef.current = gizmoMode;
 
   const worldGroup = useRef<THREE.Group | null>(null);
   const geometryGroup = useRef<THREE.Group | null>(null);
@@ -826,6 +857,7 @@ function Canvas({
     gizmo.visible = false;
     world.add(gizmo);
     const GIZMO_LENGTH = 30;
+    const gizmoLines: THREE.Line[] = [];
     for (const axis of GIZMO_AXES) {
       const points = [
         new THREE.Vector3(),
@@ -841,6 +873,38 @@ function Canvas({
         new THREE.LineBasicMaterial({ color: axis.color, linewidth: 2 }),
       );
       gizmo.add(line);
+      gizmoLines.push(line);
+    }
+
+    // Rotate rings: a visual torus per axis, plus a fat invisible twin that the
+    // raycaster can actually hit.
+    const rotateRings: THREE.Mesh[] = [];
+    const rotateTori: { mesh: THREE.Mesh; axis: number }[] = [];
+    const orientRing = (mesh: THREE.Mesh, dir: readonly [number, number, number]): void => {
+      if (dir[0] === 1) mesh.rotation.y = Math.PI / 2;
+      else if (dir[1] === 1) mesh.rotation.x = Math.PI / 2;
+    };
+    for (let i = 0; i < GIZMO_AXES.length; i += 1) {
+      const axis = GIZMO_AXES[i];
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(GIZMO_LENGTH * 0.7, 0.3, 8, 48),
+        new THREE.MeshBasicMaterial({
+          color: axis.color,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.85,
+        }),
+      );
+      const pickRing = new THREE.Mesh(
+        new THREE.TorusGeometry(GIZMO_LENGTH * 0.7, 1.8, 8, 48),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 }),
+      );
+      orientRing(ring, axis.dirGta);
+      orientRing(pickRing, axis.dirGta);
+      gizmo.add(ring);
+      gizmo.add(pickRing);
+      rotateRings.push(ring);
+      rotateTori.push({ mesh: pickRing, axis: i });
     }
     gizmoOriginWorld.current = null;
 
@@ -868,12 +932,24 @@ function Canvas({
       lastY: 0,
       // A gizmo axis drag, when one is live.
       gizmoAxis: -1,
+      dragKind: "" as "" | "move" | "scale",
       gizmoKey: "",
       gizmoStart: null as TransformEdit | null,
       gizmoCurrent: null as TransformEdit | null,
       gizmoPlane: null as THREE.Plane | null,
       gizmoLastPoint: null as THREE.Vector3 | null,
       gizmoMoved: false,
+      // A rotate-ring drag, when one is live.
+      rotateAxis: -1,
+      rotateStart: null as TransformEdit | null,
+      rotateCurrent: null as TransformEdit | null,
+      rotatePlane: null as THREE.Plane | null,
+      rotateCenter: null as THREE.Vector3 | null,
+      rotateBasisU: null as THREE.Vector3 | null,
+      rotateBasisV: null as THREE.Vector3 | null,
+      rotateTotal: 0,
+      rotateLastAngle: 0,
+      rotateMoved: false,
     };
 
     const keys = new Map<string, string>([
@@ -958,6 +1034,29 @@ function Canvas({
       return best;
     };
 
+    /** Which rotate ring is under the pointer, by raycast. */
+    const pickRotateAxis = (clientX: number, clientY: number): number => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+      pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+      raycaster.setFromCamera(pointer, camera);
+      for (const { mesh, axis } of rotateTori) {
+        if (raycaster.intersectObject(mesh, false).length > 0) return axis;
+      }
+      return -1;
+    };
+
+    /** The angle of a point on a ring plane, for rotation deltas. */
+    const angleAround = (
+      point: THREE.Vector3,
+      ringCenter: THREE.Vector3,
+      u: THREE.Vector3,
+      v: THREE.Vector3,
+    ): number => {
+      const p = point.clone().sub(ringCenter);
+      return Math.atan2(p.dot(v), p.dot(u));
+    };
+
     /** The ray through the pointer, for gizmo plane math. */
     const rayThrough = (clientX: number, clientY: number): THREE.Ray => {
       const rect = renderer.domElement.getBoundingClientRect();
@@ -973,26 +1072,55 @@ function Canvas({
       state.lastX = event.clientX;
       state.lastY = event.clientY;
 
-      // A selected entity owns the left button: grab its gizmo axis, or fall
-      // back to rotating the camera.
+      // A selected entity owns the left button: grab its gizmo, or fall back to
+      // rotating the camera. Rotate grabs a ring, move and scale an axis.
       const selection = selectedRef.current;
       if (selection) {
-        const axis = pickGizmoAxis(event.clientX, event.clientY);
-        if (axis >= 0) {
-          const key = keyFor(selection.mapKey, selection.entityIndex);
-          const start = effectiveEdit(key);
-          if (start) {
-            state.gizmoAxis = axis;
-            state.gizmoKey = key;
-            state.gizmoStart = start;
-            state.gizmoCurrent = start;
-            const origin = gizmoOriginWorld.current!;
-            const normal = camera.getWorldDirection(new THREE.Vector3());
-            state.gizmoPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin);
-            state.gizmoLastPoint = new THREE.Vector3();
-            rayThrough(event.clientX, event.clientY).intersectPlane(state.gizmoPlane, state.gizmoLastPoint);
-            state.gizmoMoved = false;
-            return;
+        const key = keyFor(selection.mapKey, selection.entityIndex);
+        if (gizmoModeRef.current === "rotate") {
+          const ring = pickRotateAxis(event.clientX, event.clientY);
+          if (ring >= 0) {
+            const start = effectiveEdit(key);
+            if (start) {
+              const ringCenter = gizmoOriginWorld.current!;
+              state.rotateAxis = ring;
+              state.gizmoKey = key;
+              state.rotateStart = start;
+              state.rotateCurrent = start;
+              state.rotateCenter = ringCenter.clone();
+              const [wx, wy, wz] = gtaToWorld(GIZMO_AXES[ring].dirGta);
+              const axisWorld = new THREE.Vector3(wx, wy, wz);
+              state.rotatePlane = new THREE.Plane().setFromNormalAndCoplanarPoint(axisWorld, ringCenter);
+              const helper = Math.abs(axisWorld.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+              const u = new THREE.Vector3().crossVectors(axisWorld, helper).normalize();
+              const v = new THREE.Vector3().crossVectors(axisWorld, u).normalize();
+              state.rotateBasisU = u;
+              state.rotateBasisV = v;
+              const point = new THREE.Vector3();
+              rayThrough(event.clientX, event.clientY).intersectPlane(state.rotatePlane, point);
+              state.rotateLastAngle = angleAround(point, ringCenter, u, v);
+              state.rotateMoved = false;
+              return;
+            }
+          }
+        } else {
+          const axis = pickGizmoAxis(event.clientX, event.clientY);
+          if (axis >= 0) {
+            const start = effectiveEdit(key);
+            if (start) {
+              state.gizmoAxis = axis;
+              state.dragKind = gizmoModeRef.current === "scale" ? "scale" : "move";
+              state.gizmoKey = key;
+              state.gizmoStart = start;
+              state.gizmoCurrent = start;
+              const origin = gizmoOriginWorld.current!;
+              const normal = camera.getWorldDirection(new THREE.Vector3());
+              state.gizmoPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, origin);
+              state.gizmoLastPoint = new THREE.Vector3();
+              rayThrough(event.clientX, event.clientY).intersectPlane(state.gizmoPlane, state.gizmoLastPoint);
+              state.gizmoMoved = false;
+              return;
+            }
           }
         }
       }
@@ -1000,6 +1128,33 @@ function Canvas({
     };
 
     const onPointerMove = (event: PointerEvent): void => {
+      if (state.rotateAxis >= 0) {
+        const point = new THREE.Vector3();
+        if (
+          !state.rotatePlane ||
+          !rayThrough(event.clientX, event.clientY).intersectPlane(state.rotatePlane, point)
+        ) {
+          return;
+        }
+        state.moved += Math.abs(event.clientX - state.lastX) + Math.abs(event.clientY - state.lastY);
+        state.lastX = event.clientX;
+        state.lastY = event.clientY;
+        const angle = angleAround(point, state.rotateCenter!, state.rotateBasisU!, state.rotateBasisV!);
+        let delta = angle - state.rotateLastAngle;
+        state.rotateLastAngle = angle;
+        // A drag that crosses the angle's seam jumps by a full turn; treat any
+        // delta near ±π as the sign of a crossing, not a real spin.
+        if (delta > Math.PI) delta -= Math.PI * 2;
+        else if (delta < -Math.PI) delta += Math.PI * 2;
+        state.rotateTotal += delta;
+        state.rotateMoved = state.rotateMoved || Math.abs(delta) > 1e-4;
+        const start = state.rotateStart!;
+        const rotation = axisRotate(start.rotation, GIZMO_AXES[state.rotateAxis].dirGta, state.rotateTotal);
+        const edit: TransformEdit = { ...start, rotation };
+        state.rotateCurrent = edit;
+        onEdit(state.gizmoKey, edit);
+        return;
+      }
       if (state.gizmoAxis >= 0) {
         const point = new THREE.Vector3();
         if (!state.gizmoPlane || !rayThrough(event.clientX, event.clientY).intersectPlane(state.gizmoPlane, point)) {
@@ -1010,19 +1165,31 @@ function Canvas({
         state.lastY = event.clientY;
         const axis = GIZMO_AXES[state.gizmoAxis];
         const [wx, wy, wz] = gtaToWorld(axis.dirGta);
-        const direction = new THREE.Vector3(wx, wy, wz);
-        const delta = point.sub(state.gizmoLastPoint!).dot(direction);
+        const delta = point.sub(state.gizmoLastPoint!).dot(new THREE.Vector3(wx, wy, wz));
         state.gizmoLastPoint = point;
         state.gizmoMoved = state.gizmoMoved || Math.abs(delta) > 1e-6;
         const start = state.gizmoStart!;
-        const position: [number, number, number] = [
-          start.position[0] + axis.dirGta[0] * delta,
-          start.position[1] + axis.dirGta[1] * delta,
-          start.position[2] + axis.dirGta[2] * delta,
-        ];
-        const edit: TransformEdit = { ...start, position };
-        state.gizmoCurrent = edit;
-        onEdit(state.gizmoKey, edit);
+        if (state.dragKind === "scale") {
+          const factor = Math.max(0.01, 1 + delta / GIZMO_LENGTH);
+          const edit: TransformEdit = {
+            ...start,
+            scaleXy: state.gizmoAxis < 2 ? start.scaleXy * factor : start.scaleXy,
+            scaleZ: state.gizmoAxis < 2 ? start.scaleZ : start.scaleZ * factor,
+          };
+          state.gizmoCurrent = edit;
+          onEdit(state.gizmoKey, edit);
+        } else {
+          const edit: TransformEdit = {
+            ...start,
+            position: [
+              start.position[0] + axis.dirGta[0] * delta,
+              start.position[1] + axis.dirGta[1] * delta,
+              start.position[2] + axis.dirGta[2] * delta,
+            ],
+          };
+          state.gizmoCurrent = edit;
+          onEdit(state.gizmoKey, edit);
+        }
         return;
       }
       if (!state.dragging) return;
@@ -1036,12 +1203,30 @@ function Canvas({
     };
 
     const onPointerUp = (): void => {
+      if (state.rotateAxis >= 0) {
+        if (state.rotateMoved && state.rotateStart && state.rotateCurrent) {
+          onEditCommit(state.gizmoKey, state.rotateStart, state.rotateCurrent);
+        }
+        state.dragging = false;
+        state.rotateAxis = -1;
+        state.rotateStart = null;
+        state.rotateCurrent = null;
+        state.rotatePlane = null;
+        state.rotateCenter = null;
+        state.rotateBasisU = null;
+        state.rotateBasisV = null;
+        state.rotateTotal = 0;
+        state.rotateLastAngle = 0;
+        state.rotateMoved = false;
+        return;
+      }
       if (state.gizmoAxis >= 0) {
         if (state.gizmoMoved && state.gizmoStart && state.gizmoCurrent) {
           onEditCommit(state.gizmoKey, state.gizmoStart, state.gizmoCurrent);
         }
         state.dragging = false;
         state.gizmoAxis = -1;
+        state.dragKind = "";
         state.gizmoKey = "";
         state.gizmoStart = null;
         state.gizmoCurrent = null;
@@ -1187,6 +1372,10 @@ function Canvas({
       }
       gizmo.position.set(edit.position[0], edit.position[1], edit.position[2]);
       gizmo.visible = true;
+      const mode = gizmoModeRef.current;
+      for (const line of gizmoLines) line.visible = mode === "move" || mode === "scale";
+      for (const ring of rotateRings) ring.visible = mode === "rotate";
+      for (const { mesh } of rotateTori) mesh.visible = mode === "rotate";
       const [wx, wy, wz] = gtaToWorld(edit.position);
       gizmoOriginWorld.current = new THREE.Vector3(wx, wy, wz);
     };
