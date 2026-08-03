@@ -212,6 +212,21 @@ dictionary, then a `.ytd` sharing the model's basename, then every `.ytd` in
 the model's folder. A hash that resolves to an undecodable texture is skipped
 and that part renders untextured rather than failing the model.
 
+**Model textures are reoriented for WebGL on the way in, not in the decoder.**
+`image.rs` decodes to file order and `texture_gate.rs` pins that against the
+reference's `GetPixels`, and `RenderableTexture.Load` uploads the raw data to
+D3D with no flip — so file row 0 is the top of the texture in-game, and the
+model's `v = 0` samples it. three.js, however, reads UVs in the OpenGL
+convention where `v = 0` is the *bottom* of the texture. The three.js viewer
+sets `flipY = false` so the top row of the decoded PNG lands on `v = 0`, which
+is what lines a model's texture up with its UVs; the default `flipY = true`
+would render every part vertically mirrored. Bump maps additionally carry
+left-handed (DirectX) tangent space — `NormalMap` in the reference pushes red
+along the tangent and green along the bitangent — so the viewer inverts the
+green channel, which is the standard DirectX-to-OpenGL normal-map conversion.
+Neither is a format change, which is why they live in the viewer and not in
+`cw-core`.
+
 ### Notes on the resource layer
 
 **Two segments, no relocation pass.** A resource payload is a system half and a
