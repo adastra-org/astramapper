@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo |
+| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load |
 
-Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 56 frontend**.
+Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 61 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -796,6 +796,28 @@ Move / Rotate / Scale choice, and each mode has its own handle set.
 
 Not yet: the full streaming scheduler with per-map load regions, `.cwproj`
 projects, and the MLO entity-set expansion.
+
+### 3.6 `.cwproj` projects — **DONE**
+
+The world editor gets a saveable session: the placed maps and every edit,
+written to a `.cwproj` file and loaded back in another session.
+
+- **Format.** A JSON document `{ format: "astramapper", version: 1, maps:
+  [archive paths], edits: { entity key: transform } }`. This app's own shape —
+  CodeWalker's `.cwproj` is an editor session file with no stable on-disk
+  format to copy. `serializeProject` / `parseProject` are pure and tested,
+  including rejecting foreign formats, unsupported versions and malformed
+  edits.
+- **Save / Load / New.** The World sidebar's Project section writes the current
+  placement + edits through a save dialog, loads one back (re-placing the maps
+  in parallel and layering the edits on), or clears the world. Loading tolerates
+  a map that no longer exists in the install — it reports how many failed
+  rather than failing the whole project.
+- **IPC.** Two thin Rust commands, `project_save` and `project_load`, write and
+  read the file so the frontend never touches disk IO itself.
+
+Not yet: the full streaming scheduler with per-map load regions, and the MLO
+entity-set expansion.
 
 ## Anti-goals
 
