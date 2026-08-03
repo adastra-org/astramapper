@@ -11,8 +11,10 @@ import {
   keyFor,
   lodBandForDistance,
   nearestCandidates,
+  parseProject,
   placementScale,
   popHistory,
+  serializeProject,
   worldToGta,
   type Placed,
   type TransformEdit,
@@ -269,6 +271,53 @@ describe("axisRotate", () => {
     const q = axisRotate(start, [0, 1, 0], 0.7);
     const norm = Math.hypot(q[0], q[1], q[2], q[3]);
     expect(norm).toBeCloseTo(1, 5);
+  });
+});
+
+describe("project files", () => {
+  const edit: TransformEdit = {
+    position: [10, 0, 0],
+    rotation: [0, 0, Math.SQRT1_2, Math.SQRT1_2],
+    scaleXy: 2,
+    scaleZ: 3,
+  };
+
+  test("round-trips maps and edits", () => {
+    const edits = new Map<string, TransformEdit>([["m:0", edit]]);
+    const text = serializeProject(["x64a.rpf\\map.ymap"], edits);
+    const parsed = parseProject(text);
+    expect(parsed.maps).toEqual(["x64a.rpf\\map.ymap"]);
+    expect(parsed.edits).toEqual([{ key: "m:0", edit }]);
+  });
+
+  test("serializes an empty project", () => {
+    const parsed = parseProject(serializeProject([], new Map()));
+    expect(parsed.maps).toEqual([]);
+    expect(parsed.edits).toEqual([]);
+  });
+
+  test("rejects a file that is not an AstraMapper project", () => {
+    expect(() => parseProject(JSON.stringify({ format: "other", version: 1 }))).toThrow(
+      "not an AstraMapper project",
+    );
+  });
+
+  test("rejects an unsupported version", () => {
+    expect(() =>
+      parseProject(JSON.stringify({ format: "astramapper", version: 99, maps: [] })),
+    ).toThrow("unsupported project version");
+  });
+
+  test("drops malformed edits rather than failing the file", () => {
+    const text = JSON.stringify({
+      format: "astramapper",
+      version: 1,
+      maps: ["a"],
+      edits: { "m:0": { position: [1, 2], rotation: [0, 0, 0, 1], scaleXy: 1, scaleZ: 1 } },
+    });
+    const parsed = parseProject(text);
+    expect(parsed.maps).toEqual(["a"]);
+    expect(parsed.edits).toEqual([]);
   });
 });
 

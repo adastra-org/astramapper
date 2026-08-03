@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   ChevronRight,
   Crosshair,
@@ -22,7 +23,11 @@ import {
   keyFor,
   lodBandForDistance,
   nearestCandidates,
+  parseProject,
   placementScale,
+  projectLoad,
+  projectSave,
+  serializeProject,
   worldAsset,
   worldDlcYmaps,
   worldMap,
@@ -243,6 +248,65 @@ export function World(): React.JSX.Element {
     return () => window.removeEventListener("keydown", onKey);
   }, [undoEdit, redoEdit]);
 
+  const saveProject = useCallback(async () => {
+    const path = await saveDialog({
+      defaultPath: "world.cwproj",
+      filters: [{ name: "AstraMapper world project", extensions: ["cwproj"] }],
+    });
+    if (typeof path !== "string") return;
+    setBusy(true);
+    try {
+      await projectSave(path, serializeProject(placed.map((m) => m.path), edits));
+      setError(null);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, [placed, edits]);
+
+  const loadProject = useCallback(async () => {
+    const path = await openDialog({
+      filters: [{ name: "AstraMapper world project", extensions: ["cwproj"] }],
+    });
+    if (typeof path !== "string") return;
+    setBusy(true);
+    try {
+      const parsed = parseProject(await projectLoad(path));
+      // Re-place every map the project names, then layer the edits back on.
+      const results = await Promise.allSettled(parsed.maps.map((mapPath) => worldMap(mapPath)));
+      const loaded = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      const failed = results.length - loaded.length;
+      setPlaced(loaded);
+      setEdits(new Map(parsed.edits.map((e) => [e.key, e.edit])));
+      setGeometry([]);
+      setUndo([]);
+      setRedo([]);
+      setSelected(null);
+      setError(
+        failed > 0
+          ? `${failed} of ${parsed.maps.length} maps could not be loaded`
+          : null,
+      );
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const newProject = useCallback(() => {
+    setPlaced([]);
+    setEdits(new Map());
+    setGeometry([]);
+    setUndo([]);
+    setRedo([]);
+    setSelected(null);
+    setError(null);
+  }, []);
+
   // When no game folder is open, the same renderer shows the demo plaza so the
   // pipeline is visible (and testable) without the game.
   const demo = useMemo(
@@ -352,6 +416,39 @@ export function World(): React.JSX.Element {
             </div>
           ) : (
             <>
+              <Section title="Project">
+                <div className="flex items-center gap-2 px-4 py-1">
+                  <button
+                    type="button"
+                    onClick={() => void saveProject()}
+                    disabled={busy}
+                    className="rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-40"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadProject()}
+                    disabled={busy}
+                    className="rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-40"
+                  >
+                    Load
+                  </button>
+                  <button
+                    type="button"
+                    onClick={newProject}
+                    disabled={busy}
+                    className="rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-40"
+                  >
+                    New
+                  </button>
+                </div>
+                <p className="px-4 pb-1 text-[11px] text-ink-dim">
+                  A .cwproj stores the placed maps and your edits, to load in
+                  another session.
+                </p>
+              </Section>
+
               {status.gameOpen && (
                 <>
                   <Section title="Content">

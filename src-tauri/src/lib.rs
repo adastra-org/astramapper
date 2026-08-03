@@ -54,6 +54,8 @@ pub fn run() {
             world::world_map,
             world::world_asset,
             world::world_model,
+            world::project_save,
+            world::project_load,
             viewer::open_entry,
             viewer::read_text,
             viewer::read_gxt2,

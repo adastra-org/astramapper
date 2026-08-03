@@ -447,6 +447,20 @@ pub fn world_model(path: String, game: State<'_, GameState>) -> Result<ModelPrev
     read_world_model(&path, &loaded.keys, &loaded.manager)
 }
 
+/// Save a world project payload to disk, as the frontend serialized it.
+#[tauri::command]
+pub fn project_save(path: String, contents: String) -> Result<usize, String> {
+    std::fs::write(&path, contents.as_bytes())
+        .map_err(|e| format!("could not write {path}: {e}"))?;
+    Ok(contents.len())
+}
+
+/// Read a world project payload back from disk.
+#[tauri::command]
+pub fn project_load(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))
+}
+
 /// The world view's first question: is there a game, what content does it have,
 /// and is a map open in the Explorer.
 #[tauri::command]

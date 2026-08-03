@@ -94,6 +94,88 @@ export function worldModel(path: string): Promise<ModelPreview> {
   return invoke<ModelPreview>("world_model", { path });
 }
 
+/** Save a world project payload to disk. Returns the byte count written. */
+export function projectSave(path: string, contents: string): Promise<number> {
+  return invoke<number>("project_save", { path, contents });
+}
+
+/** Read a world project payload back from disk. */
+export function projectLoad(path: string): Promise<string> {
+  return invoke<string>("project_load", { path });
+}
+
+/**
+ * A `.cwproj` file: the placed maps by archive path, plus every transform edit
+ * keyed by entity. The format is this app's own; CodeWalker's `.cwproj` is an
+ * editor session file with no stable on-disk shape to copy.
+ */
+export type ProjectFile = {
+  readonly format: "astramapper";
+  readonly version: 1;
+  readonly maps: readonly string[];
+  readonly edits: Readonly<Record<string, TransformEdit>>;
+};
+
+/** Serialize a world's placed maps and edits as a `.cwproj` document. */
+export function serializeProject(
+  maps: readonly string[],
+  edits: ReadonlyMap<string, TransformEdit>,
+): string {
+  const project: ProjectFile = {
+    format: "astramapper",
+    version: 1,
+    maps,
+    edits: Object.fromEntries(edits),
+  };
+  return JSON.stringify(project, null, 2);
+}
+
+/** A parsed `.cwproj`, ready to be placed back into the world. */
+export type ParsedProject = {
+  readonly maps: readonly string[];
+  readonly edits: readonly { key: string; edit: TransformEdit }[];
+};
+
+/** Parse and validate a `.cwproj` document. Throws on anything unexpected. */
+export function parseProject(text: string): ParsedProject {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new Error("not valid JSON");
+  }
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("not a project file");
+  }
+  const project = raw as Partial<ProjectFile>;
+  if (project.format !== "astramapper") {
+    throw new Error("not an AstraMapper project");
+  }
+  if (project.version !== 1) {
+    throw new Error(`unsupported project version ${project.version}`);
+  }
+  const maps = Array.isArray(project.maps)
+    ? project.maps.filter((m): m is string => typeof m === "string")
+    : [];
+  const edits = Object.entries(project.edits ?? {})
+    .filter((pair): pair is [string, TransformEdit] => isValidEdit(pair[1]))
+    .map(([key, edit]) => ({ key, edit }));
+  return { maps, edits };
+}
+
+function isValidEdit(value: unknown): value is TransformEdit {
+  if (typeof value !== "object" || value === null) return false;
+  const edit = value as TransformEdit;
+  return (
+    Array.isArray(edit.position) &&
+    edit.position.length === 3 &&
+    Array.isArray(edit.rotation) &&
+    edit.rotation.length === 4 &&
+    typeof edit.scaleXy === "number" &&
+    typeof edit.scaleZ === "number"
+  );
+}
+
 /**
  * A placed entity that has real geometry loaded in the world.
  *
