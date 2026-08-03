@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move gizmo + undo/redo |
+| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo |
 
-Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 53 frontend**.
+Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 56 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -772,6 +772,29 @@ looking at it.
 
 Not yet: rotate and scale gizmos (the phase's plural "gizmos" is a move gizmo
 for now), the full streaming scheduler with per-map load regions, `.cwproj`
+projects, and the MLO entity-set expansion.
+
+### 3.5 Rotate and scale gizmos — **DONE**
+
+The editing trio from the phase brief, completed: selecting an entity shows a
+Move / Rotate / Scale choice, and each mode has its own handle set.
+
+- **Move and scale** share the three axis handles. Scale drags grow or shrink
+  `scaleXy` (the game's uniform ground-plane scale, for either the X or Y
+  handle) or `scaleZ`, clamped above zero, by how far the pointer travels
+  relative to the handle length.
+- **Rotate** swaps the axis lines for three coloured rings, one per axis, in
+  the game's Z-up space. Picking is by raycast against a fat invisible twin of
+  each ring so a thin visual is still grabbable; dragging projects the pointer
+  onto the ring's plane and turns the angle delta into a world-space rotation
+  about that axis. The angular accumulation handles the seam where `atan2`
+  wraps.
+- **Everything else holds.** Each drag is one undo/redo step, edits overlay the
+  placement live (box instance or geometry holder), the outline and details
+  panel follow, and the pure `axisRotate` helper is unit-tested (identity, a
+  quarter turn about Z, unit length).
+
+Not yet: the full streaming scheduler with per-map load regions, `.cwproj`
 projects, and the MLO entity-set expansion.
 
 ## Anti-goals

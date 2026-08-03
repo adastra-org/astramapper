@@ -57,12 +57,12 @@ archives, view and extract what is inside them, and render and edit the world in
   each archetype to its `.ydr`/`.yft`, streaming them in and out by distance,
   swapping the drawable's High→VeryLow LODs per frame and binding each part's
   resolved diffuse/normal textures — with the selected entity's model also
-  loadable by hand. Selecting an entity shows a three-axis move gizmo: drag a
-  handle to move it, each drag one undo step (Ctrl+Z / Ctrl+Y, or the History
-  buttons). With no game folder open the same
+  loadable by hand. Selecting an entity shows a move/rotate/scale gizmo — drag a
+  handle to transform it, each drag one undo step (Ctrl+Z / Ctrl+Y, or the
+  History buttons). With no game folder open the same
   renderer shows a demo plaza so the pipeline works without the game.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 194 unit tests, 40 install-dependent gate tests, 53 frontend tests. Format
+- 194 unit tests, 40 install-dependent gate tests, 56 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -91,9 +91,8 @@ archives, view and extract what is inside them, and render and edit the world in
 - Particles (`.ypt`) — embeds drawables behind `Particle.cs`, which is not
   ported, so it opens as hex with a note saying which parser is missing.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
-- The remaining world features — rotate/scale gizmos, the full streaming
-  scheduler, `.cwproj` projects — are still ahead. `Project` is still a
-  placeholder.
+- The remaining world features — the full streaming scheduler and `.cwproj`
+  projects — are still ahead. `Project` is still a placeholder.
 
 See [docs/phases.md](docs/phases.md) for the handoff: what is done, what to do
 next, and the traps found so far.
