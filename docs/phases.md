@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | not started |
+| 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
 
-Branch: work happens on `dev`. Current tests: **191 unit + 35 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **198 unit + 41 gate + 67 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -638,6 +638,239 @@ overlay. Spike capped at two days; three.js is the documented fallback. Then Rus
 LOD streaming (ORPHANHD → HD → LOD0-4), HLSL→WGSL translation with a fidelity
 table, WASD camera, raycast selection, gizmos, undo/redo, `.cwproj`,
 `patchday*` DLC selection.
+
+### 3.0 Renderer spike — **decided: three.js in the WebView**
+
+The wgpu-native-surface spike concluded against the native route: Tauri v2 has no
+native-only window, so the surface would sit in a `tao` window beside Tauri's own
+event loop with a transparent WebView tracking it — two windowing worlds in one
+process, unsupported event-loop mixing, and known WebView-over-GPU compositing
+problems on Windows. The fidelity ceiling does not earn a modding tool's debug
+view. The decision and its consequences are recorded in `architecture.md` under
+**Rendering**. `crates/cw-render` is not a wgpu crate; world rendering is three.js
+in the WebView on the same Rust-prepared-buffers boundary as the Explorer.
+
+### 3.1 World mode foundation — **DONE**
+
+Files: `src-tauri/src/world.rs`, `src/components/World.tsx`,
+`src/lib/world.ts`, gate at `src-tauri/tests/world_gate.rs`.
+
+- **Content groups.** `world_status` groups every archive by which content it
+  belongs to: `base` for the root `x64a..w.rpf` set, one group per DLC pack for
+  `update\x64\dlcpacks\*` and `x64\dlcpacks\*` (the `patchday*`, `mp*` and
+  `sport` packs), and the directory for anything else. Each group reports its
+  archive and entry counts, so the UI can offer base/mod/DLC override selection
+  without scanning anything heavy.
+- **Map placement.** `world_map` reads any `.ymap` by archive path straight from
+  the index — it does *not* clobber the Explorer's one-open-file viewer state —
+  and returns every placed entity flattened to world space: position, the stored
+  quaternion, per-axis scale, LOD level, parent link and child count. The
+  frontend renders each map as instanced boxes in a Z-up→Y-up rotated world
+  group, coloured by LOD level (MLO a different hue), and raycasts to select.
+- **Camera and selection.** A WASD fly camera (drag to look, `Shift` to sprint,
+  `Space`/`Ctrl` up/down, wheel to dolly) over a grid, with click-to-select
+  showing the entity's archetype, position, LOD, priority and flags. Double-click
+  frames the selected entity.
+- **DLC/patchday selection.** The sidebar lists the content groups; ticking one
+  lists its `.ymap` files (capped at 200, sorted) and ticking a map places it.
+  Maps placed are listed with a remove control. When no game folder is open, the
+  mode shows a synthetic demo street so the pipeline is visible and testable
+  without the game.
+- **Place-the-open-map.** If a `.ymap` is open in Explorer, `world_status`
+  reports it and the world view offers to place it directly.
+
+Not yet: whole-install streaming (loading maps as the camera moves), gizmos,
+undo/redo, `.cwproj` projects, and drawing real geometry instead of placement
+markers. The MLO entity-set expansion (`MloInstanceData.CreateYmapEntities`)
+still belongs here rather than in the readers. The stored entity quaternion is
+passed through as the file carries it; the gate should confirm orientation
+matches the reference before real geometry is drawn.
+
+### 3.2 Real geometry and LOD streaming — **DONE**
+
+The next slice of the phase brief, after the camera and selection: place real
+models instead of boxes, and stream them by camera distance the way the engine
+does (`ORPHANHD` → HD → LOD0-4, here as the drawable's own High→VeryLow LODs).
+
+- **Archetype → asset resolution.** `world_asset` finds the model file for a
+  placed entity's resolved name — a `.ydr`, `.yft` or `.ydd` whose basename
+  matches, preferring an `update\` copy over the base game (a first pass at
+  the reference's content precedence) and `.ydr` over `.yft` over `.ydd`.
+  Names the name table cannot resolve have no file and are skipped, not failed.
+- **Geometry by path.** `world_model` reads any model file into mesh bundles
+  (every LOD) straight from the index, again past the viewer's one-open-file
+  state, so several entities can stream at once. Textures are not resolved yet —
+  streamed models render flat, on a neutral grey.
+- **Streaming.** A `Stream HD geometry` toggle loads the nearest unplaced
+  entities within a radius of the camera, up to a batch per pass, and unloads
+  them again beyond an outer radius. An asset cache and a model cache mean a
+  street of identical props resolves and decodes once, not per instance. The
+  selected entity gets a `Show model` / `Hide model` button whether or not the
+  streamer is on.
+- **LOD by distance.** Each streamed entity's drawable LODs are uploaded once
+  and swapped per frame by distance to the camera, using the entity's own
+  `lod_dist` as the HD boundary (`lodBandForDistance`). The marker box for an
+  entity with geometry steps aside (its instance matrix is zeroed) and comes
+  back when the entity is unloaded.
+- **Raycast through geometry.** A loaded entity is selectable through its real
+  triangles, not just its (hidden) box. Clicking still ignores a drag so
+  rotating the camera never deselects.
+
+The demo plaza has no assets to stream, so it stays boxes — the streaming
+pipeline is exercised only against a real install (gate: `streams_an_entitys_
+archetype_to_real_geometry`).
+
+Not yet: model *textures* in the world (flat materials while streaming), the
+full streaming scheduler with per-map load regions, gizmos, undo/redo, and
+`.cwproj`.
+
+### 3.3 Textures on streamed models — **DONE**
+
+The flat-shaded caveat of 3.2, closed. A streamed model now brings its pixels.
+
+- **Resolution, bounded.** `read_world_model` resolves each part's texture
+  hashes against the drawables' embedded dictionaries, then the sibling `.ytd`
+  (same folder and basename) found by one index lookup — deliberately skipping
+  the Explorer's third step, a full-tree scan of every `.ytd` in the model's
+  folder, which is too expensive per streamed model. Most stock pixels live in
+  the sibling anyway.
+- **Decode in Rust.** Each resolved texture is decoded to a PNG on the Rust
+  side (the boundary rule), so the WebView only ever uploads image bytes, never
+  BC blocks.
+- **Materials.** Each part binds its diffuse and normal maps onto a
+  `MeshStandardMaterial`, falling back to the flat grey when a hash resolves to
+  nothing — the same rule as the Explorer's model viewer. A session-wide
+  texture cache keeps repeated decodes off the main thread.
+
+The gate now asserts a real invariant: a model whose parts reference a diffuse
+texture and whose sibling `.ytd` exists must resolve at least one texture.
+
+Not yet: the full streaming scheduler with per-map load regions, gizmos,
+undo/redo, and `.cwproj`.
+
+### 3.4 Placement editing: move gizmo and undo/redo — **DONE**
+
+The first editor slice of the phase: drag a placed entity instead of just
+looking at it.
+
+- **Edits overlay.** Every drag writes a `TransformEdit` into a keyed map that
+  the canvas lays onto the entity each frame — onto its geometry holder if the
+  model is streamed, onto its box instance otherwise — so nothing is rebuilt
+  while dragging and the placement source data stays untouched. The selection
+  outline and the details panel follow the edit live.
+- **Move gizmo.** Selecting an entity shows three coloured axis lines at its
+  position (the game's own X/Y/Z, in the Z-up world). Axis picking is done in
+  screen space, so a handle is grabbable at any zoom; dragging projects the
+  pointer onto a camera-facing plane and moves the entity along that axis. Left
+  drag grabs a handle, or falls back to rotating the camera.
+- **Undo/redo.** Each completed drag is one history entry (`before`/`after`),
+  popped by the buttons or Ctrl+Z / Ctrl+Y. The redo stack clears on a new drag,
+  the way editors behave.
+- **Testable core.** `applyEdit`/`editOf`, history push/pop and the gizmo axis
+  math are pure functions in `src/lib/world.ts`, covered by unit tests; the demo
+  plaza is editable, so the whole loop works without the game.
+
+Not yet: rotate and scale gizmos (the phase's plural "gizmos" is a move gizmo
+for now), the full streaming scheduler with per-map load regions, `.cwproj`
+projects, and the MLO entity-set expansion.
+
+### 3.5 Rotate and scale gizmos — **DONE**
+
+The editing trio from the phase brief, completed: selecting an entity shows a
+Move / Rotate / Scale choice, and each mode has its own handle set.
+
+- **Move and scale** share the three axis handles. Scale drags grow or shrink
+  `scaleXy` (the game's uniform ground-plane scale, for either the X or Y
+  handle) or `scaleZ`, clamped above zero, by how far the pointer travels
+  relative to the handle length.
+- **Rotate** swaps the axis lines for three coloured rings, one per axis, in
+  the game's Z-up space. Picking is by raycast against a fat invisible twin of
+  each ring so a thin visual is still grabbable; dragging projects the pointer
+  onto the ring's plane and turns the angle delta into a world-space rotation
+  about that axis. The angular accumulation handles the seam where `atan2`
+  wraps.
+- **Everything else holds.** Each drag is one undo/redo step, edits overlay the
+  placement live (box instance or geometry holder), the outline and details
+  panel follow, and the pure `axisRotate` helper is unit-tested (identity, a
+  quarter turn about Z, unit length).
+
+Not yet: the full streaming scheduler with per-map load regions, `.cwproj`
+projects, and the MLO entity-set expansion.
+
+### 3.6 `.cwproj` projects — **DONE**
+
+The world editor gets a saveable session: the placed maps and every edit,
+written to a `.cwproj` file and loaded back in another session.
+
+- **Format.** A JSON document `{ format: "astramapper", version: 1, maps:
+  [archive paths], edits: { entity key: transform } }`. This app's own shape —
+  CodeWalker's `.cwproj` is an editor session file with no stable on-disk
+  format to copy. `serializeProject` / `parseProject` are pure and tested,
+  including rejecting foreign formats, unsupported versions and malformed
+  edits.
+- **Save / Load / New.** The World sidebar's Project section writes the current
+  placement + edits through a save dialog, loads one back (re-placing the maps
+  in parallel and layering the edits on), or clears the world. Loading tolerates
+  a map that no longer exists in the install — it reports how many failed
+  rather than failing the whole project.
+- **IPC.** Two thin Rust commands, `project_save` and `project_load`, write and
+  read the file so the frontend never touches disk IO itself.
+
+Not yet: the full streaming scheduler with per-map load regions, and the MLO
+entity-set expansion.
+
+### 3.7 Per-map load-region streaming — **DONE**
+
+The ad-hoc nearest-entity loop becomes a real scheduler, still one pass every
+`STREAM_INTERVAL_MS` but deciding from the maps' own data.
+
+- **Load regions.** A map streams only while the camera is inside its declared
+  streaming box (`streamingExtents`), with a margin, so content the camera has
+  left is dropped wholesale instead of lingering. That is the "per-map load
+  region" of the phase brief.
+- **Entity tiers.** Each entity's geometry streams within a radius derived from
+  its own `lodDist` and its placement LOD level — `ORPHAN_HD` nearest, then HD,
+  LOD, and the SLOD fills farthest — the `ORPHANHD → HD → LOD0-4` idea mapped
+  onto load *radius* rather than just the per-frame drawable-LOD swap from 3.2.
+  Unloading uses hysteresis (1.5× the radius) so a camera parked on a boundary
+  does not thrash.
+- **Pure and tested.** `streamingDecision` is a pure function over
+  `{ extents, placements }` regions taking the camera, the loaded and pending
+  key sets and a batch limit, returning what to load and what to unload. It is
+  unit-tested: nearest-first batching, hysteresis unload, out-of-region drop,
+  and never re-queuing a loaded or pending entity.
+
+Not yet: the MLO entity-set expansion.
+
+### 3.8 MLO entity-set expansion — **DONE**
+
+The last item the phase brief deferred here. An MLO interior instance in a
+`.ymap` is a position, a rotation and an archetype hash; the interior's actual
+contents live in the MLO archetype's entity list inside a `.ytyp`, in the
+interior's local space.
+
+- **Expansion.** `cw_core::filetypes::mlo` ports `MloInstanceData.CreateYmap
+  Entities`: each interior entity is placed at `world = R * local + T` with the
+  combined rotation `R_instance * R_local` — no instance scale, matching the
+  reference. The math is pure and unit-tested (identity, translation, a quarter
+  turn about Z mapping +X to +Y, and a unit-length combined rotation).
+- **Archetype resolution.** `index_mlo_archetypes` scans the `.ytyp` files once
+  and keys every MLO archetype by its lookup hash — the same value an
+  instance's `archetypeName` carries. `Loaded` keeps the index, so placing
+  several interior-bearing maps does not re-scan 2,759 `.ytyp` files. A map
+  with no MLO instances never pays for the scan.
+- **World placement.** `world_map` expands each MLO instance's interior into the
+  flattened entity list as `fromMlo` entities — real world-space positions,
+  rotations, scales and LOD distances — so they render, stream by LOD and edit
+  exactly like any other placed entity, with an "interior entity" badge in the
+  selection panel. The gate (`expands_an_mlo_instances_interior_into_the_world`)
+  asserts a city map's interiors expand, name their archetypes and sit at
+  finite positions.
+
+Phase 3 is complete against the brief: the renderer is settled, the world
+browses, streams, textures, edits with undo/redo, saves to `.cwproj`, and now
+shows interiors. What remains in the roadmap is the Explorer's writing work
+(`RpfFile.Write`, NG *encryption*) and the phase's anti-goals.
 
 ## Anti-goals
 

@@ -8,7 +8,7 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 2 in progress — the whole install browses, and ten viewers work
+## Status: phase 3 complete — World view done
 
 **Works**
 
@@ -47,8 +47,29 @@ archives, view and extract what is inside them, and render and edit the world in
     the hash shown. GXT2 is the first file type that round-trips byte for byte.
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
+- **World view** — the phase 3 renderer, settled on three.js in the WebView
+  (the wgpu-native-surface spike lost on the overlay problem; the decision and
+  trade-offs are recorded in `docs/architecture.md`). The world is a fly-camera
+  three.js scene over placements the Rust side already decoded. Content is
+  grouped into `base` plus every DLC/patchday pack, each browsable down to its
+  `.ymap` files; placing a map renders its entities as LOD-coloured instanced
+  boxes, click-to-select with a details panel, double-click to focus, and the
+  map open in Explorer can be placed with one button. A `Stream HD geometry`
+  toggle loads the nearest placed entities' real models as you fly — resolving
+  each archetype to its `.ydr`/`.yft`, streaming maps by their own load regions
+  and entities by LOD tier (ORPHAN_HD nearest, SLOD fills farthest), swapping
+  the drawable's High→VeryLow LODs per frame and binding each part's resolved
+  diffuse/normal textures — with the selected entity's model also
+  loadable by hand. Selecting an entity shows a move/rotate/scale gizmo — drag a
+  handle to transform it, each drag one undo step (Ctrl+Z / Ctrl+Y, or the
+  History buttons). The Project section saves the placed maps and edits as a
+  `.cwproj` and loads it back, so a session survives restart. MLO interior
+  instances expand their archetype's contents into the world at the instance's
+  transform, so buildings show their interiors as placed entities too. With no
+  game folder open the same
+  renderer shows a demo plaza so the pipeline works without the game.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 191 unit tests, 35 install-dependent gate tests, 27 frontend tests. Format
+- 198 unit tests, 41 install-dependent gate tests, 67 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -77,7 +98,8 @@ archives, view and extract what is inside them, and render and edit the world in
 - Particles (`.ypt`) — embeds drawables behind `Particle.cs`, which is not
   ported, so it opens as hex with a note saying which parser is missing.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
-- World and Project are placeholder panels; `crates/cw-render` does not exist.
+- `Project` is still a placeholder; the world's `.cwproj` save/load lives in the
+  World mode. Writing into archives is the next phase's work.
 
 See [docs/phases.md](docs/phases.md) for the handoff: what is done, what to do
 next, and the traps found so far.

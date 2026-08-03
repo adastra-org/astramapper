@@ -11,11 +11,16 @@
 //! Read-only. Writing is not ported: the `MetaBuilder` half of `MetaTypes.cs`
 //! stays out, so neither format round-trips yet.
 
+pub mod mlo;
 pub mod ymap;
 pub mod ytyp;
 
+pub use mlo::{expand_mlo_entities, index_mlo_archetypes, MloWorldEntity};
 pub use ymap::{read_ymap, DistantLodLights, Entity, GrassBatch, LodLights, YmapFile};
-pub use ytyp::{read_ytyp, Archetype, BaseArchetype, Extension, MloArchetype, MloEntity, MloEntitySetData, MloPortal, MloRoom, TimeArchetype, YtypFile};
+pub use ytyp::{
+    read_ytyp, Archetype, BaseArchetype, Extension, MloArchetype, MloEntity, MloEntitySetData,
+    MloPortal, MloRoom, TimeArchetype, YtypFile,
+};
 
 /// `MetaName` structure hashes the two readers dispatch on. Values come from
 /// `MetaNames.cs`, verbatim.

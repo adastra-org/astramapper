@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use cw_core::filetypes::MloArchetype;
 use cw_core::rpf::{EntryKind, RpfManager};
 use cw_core::utils::GtaKeys;
 use serde::Serialize;
@@ -15,11 +16,17 @@ use tauri::State;
 
 /// A scanned game folder. Held for the life of the app once opened.
 pub struct Loaded {
+    /// The folder that was scanned, so other modes can say what is mounted.
+    pub folder: String,
     /// Held rather than recovered on demand: the keys come from a SHA-1 scan
     /// over the whole of `GTA5.exe`, which is far too slow to repeat per
     /// extraction.
     pub keys: GtaKeys,
     pub manager: RpfManager,
+    /// The MLO archetype index, built once when the first interior-bearing map
+    /// is placed. Scanning every `.ytyp` is expensive, so it is kept, not
+    /// rebuilt per map.
+    pub mlo_archetypes: Mutex<Option<std::collections::HashMap<u32, MloArchetype>>>,
 }
 
 #[derive(Default)]
@@ -104,7 +111,15 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
         elapsed_ms: started.elapsed().as_millis() as u64,
     };
 
-    Ok((Loaded { keys, manager }, summary))
+    Ok((
+        Loaded {
+            folder: folder.display().to_string(),
+            keys,
+            manager,
+            mlo_archetypes: Mutex::new(None),
+        },
+        summary,
+    ))
 }
 
 /// List a directory. An empty or absent `path` lists the top-level archives.

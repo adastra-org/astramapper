@@ -79,16 +79,36 @@ archives — which is why it works on FiveM mod archives but not on `x64a.rpf`.)
 
 ## Rendering (phase 3)
 
-Default is wgpu drawing into a native surface obtained via `raw-window-handle`,
-with the WebView as a transparent UI overlay. A spike, capped at two days,
-decides it; three.js in the WebView is the documented fallback. The criteria are
-shader fidelity, 60 fps on mid-range hardware, and how awkward the overlay turns
-out to be. The decision and its trade-offs get recorded here when made.
+**Decision: three.js in the WebView.** The phase 3 spike resolved the wgpu-versus-
+three question in favour of the documented fallback. The native route meant a wgpu
+surface obtained via `raw-window-handle` with the WebView composited over it as a
+transparent overlay. In Tauri v2 there is no first-class native-only window: every
+`tauri::Window` hosts a WebView, so the surface would live in a separate `tao`
+window running alongside Tauri's own event loop, with a transparent, frameless,
+always-on-top WebView tracking its position and size. That is two windowing
+worlds sharing one process, and each half has its own sharp edge: mixing `tao` and
+`tauri` event loops is unsupported, and a transparent WebView over a GPU surface
+has known compositing and input-routing problems on Windows (the target platform
+for a GTA V tool). The upside — exact HLSL→WGSL shader parity — does not earn a
+modding tool's debug view, where what matters is placing things and seeing why.
 
-Explorer Mode's model preview is a separate question with separate constraints
-and is settled: three.js in the WebView, loading on demand so it stays out of the
-startup bundle. Previewing one drawable in a panel does not need a native surface
-and does not prejudge the world renderer.
+three.js wins on the phase's own criteria: it is already proven in this repo
+(Explorer's model and collision previews upload Rust-decoded buffers at 60 fps),
+the overlay awkwardness is zero because there is no overlay, and shader fidelity
+is its PBR built-ins, which are enough to show placement, materials and lighting.
+Consequences of the decision:
+
+- `crates/cw-render` is not created as a wgpu crate. World rendering lives in the
+  WebView; Rust prepares geometry and placements, exactly as in Explorer mode.
+- There is no HLSL→WGSL translation table. Model materials use three.js
+  `MeshStandardMaterial`, and the per-format fidelity questions that remain are
+  data questions (skeleton transforms, shader parameter resolution), not shader
+  language questions.
+- "LOD streaming" becomes loading maps and models on demand from the Rust index
+  as the camera approaches, rather than a GPU residency loop.
+
+Explorer Mode's model preview shares this stack and continues to load on demand
+so it stays out of the startup bundle.
 
 ## Build and CI
 
