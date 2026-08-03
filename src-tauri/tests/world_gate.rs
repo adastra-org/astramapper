@@ -202,14 +202,47 @@ fn streams_an_entitys_archetype_to_real_geometry() {
         "{model_path} has LODs but no triangles"
     );
 
+    // A model that references a diffuse texture and has a sibling `.ytd` must
+    // have resolved that texture: the whole point of the world's texture pass.
+    let wants_diffuse = drawable
+        .lods
+        .iter()
+        .flat_map(|l| l.parts.iter())
+        .any(|p| p.diffuse.is_some());
+    if wants_diffuse {
+        let sibling = sibling_ytd(&model_path);
+        if manager.find(&sibling).is_some() {
+            assert!(
+                !preview.textures.is_empty(),
+                "{model_path} references a diffuse texture but resolved none"
+            );
+        }
+    }
+
     println!(
-        "{} -> {}: {} drawable, {} LODs, {} triangles at high",
+        "{} -> {}: {} drawable, {} LODs, {} triangles at high, {} textures",
         entity.name,
         model_path,
         preview.drawables.len(),
         drawable.lods.len(),
-        drawable.lods[0].triangle_count
+        drawable.lods[0].triangle_count,
+        preview.textures.len()
     );
+}
+
+/// The `.ytd` that should sit beside a model file.
+fn sibling_ytd(path: &str) -> String {
+    let (folder, name) = path.rsplit_once('\\').unwrap_or(("", path));
+    let stem = name
+        .strip_suffix(".ydr")
+        .or_else(|| name.strip_suffix(".yft"))
+        .or_else(|| name.strip_suffix(".ydd"))
+        .unwrap_or(name);
+    if folder.is_empty() {
+        format!("{stem}.ytd")
+    } else {
+        format!("{folder}\\{stem}.ytd")
+    }
 }
 
 /// A name the table cannot resolve, or a prop that is not in the archives, has

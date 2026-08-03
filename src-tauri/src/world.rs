@@ -16,18 +16,21 @@
 //! `GameState` index on demand instead, so the two modes never fight over the
 //! open file.
 
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use cw_core::filetype::FileKind;
 use cw_core::filetypes::read_ymap;
+use cw_core::image;
 use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, LodLevel, MetaFile};
-use cw_core::resources::{read_named_drawables, read_named_fragments};
+use cw_core::resources::{read_named_drawables, read_named_fragments, TextureDictionary};
 use cw_core::rpf::RpfManager;
 use cw_core::utils::{hash_string, GtaKeys};
 use serde::Serialize;
 use tauri::State;
 
 use crate::explorer::GameState;
-use crate::viewer::{ModelDrawable, ModelPreview, ViewerState};
+use crate::viewer::{ModelDrawable, ModelPreview, ModelTexture, ViewerState};
 
 /// How many `.ymap` files one group listing hands over. A city group can name
 /// thousands; the UI shows this many and the total.
@@ -260,8 +263,13 @@ pub fn world_asset(name: String, game: State<'_, GameState>) -> Result<Option<St
 ///
 /// Like `world_map`, this reads past the viewer's one-open-file state: several
 /// entities stream their models at once, so the Explorer's single open file
-/// must not be disturbed. Textures are not resolved here — flat materials first,
-/// textures land with the streaming pass.
+/// must not be disturbed.
+///
+/// The texture resolution chain is deliberately narrower than the Explorer's:
+/// embedded dictionaries first, then the sibling `.ytd` (same folder, same
+/// basename) found by one index lookup. The Explorer's third step — every
+/// `.ytd` in the model's folder — is a full-tree scan that costs too much per
+/// streamed model; most stock models' pixels live in the sibling anyway.
 pub fn read_world_model(
     path: &str,
     keys: &GtaKeys,
@@ -292,28 +300,143 @@ pub fn read_world_model(
         _ => read_named_drawables(kind, &data, system_size).map_err(|e| format!("{e}"))?,
     };
 
+    // The embedded texture dictionaries, kept aside before the drawables are
+    // flattened into bundles.
+    let embedded: Vec<TextureDictionary> = named
+        .iter()
+        .filter_map(|entry| entry.drawable.texture_dictionary.clone())
+        .collect();
+
+    let mut wanted = std::collections::BTreeSet::new();
     let mut empty_drawables = 0;
     let drawables = named
-        .into_iter()
+        .iter()
         .map(|entry| {
             let lods = MeshBundle::all(&entry.drawable);
             if lods.is_empty() {
                 empty_drawables += 1;
             }
+            for bundle in &lods {
+                for part in &bundle.parts {
+                    for hash in [part.diffuse, part.normal, part.specular]
+                        .into_iter()
+                        .flatten()
+                    {
+                        wanted.insert(hash);
+                    }
+                }
+            }
             ModelDrawable {
                 index: entry.index,
-                name: entry.name,
+                name: entry.name.clone(),
                 hash: entry.hash,
                 lods,
             }
         })
         .collect();
 
+    let textures = resolve_world_textures(path, &wanted, &embedded, keys, manager);
+
     Ok(ModelPreview {
         path: path.to_string(),
         drawables,
         empty_drawables,
-        textures: Vec::new(),
+        textures,
+    })
+}
+
+/// Resolve a model's texture hashes against its embedded dictionaries and its
+/// sibling `.ytd`, decoding each hit to a PNG for the WebView.
+fn resolve_world_textures(
+    path: &str,
+    wanted: &std::collections::BTreeSet<u32>,
+    embedded: &[TextureDictionary],
+    keys: &GtaKeys,
+    manager: &RpfManager,
+) -> Vec<ModelTexture> {
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
+        std::collections::HashMap::new();
+    for dictionary in embedded {
+        resolve_from_dictionary(dictionary, wanted, &mut by_hash);
+        if by_hash.len() == wanted.len() {
+            break;
+        }
+    }
+
+    if by_hash.len() < wanted.len() {
+        if let Some(sibling) = sibling_texture_path(path) {
+            if let Some(reference) = manager.find(&sibling) {
+                let entry = manager.entry(reference);
+                if let Some((system_size, _)) = entry.resource_segments() {
+                    if let Ok(data) = manager.extract(reference, keys) {
+                        if let Ok(dictionary) =
+                            cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
+                        {
+                            resolve_from_dictionary(&dictionary, wanted, &mut by_hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    by_hash.into_values().collect()
+}
+
+/// Decode every wanted hash a dictionary holds into the response.
+fn resolve_from_dictionary(
+    dictionary: &TextureDictionary,
+    wanted: &std::collections::BTreeSet<u32>,
+    by_hash: &mut std::collections::HashMap<u32, ModelTexture>,
+) {
+    for hash in wanted {
+        if by_hash.contains_key(hash) {
+            continue;
+        }
+        let Some(texture) = dictionary.lookup(*hash) else {
+            continue;
+        };
+        let Ok(decoded) = image::decode_mip(texture, 0) else {
+            continue;
+        };
+        let Ok(png) = image::to_png(&decoded) else {
+            continue;
+        };
+        by_hash.insert(
+            *hash,
+            ModelTexture {
+                hash: *hash,
+                name: texture
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
+                width: decoded.width,
+                height: decoded.height,
+                png: STANDARD.encode(png),
+            },
+        );
+    }
+}
+
+/// The `.ytd` that shares a model's folder and basename, if the path has a
+/// basename worth matching.
+fn sibling_texture_path(path: &str) -> Option<String> {
+    let (folder, basename) = match path.rsplit_once('\\') {
+        Some((folder, name)) => (folder, name),
+        None => ("", path),
+    };
+    let stem = basename
+        .strip_suffix(".ydr")
+        .or_else(|| basename.strip_suffix(".yft"))
+        .or_else(|| basename.strip_suffix(".ydd"))?;
+    Some(if folder.is_empty() {
+        format!("{stem}.ytd")
+    } else {
+        format!("{folder}\\{stem}.ytd")
     })
 }
 
