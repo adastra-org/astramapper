@@ -28,7 +28,18 @@ use serde::Serialize;
 use crate::Result;
 
 use super::reader::ResourceReader;
+use super::texture::{Texture, TextureDictionary};
 use super::vertex::VertexDeclaration;
+
+/// Jenkins hashes of the shader parameters that name the important textures, so
+/// a material can be matched to the texture that fills it. From the
+/// `ShaderParamNames` enum in `ShaderParams.cs`.
+pub const DIFFUSE_SAMPLER: u32 = 4059966321;
+pub const BUMP_SAMPLER: u32 = 1186448975;
+pub const SPEC_SAMPLER: u32 = 1619499462;
+pub const DIFFUSE_HF_SAMPLER: u32 = 2946270081;
+pub const TINT_PALETTE_SAMPLER: u32 = 4131954791;
+pub const DETAIL_SAMPLER: u32 = 3393362404;
 
 /// Guard on any count read out of a file before it is used to size an
 /// allocation. Nothing in a stock drawable comes close; a corrupt or hostile
@@ -90,6 +101,10 @@ pub struct Drawable {
     /// Models per LOD, in [`Lod::ALL`] order.
     pub models: [Vec<DrawableModel>; 4],
     pub shaders: Vec<ShaderFx>,
+    /// The textures the shaders reference, embedded in the drawable. Absent
+    /// when the shader group carries none — most models name their textures
+    /// and the dictionary lives in a separate `.ytd`.
+    pub texture_dictionary: Option<TextureDictionary>,
     /// Kept, not followed. See the module note.
     pub skeleton_pointer: u64,
     pub joints_pointer: u64,
@@ -142,7 +157,7 @@ impl Drawable {
         };
 
         let name = r.read_string_at(name_pointer)?;
-        let shaders = read_shader_group(r, shader_group_pointer)?;
+        let (shaders, texture_dictionary) = read_shader_group(r, shader_group_pointer)?;
 
         let mut models = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         for (slot, pointer) in models.iter_mut().zip(lod_pointers) {
@@ -159,6 +174,7 @@ impl Drawable {
             lod_distances,
             models,
             shaders,
+            texture_dictionary,
             skeleton_pointer,
             joints_pointer,
             bound_pointer,
@@ -185,6 +201,24 @@ impl Drawable {
             .zip(&self.models)
             .find(|(_, models)| !models.is_empty())
             .map(|(lod, models)| (*lod, models.as_slice()))
+    }
+
+    /// The texture that fills a shader's named slot, resolved through the
+    /// embedded dictionary.
+    ///
+    /// A shader's parameters name the texture for each slot by the texture's
+    /// own hash; the pixels live in the drawable's embedded dictionary, keyed
+    /// by the same hash. `None` when the slot is unbound, the shader is absent,
+    /// or the dictionary does not hold it.
+    pub fn texture_for_shader(&self, shader: usize, param: u32) -> Option<&Texture> {
+        let shader = self.shaders.get(shader)?;
+        let hash = shader.texture_for(param)?;
+        self.texture_dictionary.as_ref()?.lookup(hash)
+    }
+
+    /// The diffuse texture for a geometry's shader, if the model embeds one.
+    pub fn diffuse_texture(&self, shader: usize) -> Option<&Texture> {
+        self.texture_for_shader(shader, DIFFUSE_SAMPLER)
     }
 }
 
@@ -235,9 +269,8 @@ impl DrawableDictionary {
     }
 }
 
-/// A material. Only the identifying hashes are read; the parameter block is not
-/// ported yet.
-#[derive(Debug, Clone, Copy, Serialize)]
+/// A material: a shader and the parameters that fill its slots.
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShaderFx {
     /// Jenkins hash of the shader name, e.g. `spec`, `normal_decal`.
@@ -247,56 +280,198 @@ pub struct ShaderFx {
     pub render_bucket: u8,
     pub parameter_count: u8,
     pub texture_parameter_count: u8,
+    /// The parameter list: one entry per named slot, in file order. A texture
+    /// parameter names the texture that fills it, by the texture's own hash.
+    pub parameters: Vec<ShaderParameter>,
 }
 
-fn read_shader_group(r: &mut ResourceReader<'_>, pointer: u64) -> Result<Vec<ShaderFx>> {
-    let Some(shaders) = r.at(pointer, |r| {
+impl ShaderFx {
+    /// The texture hash bound to the parameter named `param` — the name hashes
+    /// like [`DIFFUSE_SAMPLER`] — if this shader binds one.
+    pub fn texture_for(&self, param: u32) -> Option<u32> {
+        self.parameters
+            .iter()
+            .find(|p| p.name == param)
+            .and_then(|p| p.texture)
+    }
+}
+
+/// One shader parameter: a named slot, and the texture that fills it when it is
+/// a texture slot. Non-texture parameters (vector4s, buffers) are identified by
+/// their name but their value is not read.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShaderParameter {
+    /// Jenkins hash of the parameter name, e.g. `DiffuseSampler`.
+    pub name: u32,
+    /// `0` for a texture, `1+` for a vector4 array. Only texture parameters are
+    /// resolved to a [`ShaderParameter::texture`].
+    pub data_type: u8,
+    /// Jenkins hash of the texture's name, present only for texture parameters.
+    pub texture: Option<u32>,
+}
+
+/// The `ShaderGroup` block: an embedded texture dictionary and a list of shaders.
+///
+/// Port of `ShaderGroup` from `Drawable.cs`. The reference also walks the
+/// shader parameters, swapping each `TextureBase` reference for the texture the
+/// embedded dictionary actually holds; this port keeps the reference and lets
+/// [`Drawable::texture_dictionary`] resolve it at the call site, so a drawable
+/// whose dictionary fails to parse is not a total loss.
+fn read_shader_group(
+    r: &mut ResourceReader<'_>,
+    pointer: u64,
+) -> Result<(Vec<ShaderFx>, Option<TextureDictionary>)> {
+    let Some(group) = r.at(pointer, |r| {
         let _vft = r.read_u32()?;
         let _unknown_4h = r.read_u32()?;
-        let _texture_dictionary_pointer = r.read_u64()?;
+        let texture_dictionary_pointer = r.read_u64()?;
         let shaders_pointer = r.read_u64()?;
         let shaders_count = r.read_u16()? as usize;
-        Ok((shaders_pointer, shaders_count))
+        let _shaders_count2 = r.read_u16()?;
+        let _unknown_1ch = r.read_u32()?;
+        let _unknown_20h = r.read_u64()?;
+        let _unknown_28h = r.read_u64()?;
+        let _shader_group_blocks_size = r.read_u32()?;
+        let _unknown_34h = r.read_u32()?;
+        let _unknown_38h = r.read_u64()?;
+        Ok((texture_dictionary_pointer, shaders_pointer, shaders_count))
     })?
     else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     };
 
-    let (shaders_pointer, shaders_count) = shaders;
+    let (texture_dictionary_pointer, shaders_pointer, shaders_count) = group;
+
+    // The embedded dictionary is read best-effort: it is what the shaders'
+    // texture parameters point into, and a broken one should cost the material
+    // resolution, not the whole drawable. `TextureDictionary::read` refuses a
+    // header whose name and texture lists disagree, which is how a truncated
+    // embedded `.ytd` announces itself.
+    let texture_dictionary = r.at(texture_dictionary_pointer, TextureDictionary::read)?;
+
     let pointers = r
         .read_u64s_at(shaders_pointer, shaders_count)?
         .unwrap_or_default();
 
-    let mut out = Vec::with_capacity(pointers.len());
+    let mut shaders = Vec::with_capacity(pointers.len());
     for pointer in pointers {
-        let shader = r.at(pointer, |r| {
-            let _parameters_pointer = r.read_u64()?;
-            let name = r.read_u32()?;
-            let _unknown_ch = r.read_u32()?;
-            let parameter_count = r.read_u8()?;
-            let render_bucket = r.read_u8()?;
-            let _unknown_12h = r.read_u16()?;
-            let _parameter_size = r.read_u16()?;
-            let _parameter_data_size = r.read_u16()?;
-            let file_name = r.read_u32()?;
-            let _unknown_1ch = r.read_u32()?;
-            let _render_bucket_mask = r.read_u32()?;
-            let _unknown_24h = r.read_u16()?;
-            let _unknown_26h = r.read_u8()?;
-            let texture_parameter_count = r.read_u8()?;
-            Ok(ShaderFx {
-                name,
-                file_name,
-                render_bucket,
-                parameter_count,
-                texture_parameter_count,
-            })
-        })?;
-        if let Some(shader) = shader {
-            out.push(shader);
+        if let Some(shader) = r.at(pointer, read_shader_fx)? {
+            shaders.push(shader);
         }
     }
-    Ok(out)
+    Ok((shaders, texture_dictionary))
+}
+
+fn read_shader_fx(r: &mut ResourceReader<'_>) -> Result<ShaderFx> {
+    let parameters_pointer = r.read_u64()?;
+    let name = r.read_u32()?;
+    let _unknown_ch = r.read_u32()?;
+    let parameter_count = r.read_u8()?;
+    let render_bucket = r.read_u8()?;
+    let _unknown_12h = r.read_u16()?;
+    let _parameter_size = r.read_u16()?;
+    let _parameter_data_size = r.read_u16()?;
+    let file_name = r.read_u32()?;
+    let _unknown_1ch = r.read_u32()?;
+    let _render_bucket_mask = r.read_u32()?;
+    let _unknown_24h = r.read_u16()?;
+    let _unknown_26h = r.read_u8()?;
+    let texture_parameter_count = r.read_u8()?;
+
+    let parameters = read_shader_parameters(r, parameters_pointer, parameter_count)?;
+
+    Ok(ShaderFx {
+        name,
+        file_name,
+        render_bucket,
+        parameter_count,
+        texture_parameter_count,
+        parameters,
+    })
+}
+
+/// The `ShaderParametersBlock` of one shader.
+///
+/// Port of `ShaderParametersBlock.Read` from `Drawable.cs`. The block is a
+/// sequence of 16-byte parameter records, then the vector4 data they point at,
+/// then one u32 hash per parameter. Only the texture parameters are resolved —
+/// each names a `TextureBase` whose `NameHash` is what the embedded dictionary
+/// is keyed by. The vector4 data is skipped, matching the reference's
+/// `reader.Position += offset`.
+fn read_shader_parameters(
+    r: &mut ResourceReader<'_>,
+    pointer: u64,
+    count: u8,
+) -> Result<Vec<ShaderParameter>> {
+    let Some(params) = r.at(pointer, |r| {
+        let mut records = Vec::with_capacity(count as usize);
+        let mut offset = 0usize;
+        for _ in 0..count {
+            let data_type = r.read_u8()?;
+            let _unknown_1h = r.read_u8()?;
+            let _unknown_2h = r.read_u16()?;
+            let _unknown_4h = r.read_u32()?;
+            let data_pointer = r.read_u64()?;
+            offset += 16 * data_type as usize;
+            records.push((data_type, data_pointer));
+        }
+        // The vector4 data the pointers reference is embedded here, skipped the
+        // way the reference skips it.
+        let _ = r.read_bytes(offset)?;
+        let hashes = r.read_u32s_at(r.position(), count as usize)?.unwrap_or_default();
+
+        let mut parameters = Vec::with_capacity(records.len());
+        for (index, (data_type, data_pointer)) in records.into_iter().enumerate() {
+            let name = hashes.get(index).copied().unwrap_or(0);
+            let texture = if data_type == 0 {
+                read_texture_base_hash(r, data_pointer)?
+            } else {
+                None
+            };
+            parameters.push(ShaderParameter {
+                name,
+                data_type,
+                texture,
+            });
+        }
+        Ok(parameters)
+    })?
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(params)
+}
+
+/// The `NameHash` of the `TextureBase` at `pointer`, if it has a name.
+///
+/// Port of the legacy branch of `TextureBase.Read`: the 80-byte base header,
+/// then the name string, hashed lowercased. Only the name is of interest here —
+/// the pixels live in the embedded dictionary.
+fn read_texture_base_hash(r: &mut ResourceReader<'_>, pointer: u64) -> Result<Option<u32>> {
+    if pointer == 0 {
+        return Ok(None);
+    }
+    r.at(pointer, |r| {
+        for _ in 0..10 {
+            let _ = r.read_u32()?;
+        }
+        let name_pointer = r.read_u64()?;
+        let _unknown_30h = r.read_u16()?;
+        let _unknown_32h = r.read_u16()?;
+        let _unknown_34h = r.read_u32()?;
+        let _unknown_38h = r.read_u32()?;
+        let _unknown_3ch = r.read_u32()?;
+        let _usage_data = r.read_u32()?;
+        let _unknown_44h = r.read_u32()?;
+        let _extra_flags = r.read_u32()?;
+        let _unknown_4ch = r.read_u32()?;
+        let Some(name) = r.read_string_at(name_pointer)? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::utils::jenk::gen_hash(&name.to_lowercase())))
+    })
+    .map(|opt| opt.flatten())
 }
 
 /// One LOD list: `{pointer, count, capacity, pad}` followed by `capacity`

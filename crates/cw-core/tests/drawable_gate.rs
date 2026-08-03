@@ -306,7 +306,11 @@ fn decoded_vertices_land_inside_their_geometry_bounds() {
     let mut candidates: Vec<String> = Vec::new();
     for archive in &manager.archives {
         for entry in &archive.entries {
-            if FileKind::from_name(&entry.name_lower).has_model() {
+            // The drawable reader only handles `.ydr`/`.ydd`; fragments parse
+            // through `Frag.cs` and are gated separately. Sampling them here
+            // would fail the parse before anything was checked.
+            let kind = FileKind::from_name(&entry.name_lower);
+            if matches!(kind, FileKind::Model | FileKind::ModelDictionary) {
                 candidates.push(entry.path.clone());
             }
         }
@@ -394,7 +398,9 @@ fn every_sampled_drawable_produces_a_renderable_bundle() {
     let mut paths: Vec<String> = Vec::new();
     for archive in &manager.archives {
         for entry in &archive.entries {
-            if FileKind::from_name(&entry.name_lower).has_model() {
+            // Same as above: only the drawable formats this gate reads.
+            let kind = FileKind::from_name(&entry.name_lower);
+            if matches!(kind, FileKind::Model | FileKind::ModelDictionary) {
                 paths.push(entry.path.clone());
             }
         }

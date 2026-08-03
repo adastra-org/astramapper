@@ -90,6 +90,12 @@ export type MeshPart = {
   readonly name: string;
   /** Jenkins hash of the shader name. */
   readonly shader: number;
+  /** Jenkins hash of the texture in the diffuse slot, if bound. */
+  readonly diffuse: number | null;
+  /** Jenkins hash of the texture in the normal slot, if bound. */
+  readonly normal: number | null;
+  /** Jenkins hash of the texture in the specular slot, if bound. */
+  readonly specular: number | null;
   readonly vertexCount: number;
   readonly triangleCount: number;
   /** Base64 of packed `f32` triples. */
@@ -119,14 +125,26 @@ export type ModelDrawable = {
   /** The name from the dictionary's hash list, or `hash_XXXXXXXX`. */
   readonly name: string;
   readonly hash: number;
-  /** Null when this drawable holds nothing renderable. */
-  readonly bundle: MeshBundle | null;
+  /** Every LOD that has renderable geometry, highest first. Empty when none. */
+  readonly lods: readonly MeshBundle[];
+};
+
+/** One resolved texture a model's parts reference, decoded to a PNG. */
+export type ModelTexture = {
+  readonly hash: number;
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  /** Base64 of a complete PNG. */
+  readonly png: string;
 };
 
 export type ModelPreview = {
   readonly path: string;
   readonly drawables: readonly ModelDrawable[];
   readonly emptyDrawables: number;
+  /** Textures the parts reference, keyed by `hash`. */
+  readonly textures: readonly ModelTexture[];
 };
 
 /** One collision geometry in a `.ybn`, as uploadable buffers. */

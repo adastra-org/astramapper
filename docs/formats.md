@@ -155,7 +155,7 @@ by the oracle's own rule so the comparison stays about what was read.
 | --- | --- | --- | --- |
 | `resources/reader.rs` | `ResourceData.cs` | **partial** | `ResourceDataReader` only. The writer lands with the first format that serializes. |
 | `resources/vertex.rs` | `VertexType.cs`, `VertexDeclaration` | **partial** | Declaration decode and component extraction. Gen9 declarations not ported. |
-| `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes. Reads, does not write. |
+| `resources/drawable.rs` | `Drawable.cs` (282 KB) | **partial** | Geometry path only: models, geometries, vertex/index buffers, shader name hashes, and the shader group — `ShaderFX` parameters (`ShaderParametersBlock`) with each texture slot resolved to the `TextureBase`'s `NameHash`, plus the embedded `TextureDictionary` when the group carries one. Reads, does not write. |
 | `resources/frag.rs` | `Frag.cs` (190 KB) | **partial** | `FragType`, `FragDrawable` (a `DrawableBase` plus a 168-byte fragment tail), `FragBoneTransforms`, `FragGlassWindow`, `FragVehicleGlassWindows`, and the physics LOD tree: `FragPhysicsLODGroup` → `FragPhysicsLOD` → `FragPhysTypeChild`/`FragPhysTypeGroup`/`FragPhysArchetype`. The joint types, articulated body, evt sets and transforms are read through for the pointer chain but not kept. Reads, does not write. |
 | `resources/texture.rs` | `Texture.cs` (61 KB) | **partial** | `TextureDictionary`, `TextureBase`, `Texture`, `TextureData` and the mip pitch table. Legacy layout only — the Gen9 branch and `ShaderResourceViewG9` go with the Enhanced edition. Reads, does not write. |
 | `resources/clip.rs` | `Clip.cs` (164 KB) | **partial** | `ClipDictionary`, both hash maps, `Clip` (animation and animation-list) and `Animation` headers. The channel codecs, tags and properties are not read: tags and properties are counted. |
@@ -167,8 +167,30 @@ by the oracle's own rule so the comparison stays about what was read.
 `ResourceAnalyzer` — all **todo**. (`ShaderParams` is a name table, see below.)
 
 Not read by `resources/drawable.rs`, though their pointers are kept: the
-embedded texture dictionary, the skeleton, joints, light attributes, collision
-bounds and shader *parameters*. Each needs a sibling file that is not ported.
+skeleton, joints, light attributes and collision bounds. Each needs a sibling
+file that is not ported.
+
+### Notes on shader parameters and textures on models
+
+**A shader parameter names the texture that fills it, by hash.** `ShaderFX`
+keeps a `ShaderParametersBlock`: 16-byte records of `(DataType, Unknown_1h,
+Unknown_2h, Unknown_4h, DataPointer)` followed by the vector4 data those
+pointers reference and a parallel `u32` list of parameter-name hashes. `DataType
+0` is a texture slot; the reference (and this port) resolves it to the
+`TextureBase` it points at and takes that base's `NameHash` — the Jenkins hash
+of the lowercased texture name. The sampler constants that matter to a viewer
+come from `ShaderParams.cs`: `DiffuseSampler = 4059966321`, `BumpSampler =
+1186448975`, `SpecSampler = 1619499462` (plus `DiffuseHfSampler`,
+`TintPaletteSampler`, `DetailSampler`). `shader_gate.rs` pins the whole
+parameter list against the oracle, hash for hash.
+
+**Most stock drawables have no embedded dictionary.** The `ShaderGroup` carries
+an optional `TextureDictionary`; in practice the pixels live in `.ytd` files the
+archetype loads at runtime. The viewer resolves a texture hash by walking the
+same chain the reference's renderer does, cheap-first: the drawable's embedded
+dictionary, then a `.ytd` sharing the model's basename, then every `.ytd` in
+the model's folder. A hash that resolves to an undecodable texture is skipped
+and that part renders untextured rather than failing the model.
 
 ### Notes on the resource layer
 

@@ -21,6 +21,9 @@ archives, view and extract what is inside them, and render and edit the world in
 - **Explorer viewers**, with the backend choosing which one opens because that
   decision needs the payload:
   - **3D** for `.ydr` and `.ydd`, in three.js over mesh buffers decoded in Rust.
+    Parts bind the diffuse and normal textures resolved from the model's
+    `.ytd` dictionaries and drawn with shadow-casting lighting; a LOD picker
+    switches between High and VeryLow.
   - **Fragments** for `.yft`, the physics-wrapped drawables that make up most of
     the game's props, vehicles and peds — the main drawable, the cloth, the
     alternative array and every physics child, each named by where it sits.
@@ -36,7 +39,7 @@ archives, view and extract what is inside them, and render and edit the world in
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 182 unit tests, 32 install-dependent gate tests, 27 frontend tests. Format
+- 182 unit tests, 34 install-dependent gate tests, 27 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -50,6 +53,9 @@ archives, view and extract what is inside them, and render and edit the world in
              flattened one for one; 15,139 .ybn files parse, 104.6M triangles
   fragments  228 drawables across the physics LOD tree identical; 61,430 .yft
              files parse, 223,359 embedded drawables, 459,734 geometries
+  shaders    173 drawables, 197 shaders, 3,805 parameters and 40 embedded
+             textures identical; 109,758 .ydr/.ydd files read their shader
+             parameters across the whole install
   gxt2       283 entries identical, and all 19,477 .gxt2 files round-trip
              byte for byte (8.8M strings)
   ```
@@ -61,8 +67,6 @@ archives, view and extract what is inside them, and render and edit the world in
   than going back into the archive.
 - Metadata (`.ymap`, `.ytyp`), particles (`.ypt`) — each opens as hex or a
   tree, with a note saying which parser is missing.
-- Textures on models: the 3D viewer draws untextured. Both halves exist now;
-  matching a material to a texture needs `ShaderParams.cs`.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
 - World and Project are placeholder panels; `crates/cw-render` does not exist.
 
@@ -91,11 +95,11 @@ Tests that need a real GTA V install are marked `#[ignore]`:
 cargo test --workspace -- --ignored
 ```
 
-Four of those gates compare against data dumped from the reference DLL. The
+Seven of those gates compare against data dumped from the reference DLL. The
 dumps are gitignored; regenerate them first or the gates skip with a message:
 
 ```bash
-pwsh -File scripts/rpf-oracle.ps1; pwsh -File scripts/drawable-oracle.ps1; pwsh -File scripts/awc-oracle.ps1; pwsh -File scripts/texture-oracle.ps1
+pwsh -File scripts/rpf-oracle.ps1; pwsh -File scripts/drawable-oracle.ps1; pwsh -File scripts/awc-oracle.ps1; pwsh -File scripts/texture-oracle.ps1; pwsh -File scripts/frag-oracle.ps1; pwsh -File scripts/gxt2-oracle.ps1; pwsh -File scripts/shader-oracle.ps1
 ```
 
 ## Docs

@@ -107,9 +107,26 @@ pub struct ModelDrawable {
     /// The name from the dictionary's hash list, or `hash_XXXXXXXX`.
     pub name: String,
     pub hash: u32,
-    /// Absent when this drawable holds nothing renderable, which is normal in
+    /// Every LOD that has renderable geometry, highest first. A drawable whose
+    /// lowest LOD is its only geometry still lists one bundle here. Absent
+    /// entirely when the drawable holds nothing renderable, which is normal in
     /// a dictionary: it is still listed, so the count is never silently wrong.
-    pub bundle: Option<MeshBundle>,
+    pub lods: Vec<MeshBundle>,
+}
+
+/// One resolved texture a model's parts reference, decoded to a PNG.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelTexture {
+    /// The Jenkins hash the parts reference — `MeshPart::diffuse` and friends.
+    pub hash: u32,
+    /// The name the texture carries in its dictionary.
+    pub name: String,
+    pub width: usize,
+    pub height: usize,
+    /// Base64 of a complete PNG. Decoded in Rust per the boundary rule: the
+    /// browser would have no business reading BC-compressed blocks.
+    pub png: String,
 }
 
 /// Everything drawable in one file.
@@ -120,6 +137,9 @@ pub struct ModelPreview {
     pub drawables: Vec<ModelDrawable>,
     /// How many of `drawables` produced no geometry.
     pub empty_drawables: usize,
+    /// Every texture the parts reference that could be resolved and decoded,
+    /// keyed by [`ModelTexture::hash`].
+    pub textures: Vec<ModelTexture>,
 }
 
 /// Open an entry: extract its payload, classify it, and keep it for the reads
@@ -503,7 +523,10 @@ pub fn read_hex(
 
 /// Build the mesh bundles for the open file.
 #[tauri::command]
-pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String> {
+pub fn read_model(
+    viewer: State<'_, ViewerState>,
+    game: State<'_, GameState>,
+) -> Result<ModelPreview, String> {
     let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
     let open = guard.as_ref().ok_or("no file is open")?;
 
@@ -520,24 +543,45 @@ pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String
             .map_err(|e| format!("could not read the geometry: {e}"))?,
     };
 
+    // The texture hashes every part wants, diffuse and otherwise, deduplicated.
+    let mut wanted = std::collections::BTreeSet::new();
+    for entry in &named {
+        for bundle in MeshBundle::all(&entry.drawable) {
+            for part in &bundle.parts {
+                for slot in [part.diffuse, part.normal, part.specular] {
+                    if let Some(hash) = slot {
+                        wanted.insert(hash);
+                    }
+                }
+            }
+        }
+    }
+
+    let textures = resolve_model_textures(
+        &open.info.path,
+        &wanted,
+        named.iter().filter_map(|e| e.drawable.texture_dictionary.as_ref()),
+        &game,
+    );
+
     let mut empty_drawables = 0;
     let drawables: Vec<ModelDrawable> = named
         .into_iter()
         .map(|entry| {
-            let bundle = MeshBundle::best(&entry.drawable);
-            if bundle.is_none() {
+            let lods = MeshBundle::all(&entry.drawable);
+            if lods.is_empty() {
                 empty_drawables += 1;
             }
             ModelDrawable {
                 index: entry.index,
                 name: entry.name,
                 hash: entry.hash,
-                bundle,
+                lods,
             }
         })
         .collect();
 
-    if drawables.iter().all(|d| d.bundle.is_none()) {
+    if drawables.iter().all(|d| d.lods.is_empty()) {
         return Err("this file holds no renderable geometry".into());
     }
 
@@ -545,7 +589,122 @@ pub fn read_model(viewer: State<'_, ViewerState>) -> Result<ModelPreview, String
         path: open.info.path.clone(),
         drawables,
         empty_drawables,
+        textures,
     })
+}
+
+/// Resolve the texture hashes a model's shaders reference.
+///
+/// Resolution order, mirroring the reference's `GetTextureSamplerList` chain:
+/// the drawables' embedded dictionaries first, then a `.ytd` sharing the
+/// model's basename, then every `.ytd` in the same folder. Most stock drawables
+/// carry no embedded dictionary — the pixels live in sibling `.ytd` files the
+/// archetype loads — so the folder scan is what usually lands.
+///
+/// A hash that resolves to a texture that cannot be decoded is skipped, and a
+/// part referencing it renders untextured rather than aborting the model.
+fn resolve_model_textures<'a>(
+    path: &str,
+    wanted: &std::collections::BTreeSet<u32>,
+    embedded: impl Iterator<Item = &'a cw_core::resources::TextureDictionary>,
+    game: &GameState,
+) -> Vec<ModelTexture> {
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    let (folder, basename) = match path.rsplit_once('\\') {
+        Some((folder, name)) => {
+            let stem = name
+                .strip_suffix(".ydr")
+                .or_else(|| name.strip_suffix(".ydd"))
+                .or_else(|| name.strip_suffix(".yft"))
+                .unwrap_or(name);
+            (folder, stem)
+        }
+        None => ("", path),
+    };
+
+    let mut dictionaries: Vec<(String, cw_core::resources::TextureDictionary)> = Vec::new();
+
+    // The drawables' own dictionaries first: they are already in memory, and
+    // they are what the shader *points* at.
+    for dictionary in embedded {
+        dictionaries.push(("embedded".into(), dictionary.clone()));
+    }
+
+    // Then the sibling `.ytd` files. The whole game archive tree is walked; a
+    // `.ytd` belongs to the model's folder when its path is the model's folder
+    // plus the file name. The same-basename sibling is visited first, since the
+    // reference tries it before falling back to the archetype's dictionary list.
+    let game_guard = game.0.lock().ok();
+    let loaded = game_guard.as_ref().and_then(|g| g.as_ref());
+
+    if let Some(loaded) = loaded {
+        let sibling = format!("{folder}\\{basename}.ytd");
+        let mut paths: Vec<String> = Vec::new();
+        for archive in &loaded.manager.archives {
+            for entry in &archive.entries {
+                if !entry.name_lower.ends_with(".ytd") {
+                    continue;
+                }
+                // Preferred sibling first, then same-folder files. A `.ytd`
+                // anywhere else in the tree is unrelated to this model.
+                if entry.path.as_str() != sibling.as_str()
+                    && !entry.path.starts_with(&format!("{folder}\\"))
+                {
+                    continue;
+                }
+                paths.push(entry.path.clone());
+            }
+        }
+        paths.sort_by_key(|p| *p != sibling);
+
+        for path in paths {
+            let Some(reference) = loaded.manager.find(&path) else { continue };
+            let entry = loaded.manager.entry(reference);
+            let Some((system_size, _)) = entry.resource_segments() else { continue };
+            if let Ok(data) = loaded.manager.extract(reference, &loaded.keys) {
+                if let Ok(dictionary) =
+                    cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
+                {
+                    dictionaries.push((path, dictionary));
+                }
+            }
+        }
+    }
+
+    let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
+        std::collections::HashMap::new();
+    for (_, dictionary) in &dictionaries {
+        for hash in wanted {
+            if by_hash.contains_key(hash) {
+                continue;
+            }
+            let Some(texture) = dictionary.lookup(*hash) else { continue };
+            let Ok(decoded) = image::decode_mip(texture, 0) else { continue };
+            let Ok(png) = image::to_png(&decoded) else { continue };
+            by_hash.insert(
+                *hash,
+                ModelTexture {
+                    hash: *hash,
+                    name: texture
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
+                    width: decoded.width,
+                    height: decoded.height,
+                    png: STANDARD.encode(png),
+                },
+            );
+        }
+        // Once every requested hash has a texture, stop scanning folders.
+        if by_hash.len() == wanted.len() {
+            break;
+        }
+    }
+
+    by_hash.values().cloned().collect()
 }
 
 /// One collision geometry in an open `.ybn`, as uploadable buffers.

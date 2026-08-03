@@ -50,6 +50,14 @@ pub struct MeshPart {
     /// Jenkins hash of the shader name. Resolving it to text needs the name
     /// tables from `MetaNames.cs`, which are not ported yet.
     pub shader: u32,
+    /// Jenkins hash of the texture that fills this geometry's diffuse slot, if
+    /// its shader binds one. The viewer resolves it against the drawable's
+    /// embedded dictionary or the model's sibling `.ytd`.
+    pub diffuse: Option<u32>,
+    /// Hash of the texture in the normal (bump) slot, when bound.
+    pub normal: Option<u32>,
+    /// Hash of the texture in the specular slot, when bound.
+    pub specular: Option<u32>,
     pub vertex_count: usize,
     pub triangle_count: usize,
     /// Base64 of tightly packed `f32` triples.
@@ -76,7 +84,20 @@ impl MeshBundle {
                     .get(geometry.shader_id as usize)
                     .map(|s| s.name)
                     .unwrap_or(0);
-                if let Some(part) = MeshPart::from_geometry(geometry, shader, m, g) {
+                let (diffuse, normal, specular) = drawable
+                    .shaders
+                    .get(geometry.shader_id as usize)
+                    .map(|s| {
+                        (
+                            s.texture_for(crate::resources::drawable::DIFFUSE_SAMPLER),
+                            s.texture_for(crate::resources::drawable::BUMP_SAMPLER),
+                            s.texture_for(crate::resources::drawable::SPEC_SAMPLER),
+                        )
+                    })
+                    .unwrap_or((None, None, None));
+                if let Some(part) =
+                    MeshPart::from_geometry(geometry, shader, diffuse, normal, specular, m, g)
+                {
                     parts.push(part);
                 }
             }
@@ -111,12 +132,25 @@ impl MeshBundle {
             .iter()
             .find_map(|lod| Self::from_drawable(drawable, *lod))
     }
+
+    /// Every LOD that yields geometry, highest first. For the LOD picker: each
+    /// bundle is its own `from_drawable` call, so a part a lower LOD drops is
+    /// simply absent rather than left as a stale mesh.
+    pub fn all(drawable: &Drawable) -> Vec<Self> {
+        Lod::ALL
+            .iter()
+            .filter_map(|lod| Self::from_drawable(drawable, *lod))
+            .collect()
+    }
 }
 
 impl MeshPart {
     fn from_geometry(
         geometry: &DrawableGeometry,
         shader: u32,
+        diffuse: Option<u32>,
+        normal: Option<u32>,
+        specular: Option<u32>,
         model_index: usize,
         geometry_index: usize,
     ) -> Option<Self> {
@@ -181,6 +215,9 @@ impl MeshPart {
         Some(Self {
             name: format!("model{model_index}.geometry{geometry_index}"),
             shader,
+            diffuse,
+            normal,
+            specular,
             vertex_count,
             triangle_count: indices.len() / 3,
             positions: encode_f32(&positions),
@@ -260,7 +297,7 @@ mod tests {
 
     #[test]
     fn packs_a_geometry_into_buffers() {
-        let part = MeshPart::from_geometry(&triangle_geometry(), 0x1234, 0, 1).unwrap();
+        let part = MeshPart::from_geometry(&triangle_geometry(), 0x1234, None, None, None, 0, 1).unwrap();
 
         assert_eq!(part.name, "model0.geometry1");
         assert_eq!(part.shader, 0x1234);
@@ -295,7 +332,7 @@ mod tests {
     fn drops_triangles_that_index_past_the_vertex_buffer() {
         let mut geometry = triangle_geometry();
         geometry.indices = vec![0, 1, 2, 0, 1, 99];
-        let part = MeshPart::from_geometry(&geometry, 0, 0, 0).unwrap();
+        let part = MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).unwrap();
         assert_eq!(part.triangle_count, 1);
     }
 
@@ -303,7 +340,7 @@ mod tests {
     fn skips_a_geometry_with_no_usable_triangles() {
         let mut geometry = triangle_geometry();
         geometry.indices = vec![0, 1, 500];
-        assert!(MeshPart::from_geometry(&geometry, 0, 0, 0).is_none());
+        assert!(MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).is_none());
     }
 
     /// A geometry whose declaration has no position is not renderable at all.
@@ -313,7 +350,7 @@ mod tests {
         if let Some(declaration) = geometry.declaration.as_mut() {
             declaration.flags &= !1;
         }
-        assert!(MeshPart::from_geometry(&geometry, 0, 0, 0).is_none());
+        assert!(MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).is_none());
     }
 
     /// The vertex count in the header is trusted only as far as the bytes go.
@@ -321,7 +358,7 @@ mod tests {
     fn clamps_the_vertex_count_to_the_buffer() {
         let mut geometry = triangle_geometry();
         geometry.vertex_count = 500;
-        let part = MeshPart::from_geometry(&geometry, 0, 0, 0).unwrap();
+        let part = MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).unwrap();
         assert_eq!(part.vertex_count, 3);
     }
 }

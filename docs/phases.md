@@ -228,8 +228,10 @@ Proven against the real install:
    the four pointers held by its owner. The four lists only look nested.
 
 Not ported: writing, Gen9 declarations, and everything a drawable points at that
-is not geometry — texture dictionary, skeleton, joints, light attributes,
-bounds, shader parameters.
+is not geometry — skeleton, joints, light attributes, collision bounds. The
+shader group *is* ported: `ShaderFX` parameters with each texture slot resolved
+to a texture hash, plus the embedded `ShaderGroup.TextureDictionary`, pinned by
+`shader_gate.rs` and put to work by the textured model viewer.
 
 ### 1.4b Resources — textures — **DONE, gate cleared**
 
@@ -506,9 +508,12 @@ Five viewers, and the backend picks which one opens because that decision needs
 the payload:
 
 - **3D** for `.ydr` and `.ydd`, via three.js over the mesh buffers from
-  `cw_core::mesh`. Orbit, wireframe, LOD and per-drawable selection for a
-  dictionary. Positions, normals and texcoords are decoded in Rust; the WebView
-  uploads buffers and nothing else.
+  `cw_core::mesh`. Orbit, wireframe, LOD picker (High through VeryLow) and
+  per-drawable selection for a dictionary. Positions, normals and texcoords are
+  decoded in Rust; the WebView uploads buffers and nothing else. Parts bind the
+  resolved diffuse/normal textures shipped as PNGs, with shadow-casting key
+  light and a shadow camera fitted to the model's bounds. A part whose texture
+  hash has no resolution falls back to the flat material.
 - **Collision** for `.ybn`, via three.js over the triangle buffers from
   `cw_core::bounds::Bounds::triangle_mesh`. The whole composite tree is
   flattened to world space on the Rust side — every triangle, including the
@@ -544,11 +549,14 @@ something else.
 
 - **Writing back into an archive.** The blocker for a real editor. Needs
   `RpfFile.Write`, `CompressBytes` and NG *encryption* (`RandomGauss.Solve`).
-- **Textures on models.** The 3D viewer draws untextured. A `.ydr` names its
-  materials by hash and points at an embedded texture dictionary the drawable
-  reader steps past; both halves now exist, so wiring them together is reading
-  `ShaderGroup.TextureDictionary` and `ShaderParams.cs` for which texture fills
-  which slot.
+- **Textures on models — DONE.** The 3D viewer resolves each part's material
+  slots (`DiffuseSampler`/`BumpSampler`/`SpecSampler` from `ShaderParams.cs`)
+  through `read_shader_group`'s parameter list, then walks the reference's
+  dictionary chain — embedded `ShaderGroup.TextureDictionary`, same-basename
+  `.ytd`, then every `.ytd` in the model's folder — decodes the resolved texture
+  in Rust, and ships it to the viewer as a PNG. `shader_gate.rs` pins the
+  parameters and embedded dictionaries against the oracle. LOD switching (High
+  through VeryLow) and shadowed key lighting came with it.
 - **Fragments and particles.** `.yft` and `.ypt` embed drawables the 3D viewer
   could already draw; reaching them needs `Frag.cs` and `Particle.cs`.
 - **Meta viewers.** `.ymap`/`.ytyp`/`.ymt` need 1.3, and would then show as XML
