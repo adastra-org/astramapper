@@ -18,7 +18,7 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | not started |
 
-Branch: work happens on `dev`. Current tests: **186 unit + 35 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **191 unit + 35 gate + 27 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -557,8 +557,7 @@ an `.rpf` boundary. Gate at `src-tauri/tests/explorer_gate.rs`.
 at a time and its extracted payload is held on the Rust side, so paging a 20 MB
 file does not re-decrypt and re-inflate it per scroll.
 
-Five viewers, and the backend picks which one opens because that decision needs
-the payload:
+The backend picks which viewer opens, because that decision needs the payload:
 
 - **3D** for `.ydr` and `.ydd`, via three.js over the mesh buffers from
   `cw_core::mesh`. Orbit, wireframe, LOD picker (High through VeryLow) and
@@ -572,6 +571,15 @@ the payload:
   flattened to world space on the Rust side — every triangle, including the
   child transforms and each geometry's centre offset — and the toolbar shows the
   root type, the child count and the totals.
+- **Map** for `.ymap` and `.ytyp`, the typed models above the generic meta tree.
+  A `.ymap` shows the placement hierarchy `EnsureEntities` builds — every placed
+  entity with its parent/child tree, resolved archetype names, LOD level,
+  interior-instance badge and rig extensions, filterable by archetype — plus
+  the car generators, occluders, LOD lights and grass batches that ride along.
+  A `.ytyp` lists the archetypes discriminated by kind, MLO interiors broken
+  down into their rooms, portals, entity sets and entities. Hashes are resolved
+  to names in Rust via the metanames table; the generic XML tree stays one tab
+  over for the byte-for-byte truth.
 - **Texture** for `.ytd`. The dictionary is listed on open and one texture is
   decoded at a time, to PNG — a 2048² surface is 16 MB of RGBA and 22 MB once
   base64'd, so PNG is faster to ship than raw pixels and the WebView decodes it
@@ -610,11 +618,9 @@ something else.
   in Rust, and ships it to the viewer as a PNG. `shader_gate.rs` pins the
   parameters and embedded dictionaries against the oracle. LOD switching (High
   through VeryLow) and shadowed key lighting came with it.
-- **Fragments and particles.** `.yft` and `.ypt` embed drawables the 3D viewer
-  could already draw; reaching them needs `Frag.cs` and `Particle.cs`.
-- **Meta viewers.** `.ymap`/`.ytyp`/`.ymt` already show as XML trees. With 1.3
-  and the typed readers in 1.4g, a `.ymap` viewer could list the entities and
-  their hierarchy, and a `.ytyp` viewer the archetypes and their MLO interiors.
+- **Fragments — DONE.** `.yft` embeds drawables the 3D viewer draws via
+  `Frag.cs`, each named by where it sits in the physics LOD tree. **Particles**
+  are the remaining embedder: `.ypt` needs `Particle.cs`.
 - **Audio names.** `RelFile.cs` would give the streams in an `.awc` names
   instead of hashes, and pair `_left`/`_right` channels into stereo.
 - **Lazy pagination.** `list_dir` still returns a whole directory. Fine at the

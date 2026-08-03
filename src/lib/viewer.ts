@@ -41,6 +41,7 @@ export type ViewerId =
   | "texture"
   | "clip"
   | "meta"
+  | "map"
   | "gxt2";
 
 export type ResourceInfo = {
@@ -278,6 +279,155 @@ export type MetaPreview = {
   readonly tree: MetaNode;
 };
 
+/** The typed view of an open `.ymap` or `.ytyp`. */
+export type MapPreview =
+  | { readonly kind: "ymap"; readonly ymap: YmapPreview }
+  | { readonly kind: "ytyp"; readonly ytyp: YtypPreview };
+
+/** What a `.ymap` holds: the placement hierarchy, plus its side structures. */
+export type YmapPreview = {
+  /** The map's name hash, resolved against the name table. */
+  readonly name: string;
+  readonly nameHash: number;
+  /** The parent map's name hash, resolved — empty for a top-level map. */
+  readonly parent: string;
+  readonly parentHash: number;
+  readonly flags: number;
+  readonly contentFlags: number;
+  readonly streamingExtentsMin: readonly [number, number, number];
+  readonly streamingExtentsMax: readonly [number, number, number];
+  readonly entitiesExtentsMin: readonly [number, number, number];
+  readonly entitiesExtentsMax: readonly [number, number, number];
+  /** The entities with no parent in this file, each with its subtree. */
+  readonly roots: readonly MapEntity[];
+  readonly entityCount: number;
+  readonly mloEntities: number;
+  readonly carGenerators: number;
+  readonly timeCycleModifiers: number;
+  readonly boxOccluders: number;
+  readonly occludeModels: number;
+  readonly lodLights: number;
+  readonly distantLodLights: number;
+  readonly grassBatches: number;
+  readonly grassInstances: number;
+  readonly strings: number;
+};
+
+/** One placed entity, with its placement subtree. */
+export type MapEntity = {
+  /** Position in the file's combined entity list, and the tree key. */
+  readonly index: number;
+  /** The archetype's name hash, resolved — what this entity *is*. */
+  readonly name: string;
+  readonly nameHash: number;
+  /** True for a `CMloInstanceDef`, an interior instance. */
+  readonly isMlo: boolean;
+  readonly defaultEntitySets: readonly string[];
+  readonly guid: number;
+  readonly position: readonly [number, number, number];
+  readonly rotation: readonly [number, number, number, number];
+  readonly scaleXy: number;
+  readonly scaleZ: number;
+  readonly parentIndex: number;
+  readonly lodDist: number;
+  readonly childLodDist: number;
+  /** `HD`, `LOD`, `SLOD1`... */
+  readonly lodLevel: string;
+  readonly priorityLevel: string;
+  readonly flags: number;
+  readonly extensions: readonly MapExtension[];
+  readonly children: readonly MapEntity[];
+};
+
+/** An extension block on an entity or archetype. */
+export type MapExtension = {
+  /** Resolved structure name, e.g. `CExtensionDefDoor`. */
+  readonly structure: string;
+  readonly structureHash: number;
+  readonly name: string;
+  readonly nameHash: number;
+  readonly offsetPosition: readonly [number, number, number];
+};
+
+/** What a `.ytyp` holds: its archetypes, discriminated by block kind. */
+export type YtypPreview = {
+  readonly name: string;
+  readonly nameHash: number;
+  readonly archetypes: readonly YtypArchetype[];
+  readonly extensions: readonly MapExtension[];
+  readonly compositeEntityTypes: number;
+  readonly strings: number;
+};
+
+/** One archetype. `mlo` is the interior tail only MLO archetypes carry. */
+export type YtypArchetype = {
+  readonly index: number;
+  /** `base`, `time` or `mlo`. */
+  readonly kind: "base" | "time" | "mlo";
+  readonly name: string;
+  readonly nameHash: number;
+  readonly assetName: string;
+  readonly assetHash: number;
+  readonly assetType: string;
+  readonly drawableDictionary: string;
+  readonly textureDictionary: string;
+  readonly clipDictionary: string;
+  readonly physicsDictionary: string;
+  readonly bbMin: readonly [number, number, number];
+  readonly bbMax: readonly [number, number, number];
+  readonly bsCentre: readonly [number, number, number];
+  readonly bsRadius: number;
+  readonly lodDist: number;
+  readonly hdTextureDist: number;
+  readonly flags: number;
+  readonly extensions: readonly MapExtension[];
+  readonly timeFlags: number | null;
+  readonly mlo: YtypMlo | null;
+};
+
+/** The interior tail of an MLO archetype. */
+export type YtypMlo = {
+  readonly flags: number;
+  readonly rooms: readonly MloRoom[];
+  readonly portals: readonly MloPortal[];
+  readonly entitySets: readonly MloEntitySet[];
+  readonly entities: readonly MapEntity[];
+  readonly timeCycleModifiers: number;
+};
+
+export type MloRoom = {
+  readonly index: number;
+  readonly name: string;
+  readonly bbMin: readonly [number, number, number];
+  readonly bbMax: readonly [number, number, number];
+  readonly blend: number;
+  readonly timecycleName: string;
+  readonly flags: number;
+  readonly portalCount: number;
+  readonly floorId: number;
+  readonly attachedObjects: number;
+};
+
+export type MloPortal = {
+  readonly index: number;
+  readonly roomFrom: number;
+  readonly roomTo: number;
+  readonly flags: number;
+  readonly mirrorPriority: number;
+  readonly opacity: number;
+  readonly audioOcclusion: number;
+  readonly corners: number;
+  readonly attachedObjects: number;
+};
+
+export type MloEntitySet = {
+  readonly index: number;
+  readonly name: string;
+  readonly nameHash: number;
+  readonly locations: number;
+  readonly entities: number;
+};
+
 /** One stream in an `.awc`. */
 export type AudioTrack = {
   /** Position in the container, and the handle for `readAudioTrack`. */
@@ -343,6 +493,11 @@ export function readGxt2(): Promise<Gxt2Preview> {
 /** Walk the open `.ymt` into a tree of named values. */
 export function readMeta(): Promise<MetaPreview> {
   return invoke<MetaPreview>("read_meta");
+}
+
+/** Read the open `.ymap` or `.ytyp` as the typed model, not the generic tree. */
+export function readMap(): Promise<MapPreview> {
+  return invoke<MapPreview>("read_map");
 }
 
 /** List the textures in the open `.ytd`, without decoding any of them. */

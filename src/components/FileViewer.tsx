@@ -13,6 +13,7 @@ import { AudioViewer } from "./viewers/AudioViewer";
 import { ClipViewer } from "./viewers/ClipViewer";
 import { Gxt2Viewer } from "./viewers/Gxt2Viewer";
 import { MetaViewer } from "./viewers/MetaViewer";
+import { MapViewer } from "./viewers/MapViewer";
 import { HexViewer } from "./viewers/HexViewer";
 import { TextureViewer } from "./viewers/TextureViewer";
 import { TextViewer } from "./viewers/TextViewer";
@@ -33,6 +34,7 @@ const VIEWER_LABELS: Record<ViewerId, string> = {
   audio: "Audio",
   clip: "Clips",
   meta: "Metadata",
+  map: "Map",
   text: "Text",
   hex: "Hex",
   gxt2: "Strings",
@@ -228,6 +230,8 @@ function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.E
       return <Gxt2Viewer path={path} />;
     case "meta":
       return <MetaViewer path={path} />;
+    case "map":
+      return <MapViewer path={path} />;
     case "text":
       return <TextViewer path={path} />;
     case "hex":

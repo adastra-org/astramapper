@@ -56,6 +56,7 @@ pub fn run() {
             viewer::read_bounds,
             viewer::read_clips,
             viewer::read_meta,
+            viewer::read_map,
             viewer::read_texture,
             viewer::read_texture_image,
             viewer::save_texture,

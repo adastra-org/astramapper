@@ -19,9 +19,10 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use cw_core::audio::AwcFile;
 use cw_core::filetype::FileKind;
+use cw_core::filetypes::{read_ymap, read_ytyp, Archetype, Extension, MloArchetype, MloEntity};
 use cw_core::image;
 use cw_core::mesh::MeshBundle;
-use cw_core::meta::{read_meta as read_metadata, MetaNode};
+use cw_core::meta::{read_meta as read_metadata, AssetType, LodLevel, Meta, MetaFile, MetaNode, PriorityLevel};
 use cw_core::resources::{
     read_bounds as read_collision_bounds, read_clips as read_clip_dictionary, read_drawables,
     read_named_drawables, read_named_fragments, read_textures, Drawable, Texture,
@@ -181,7 +182,8 @@ pub fn open_entry(
         });
 
     let awc_key = loaded.keys.awc_key;
-    let (viewer_name, viewers, note) = choose_viewer(file_kind, &data, resource.as_ref(), &awc_key);
+    let (viewer_name, viewers, note) =
+        choose_viewer(file_kind, &entry.name_lower, &data, resource.as_ref(), &awc_key);
 
     let info = EntryInfo {
         path: entry.path.clone(),
@@ -219,6 +221,7 @@ pub fn open_entry(
 /// the file was never a model.
 fn choose_viewer(
     kind: FileKind,
+    name_lower: &str,
     data: &[u8],
     resource: Option<&ResourceInfo>,
     awc_key: &[u32; 4],
@@ -275,17 +278,30 @@ fn choose_viewer(
 
     if kind.has_metadata() {
         let system_size = resource.map(|r| r.system_size);
+        // A `.ymap` or `.ytyp` that parses as an RSC resource gets the typed map
+        // viewer: the placement hierarchy, or the archetype list with MLO
+        // interiors. Anything else falls through to the generic XML tree.
+        let is_placement = name_lower.ends_with(".ymap") || name_lower.ends_with(".ytyp");
         match read_metadata(kind, data, system_size) {
-            Ok(meta) if meta.has_content() => {
-                viewers.insert(0, "meta");
-                return ("meta", viewers, None);
-            }
-            Ok(_) => {
+            Ok(meta) => {
+                if is_placement && system_size.is_some() {
+                    if let MetaFile::Rsc(meta) = &meta {
+                        if build_map_preview(name_lower, meta).is_some() {
+                            viewers.insert(0, "map");
+                            viewers.insert(1, "meta");
+                            return ("map", viewers, None);
+                        }
+                    }
+                }
+                if meta.has_content() {
+                    viewers.insert(0, "meta");
+                    return ("meta", viewers, None);
+                }
                 return (
                     viewers[0],
                     viewers.clone(),
                     Some("this metadata file holds no structures".into()),
-                )
+                );
             }
             Err(e) => {
                 let note = format!("could not read the metadata: {e}");
@@ -1123,6 +1139,516 @@ pub fn read_meta(viewer: State<'_, ViewerState>) -> Result<MetaPreview, String> 
     })
 }
 
+/// A typed view of an open `.ymap` or `.ytyp`: the placement dictionary, or
+/// the archetype dictionary. This is the model above the generic meta tree —
+/// what the world view will need to place things, and what a placement or
+/// archetype file actually *means*.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum MapPreview {
+    Ymap(YmapPreview),
+    Ytyp(YtypPreview),
+}
+
+/// What a `.ymap` holds: the placed entities as a parent/child tree, and the
+/// supporting structures that accompany them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YmapPreview {
+    /// The map's name hash, resolved against the name table.
+    pub name: String,
+    pub name_hash: u32,
+    /// The parent map's name hash, resolved — empty for a top-level map.
+    pub parent: String,
+    pub parent_hash: u32,
+    /// `flag 1` is the SCRIPTED flag (destruction maps).
+    pub flags: u32,
+    pub content_flags: u32,
+    pub streaming_extents_min: [f32; 3],
+    pub streaming_extents_max: [f32; 3],
+    pub entities_extents_min: [f32; 3],
+    pub entities_extents_max: [f32; 3],
+    /// The entities with no parent in this file, each with its subtree.
+    pub roots: Vec<MapEntity>,
+    /// Total entities, roots and children together.
+    pub entity_count: usize,
+    /// How many of `entity_count` are interior instances.
+    pub mlo_entities: usize,
+    pub car_generators: usize,
+    pub time_cycle_modifiers: usize,
+    pub box_occluders: usize,
+    pub occlude_models: usize,
+    pub lod_lights: usize,
+    pub distant_lod_lights: usize,
+    pub grass_batches: usize,
+    pub grass_instances: usize,
+    pub strings: usize,
+}
+
+/// One placed entity. The `children` repeat this shape, so the whole placement
+/// tree crosses in one payload and the viewer renders it collapsed by default.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapEntity {
+    /// Position in the file's combined entity list, and the identity for the
+    /// tree's keys.
+    pub index: usize,
+    /// The archetype's name hash, resolved — what this entity *is*.
+    pub name: String,
+    pub name_hash: u32,
+    /// True for a `CMloInstanceDef`, an interior instance.
+    pub is_mlo: bool,
+    /// The interior entity sets an MLO instance activates, resolved hashes.
+    pub default_entity_sets: Vec<String>,
+    pub guid: u32,
+    pub position: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale_xy: f32,
+    pub scale_z: f32,
+    /// Index of the parent into the combined entity list, `-1` for a root.
+    pub parent_index: i32,
+    pub lod_dist: f32,
+    pub child_lod_dist: f32,
+    /// `HD`, `LOD`, `SLOD1`... as the viewer should label it.
+    pub lod_level: String,
+    pub priority_level: String,
+    pub flags: u32,
+    /// The rig an entity carries — a door, a ladder, an audio emitter...
+    pub extensions: Vec<MapExtension>,
+    pub children: Vec<MapEntity>,
+}
+
+/// An extension block on an entity or archetype: the common fields every one of
+/// the fifteen extension structures carries, plus which structure it was.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapExtension {
+    /// Resolved structure name, e.g. `CExtensionDefDoor`.
+    pub structure: String,
+    pub structure_hash: u32,
+    /// The extension's name hash, resolved.
+    pub name: String,
+    pub name_hash: u32,
+    pub offset_position: [f32; 3],
+}
+
+/// What a `.ytyp` holds: its archetypes, discriminated by which block each came
+/// from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtypPreview {
+    /// The dictionary's own name hash, resolved.
+    pub name: String,
+    pub name_hash: u32,
+    pub archetypes: Vec<YtypArchetype>,
+    pub extensions: Vec<MapExtension>,
+    pub composite_entity_types: usize,
+    pub strings: usize,
+}
+
+/// One archetype. `base` holds the shared first half of all three kinds; `mlo`
+/// is the interior tail only `CMloArchetypeDef` carries.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtypArchetype {
+    pub index: usize,
+    /// `base`, `time` or `mlo`.
+    pub kind: &'static str,
+    /// The archetype's own name hash, resolved.
+    pub name: String,
+    pub name_hash: u32,
+    /// The `assetName` hash — what the engine loads — resolved.
+    pub asset_name: String,
+    pub asset_hash: u32,
+    pub asset_type: String,
+    pub drawable_dictionary: String,
+    pub texture_dictionary: String,
+    pub clip_dictionary: String,
+    pub physics_dictionary: String,
+    pub bb_min: [f32; 3],
+    pub bb_max: [f32; 3],
+    pub bs_centre: [f32; 3],
+    pub bs_radius: f32,
+    pub lod_dist: f32,
+    pub hd_texture_dist: f32,
+    pub flags: u32,
+    pub extensions: Vec<MapExtension>,
+    /// Only a `time` archetype has one.
+    pub time_flags: Option<u32>,
+    /// Only an `mlo` archetype has one.
+    pub mlo: Option<YtypMlo>,
+}
+
+/// The interior tail of an `mlo` archetype: rooms, portals, entity sets, and
+/// the entities that make it up.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtypMlo {
+    pub flags: u32,
+    pub rooms: Vec<MloRoomPreview>,
+    pub portals: Vec<MloPortalPreview>,
+    pub entity_sets: Vec<MloEntitySetPreview>,
+    pub entities: Vec<MapEntity>,
+    pub time_cycle_modifiers: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MloRoomPreview {
+    pub index: usize,
+    pub name: String,
+    pub bb_min: [f32; 3],
+    pub bb_max: [f32; 3],
+    pub blend: f32,
+    pub timecycle_name: String,
+    pub flags: u32,
+    pub portal_count: u32,
+    pub floor_id: i32,
+    pub attached_objects: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MloPortalPreview {
+    pub index: usize,
+    pub room_from: u32,
+    pub room_to: u32,
+    pub flags: u32,
+    pub mirror_priority: u32,
+    pub opacity: u32,
+    pub audio_occlusion: u32,
+    pub corners: usize,
+    pub attached_objects: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MloEntitySetPreview {
+    pub index: usize,
+    /// The set's name hash, resolved — how a script turns an interior room's
+    /// contents on and off.
+    pub name: String,
+    pub name_hash: u32,
+    pub locations: usize,
+    pub entities: usize,
+}
+
+/// Read the open `.ymap` or `.ytyp` as the typed model, not the generic tree.
+#[tauri::command]
+pub fn read_map(viewer: State<'_, ViewerState>) -> Result<MapPreview, String> {
+    let guard = viewer.0.lock().map_err(|_| "viewer state is poisoned")?;
+    let open = guard.as_ref().ok_or("no file is open")?;
+
+    let name_lower = open.info.name.to_ascii_lowercase();
+    if !name_lower.ends_with(".ymap") && !name_lower.ends_with(".ytyp") {
+        return Err(format!("{} is not a placement or archetype dictionary", open.info.name));
+    }
+
+    let system_size = open.info.resource.as_ref().map(|r| r.system_size);
+    let meta = read_metadata(open.info.file_kind, &open.data, system_size)
+        .map_err(|e| format!("could not read the metadata: {e}"))?;
+
+    let preview = match &meta {
+        MetaFile::Rsc(meta) => build_map_preview(&name_lower, meta)
+            .ok_or("this file holds no typed placement or archetype records")?,
+        _ => return Err("not an RSC resource, so there is no typed map to show".into()),
+    };
+    Ok(preview)
+}
+
+/// Build the typed preview for a `.ymap` or `.ytyp`, chosen by the file name.
+/// `None` when the reader fails or the file carries nothing to show — which is
+/// what lets `choose_viewer` fall back to the generic tree.
+fn build_map_preview(name_lower: &str, meta: &Meta) -> Option<MapPreview> {
+    if name_lower.ends_with(".ymap") {
+        build_ymap_preview(meta)
+    } else if name_lower.ends_with(".ytyp") {
+        build_ytyp_preview(meta)
+    } else {
+        None
+    }
+}
+
+fn build_ymap_preview(meta: &Meta) -> Option<MapPreview> {
+    let ymap = read_ymap(meta).ok()?;
+    if ymap.entities.is_empty()
+        && ymap.car_generators.is_empty()
+        && ymap.time_cycle_modifiers.is_empty()
+        && ymap.box_occluders.is_empty()
+        && ymap.occlude_models.is_empty()
+        && ymap.lod_lights.direction.is_empty()
+        && ymap.distant_lod_lights.position.is_empty()
+        && ymap.grass_instance_batches.is_empty()
+    {
+        return None;
+    }
+
+    let entities = &ymap.entities;
+    let roots = ymap
+        .root_entities
+        .iter()
+        .map(|&index| build_map_entity(index, &entities[index], entities))
+        .collect();
+    let grass_instances: usize = ymap
+        .grass_instance_batches
+        .iter()
+        .map(|batch| batch.instances.len())
+        .sum();
+
+    Some(MapPreview::Ymap(YmapPreview {
+        name: hash_string(ymap.name),
+        name_hash: ymap.name,
+        parent: hash_string(ymap.parent),
+        parent_hash: ymap.parent,
+        flags: ymap.flags,
+        content_flags: ymap.content_flags,
+        streaming_extents_min: ymap.streaming_extents_min,
+        streaming_extents_max: ymap.streaming_extents_max,
+        entities_extents_min: ymap.entities_extents_min,
+        entities_extents_max: ymap.entities_extents_max,
+        roots,
+        entity_count: ymap.entities.len(),
+        mlo_entities: ymap.mlo_entities.len(),
+        car_generators: ymap.car_generators.len(),
+        time_cycle_modifiers: ymap.time_cycle_modifiers.len(),
+        box_occluders: ymap.box_occluders.len(),
+        occlude_models: ymap.occlude_models.len(),
+        lod_lights: ymap.lod_lights.direction.len(),
+        distant_lod_lights: ymap.distant_lod_lights.position.len(),
+        grass_batches: ymap.grass_instance_batches.len(),
+        grass_instances,
+        strings: ymap.strings.len(),
+    }))
+}
+
+/// One entity, and its subtree. `entities` is the flat list the hierarchy
+/// indices point into; the borrow is immutable for the whole build, so indexing
+/// is safe.
+fn build_map_entity(index: usize, entity: &cw_core::filetypes::Entity, entities: &[cw_core::filetypes::Entity]) -> MapEntity {
+    MapEntity {
+        index,
+        name: hash_string(entity.def.archetype_name),
+        name_hash: entity.def.archetype_name,
+        is_mlo: entity.is_mlo,
+        default_entity_sets: entity
+            .default_entity_sets
+            .iter()
+            .map(|hash| hash_string(*hash))
+            .collect(),
+        guid: entity.def.guid,
+        position: entity.def.position,
+        rotation: entity.def.rotation,
+        scale_xy: entity.def.scale_xy,
+        scale_z: entity.def.scale_z,
+        parent_index: entity.def.parent_index,
+        lod_dist: entity.def.lod_dist,
+        child_lod_dist: entity.def.child_lod_dist,
+        lod_level: lod_level_label(entity.def.lod_level),
+        priority_level: priority_level_label(entity.def.priority_level),
+        flags: entity.def.flags,
+        extensions: entity.extensions.iter().map(build_extension).collect(),
+        children: entity
+            .children
+            .iter()
+            .map(|&child| build_map_entity(child, &entities[child], entities))
+            .collect(),
+    }
+}
+
+fn build_ytyp_preview(meta: &Meta) -> Option<MapPreview> {
+    let ytyp = read_ytyp(meta).ok()?;
+    if ytyp.archetypes.is_empty() {
+        return None;
+    }
+
+    Some(MapPreview::Ytyp(YtypPreview {
+        name: hash_string(ytyp.name_hash),
+        name_hash: ytyp.name_hash,
+        archetypes: ytyp
+            .archetypes
+            .iter()
+            .enumerate()
+            .map(|(index, archetype)| build_ytyp_archetype(index, archetype))
+            .collect(),
+        extensions: ytyp.extensions.iter().map(build_extension).collect(),
+        composite_entity_types: ytyp.composite_entity_types.len(),
+        strings: ytyp.strings.len(),
+    }))
+}
+
+fn build_ytyp_archetype(index: usize, archetype: &Archetype) -> YtypArchetype {
+    let (kind, base, time_flags, mlo): (&'static str, &cw_core::filetypes::BaseArchetype, Option<u32>, Option<&MloArchetype>) =
+        match archetype {
+            Archetype::Base(base) => ("base", base, None, None),
+            Archetype::Time(time) => ("time", &time.base, Some(time.time_flags), None),
+            Archetype::Mlo(mlo) => ("mlo", &mlo.base, None, Some(mlo)),
+        };
+
+    YtypArchetype {
+        index,
+        kind,
+        name: hash_string(base.name),
+        name_hash: base.name,
+        asset_name: hash_string(base.asset_name),
+        asset_hash: base.asset_name,
+        asset_type: asset_type_label(base.asset_type),
+        drawable_dictionary: hash_string(base.drawable_dictionary),
+        texture_dictionary: hash_string(base.texture_dictionary),
+        clip_dictionary: hash_string(base.clip_dictionary),
+        physics_dictionary: hash_string(base.physics_dictionary),
+        bb_min: base.bb_min,
+        bb_max: base.bb_max,
+        bs_centre: base.bs_centre,
+        bs_radius: base.bs_radius,
+        lod_dist: base.lod_dist,
+        hd_texture_dist: base.hd_texture_dist,
+        flags: base.flags,
+        extensions: base.extensions.iter().map(build_extension).collect(),
+        time_flags,
+        mlo: mlo.map(build_mlo),
+    }
+}
+
+fn build_mlo(mlo: &MloArchetype) -> YtypMlo {
+    YtypMlo {
+        flags: mlo.mlo_flags,
+        rooms: mlo
+            .rooms
+            .iter()
+            .enumerate()
+            .map(|(index, room)| MloRoomPreview {
+                index,
+                name: room.name.clone().unwrap_or_default(),
+                bb_min: room.bb_min,
+                bb_max: room.bb_max,
+                blend: room.blend,
+                timecycle_name: hash_string(room.timecycle_name),
+                flags: room.flags,
+                portal_count: room.portal_count,
+                floor_id: room.floor_id,
+                attached_objects: room.attached_objects.len(),
+            })
+            .collect(),
+        portals: mlo
+            .portals
+            .iter()
+            .enumerate()
+            .map(|(index, portal)| MloPortalPreview {
+                index,
+                room_from: portal.room_from,
+                room_to: portal.room_to,
+                flags: portal.flags,
+                mirror_priority: portal.mirror_priority,
+                opacity: portal.opacity,
+                audio_occlusion: portal.audio_occlusion,
+                corners: portal.corners.len(),
+                attached_objects: portal.attached_objects.len(),
+            })
+            .collect(),
+        entity_sets: mlo
+            .entity_sets
+            .iter()
+            .enumerate()
+            .map(|(index, set)| MloEntitySetPreview {
+                index,
+                name: hash_string(set.name),
+                name_hash: set.name,
+                locations: set.locations.len(),
+                entities: set.entities.len(),
+            })
+            .collect(),
+        entities: mlo
+            .entities
+            .iter()
+            .enumerate()
+            .map(|(index, entity)| build_mlo_entity(index, entity))
+            .collect(),
+        time_cycle_modifiers: mlo.time_cycle_modifiers.len(),
+    }
+}
+
+/// An entity inside an MLO has no placement children of its own — it is part of
+/// the interior's fixed inventory — so the subtree is always empty.
+fn build_mlo_entity(index: usize, entity: &MloEntity) -> MapEntity {
+    MapEntity {
+        index,
+        name: hash_string(entity.entity.archetype_name),
+        name_hash: entity.entity.archetype_name,
+        is_mlo: false,
+        default_entity_sets: Vec::new(),
+        guid: entity.entity.guid,
+        position: entity.entity.position,
+        rotation: entity.entity.rotation,
+        scale_xy: entity.entity.scale_xy,
+        scale_z: entity.entity.scale_z,
+        parent_index: entity.entity.parent_index,
+        lod_dist: entity.entity.lod_dist,
+        child_lod_dist: entity.entity.child_lod_dist,
+        lod_level: lod_level_label(entity.entity.lod_level),
+        priority_level: priority_level_label(entity.entity.priority_level),
+        flags: entity.entity.flags,
+        extensions: entity.extensions.iter().map(build_extension).collect(),
+        children: Vec::new(),
+    }
+}
+
+fn build_extension(extension: &Extension) -> MapExtension {
+    MapExtension {
+        structure: hash_string(extension.structure),
+        structure_hash: extension.structure,
+        name: hash_string(extension.name),
+        name_hash: extension.name,
+        offset_position: extension.offset_position,
+    }
+}
+
+fn lod_level_label(level: LodLevel) -> String {
+    match level {
+        LodLevel::Hd => "HD".into(),
+        LodLevel::Lod => "LOD".into(),
+        LodLevel::Slod1 => "SLOD1".into(),
+        LodLevel::Slod2 => "SLOD2".into(),
+        LodLevel::Slod3 => "SLOD3".into(),
+        LodLevel::OrphanHd => "ORPHAN_HD".into(),
+        LodLevel::Slod4 => "SLOD4".into(),
+        LodLevel::Unknown(value) => format!("{value}"),
+    }
+}
+
+fn priority_level_label(level: PriorityLevel) -> String {
+    match level {
+        PriorityLevel::Required => "Required".into(),
+        PriorityLevel::OptionalHigh => "OptionalHigh".into(),
+        PriorityLevel::Medium => "Medium".into(),
+        PriorityLevel::Low => "Low".into(),
+        PriorityLevel::Unknown(value) => format!("{value}"),
+    }
+}
+
+fn asset_type_label(asset: AssetType) -> String {
+    match asset {
+        AssetType::Uninitialised => "uninitialised".into(),
+        AssetType::AssetFragment => "fragment".into(),
+        AssetType::AssetDrawable => "drawable".into(),
+        AssetType::AssetDrawableDictionary => "drawable dictionary".into(),
+        AssetType::AssetTxd => "texture dictionary".into(),
+        AssetType::AssetBounds => "bounds".into(),
+        AssetType::AssetNavMesh => "navmesh".into(),
+        AssetType::AssetTimeCycle => "timecycle".into(),
+        AssetType::AssetClipDictionary => "clip dictionary".into(),
+        AssetType::AssetCollision => "collision".into(),
+        AssetType::AssetCluster => "cluster".into(),
+        AssetType::AssetLodLight => "lod light".into(),
+        AssetType::AssetCompositeEntityType => "composite entity type".into(),
+        AssetType::AssetPropBatch => "prop batch".into(),
+        AssetType::AssetVertexShader => "vertex shader".into(),
+        AssetType::AssetPixelShader => "pixel shader".into(),
+        AssetType::AssetTexture => "texture".into(),
+        AssetType::AssetDrawableAtlas => "drawable atlas".into(),
+        AssetType::Unknown(value) => format!("unknown ({value})"),
+    }
+}
+
 /// One stream in an open `.awc`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1334,7 +1860,18 @@ mod tests {
         data: &[u8],
         resource: Option<&ResourceInfo>,
     ) -> (&'static str, Vec<&'static str>, Option<String>) {
-        choose_viewer(kind, data, resource, &[0; 4])
+        choose_viewer(kind, "", data, resource, &[0; 4])
+    }
+
+    /// The name only matters for the metadata dispatch — a `.ymap` or `.ytyp`
+    /// gets the typed map viewer. Same AWC key caveat as the helper above.
+    fn choose_viewer_for_name(
+        kind: FileKind,
+        name: &str,
+        data: &[u8],
+        resource: Option<&ResourceInfo>,
+    ) -> (&'static str, Vec<&'static str>, Option<String>) {
+        choose_viewer(kind, name, data, resource, &[0; 4])
     }
 
     #[test]
@@ -1481,6 +2018,176 @@ mod tests {
         let (viewer, viewers, note) = choose_viewer_for_test(FileKind::Meta, &rbf, None);
         assert_eq!(viewer, "meta", "{note:?}");
         assert!(viewers.contains(&"meta"));
+    }
+
+    /// The synthetic payload builders below mirror the ones in
+    /// `cw-core`'s own `ytyp`/`ymap` tests: a minimal RSC meta whose blocks and
+    /// pointers carry one typed record.
+    fn put_u16(d: &mut [u8], at: usize, v: u16) {
+        d[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put_u32(d: &mut [u8], at: usize, v: u32) {
+        d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put_u64(d: &mut [u8], at: usize, v: u64) {
+        d[at..at + 8].copy_from_slice(&v.to_le_bytes());
+    }
+    fn put_i32(d: &mut [u8], at: usize, v: i32) {
+        d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    fn addr(o: u64) -> u64 {
+        cw_core::resources::reader::SYSTEM_BASE + o
+    }
+
+    /// A `.ytyp` with one base archetype: the minimal meta a typed reader needs.
+    fn synthetic_ytyp() -> Vec<u8> {
+        let mut d = vec![0u8; 0x900];
+        put_u32(&mut d, 0x1C, 1); // root block index
+        put_u64(&mut d, 0x20, addr(0x300)); // structures
+        put_u64(&mut d, 0x30, addr(0x500)); // blocks
+        put_u16(&mut d, 0x48, 2); // structure count
+        put_u16(&mut d, 0x4C, 3); // block count
+
+        put_u32(&mut d, 0x300, cw_core::filetypes::names::C_MAP_TYPES);
+        put_u32(&mut d, 0x320, cw_core::filetypes::names::C_BASE_ARCHETYPE_DEF);
+
+        // Block 1: CMapTypes, payload at 0x700.
+        put_u32(&mut d, 0x500, cw_core::filetypes::names::C_MAP_TYPES);
+        put_u32(&mut d, 0x504, 80);
+        put_u64(&mut d, 0x508, addr(0x700));
+        // Block 2: POINTER block holding one archetype pointer, at 0x740.
+        put_u32(&mut d, 0x510, cw_core::meta::rsc::POINTER_BLOCK);
+        put_u32(&mut d, 0x514, 8);
+        put_u64(&mut d, 0x518, addr(0x740));
+        // Block 3: CBaseArchetypeDef, payload at 0x760.
+        put_u32(&mut d, 0x520, cw_core::filetypes::names::C_BASE_ARCHETYPE_DEF);
+        put_u32(&mut d, 0x524, 144);
+        put_u64(&mut d, 0x528, addr(0x760));
+
+        // CMapTypes payload at 0x700: archetypes array at offset 24 -> block 2.
+        put_u64(&mut d, 0x700 + 24, 2);
+        put_u16(&mut d, 0x700 + 24 + 8, 1);
+        put_u16(&mut d, 0x700 + 24 + 10, 1);
+        put_u32(&mut d, 0x700 + 40, 0xABBA); // name hash
+
+        // POINTER block payload: one pointer to block 3, offset 0.
+        put_u64(&mut d, 0x740, 3);
+
+        // Base archetype payload at 0x760.
+        put_u32(&mut d, 0x760 + 8, 60); // lodDist
+        put_u32(&mut d, 0x760 + 88, 0x1111); // name
+        put_u32(&mut d, 0x760 + 112, 0x2222); // assetName
+        put_u32(&mut d, 0x760 + 108, 2); // assetType drawable
+        put_u32(&mut d, 0x760 + 100, 0x3333); // drawableDictionary
+
+        d
+    }
+
+    /// A `.ymap` with one parent entity: three blocks, one entity record.
+    fn synthetic_ymap() -> Vec<u8> {
+        let mut d = vec![0u8; 0x900];
+        put_u32(&mut d, 0x1C, 1); // root block
+        put_u64(&mut d, 0x20, addr(0x300)); // structures
+        put_u64(&mut d, 0x30, addr(0x500)); // blocks
+        put_u16(&mut d, 0x48, 2); // structure count
+        put_u16(&mut d, 0x4C, 3); // block count
+
+        put_u32(&mut d, 0x300, cw_core::filetypes::names::C_MAP_DATA);
+        put_u32(&mut d, 0x320, cw_core::filetypes::names::C_ENTITY_DEF);
+
+        // Block 1 CMapData @0x700, block 2 POINTER @0x740, block 3 CEntityDef @0x760.
+        put_u32(&mut d, 0x500, cw_core::filetypes::names::C_MAP_DATA);
+        put_u32(&mut d, 0x504, 512);
+        put_u64(&mut d, 0x508, addr(0x700));
+        put_u32(&mut d, 0x510, cw_core::meta::rsc::POINTER_BLOCK);
+        put_u32(&mut d, 0x514, 8);
+        put_u64(&mut d, 0x518, addr(0x740));
+        put_u32(&mut d, 0x520, cw_core::filetypes::names::C_ENTITY_DEF);
+        put_u32(&mut d, 0x524, 256);
+        put_u64(&mut d, 0x528, addr(0x760));
+
+        // CMapData: name, entities array at 96 -> block 2, count 1.
+        put_u32(&mut d, 0x700 + 8, 0xCAFE);
+        put_u64(&mut d, 0x700 + 96, 2);
+        put_u16(&mut d, 0x700 + 96 + 8, 1);
+        put_u16(&mut d, 0x700 + 96 + 10, 1);
+        put_u32(&mut d, 0x700 + 96 + 12, 0);
+
+        // POINTER block: one pointer to block 3 at offset 0.
+        put_u64(&mut d, 0x740, 3);
+
+        // Entity 0: a root with an archetype hash.
+        put_u32(&mut d, 0x760 + 8, 0xAAAA); // archetypeName
+        put_i32(&mut d, 0x760 + 72, -1); // parentIndex root
+        put_i32(&mut d, 0x760 + 84, 0); // lodLevel HD
+
+        d
+    }
+
+    /// A `.ytyp` that parses into typed archetypes opens the map viewer, not
+    /// the generic XML tree.
+    #[test]
+    fn opens_the_map_view_for_a_ytyp_that_parses() {
+        let (viewer, viewers, note) = choose_viewer_for_name(
+            FileKind::Meta,
+            "test.ytyp",
+            &synthetic_ytyp(),
+            Some(&resource(0x900)),
+        );
+        assert_eq!(viewer, "map", "{note:?}");
+        assert!(viewers.contains(&"map"));
+        assert!(viewers.contains(&"meta"), "the tree stays offered as a tab");
+    }
+
+    /// The same, for a `.ymap`.
+    #[test]
+    fn opens_the_map_view_for_a_ymap_that_parses() {
+        let (viewer, viewers, note) = choose_viewer_for_name(
+            FileKind::Meta,
+            "test.ymap",
+            &synthetic_ymap(),
+            Some(&resource(0x900)),
+        );
+        assert_eq!(viewer, "map", "{note:?}");
+        assert!(viewers.contains(&"map"));
+    }
+
+    /// A `.ymap` that parses as an RSC resource but holds no typed records must
+    /// fall back to the generic tree rather than opening an empty map.
+    #[test]
+    fn does_not_open_the_map_view_for_a_ymap_with_no_entities() {
+        let (viewer, viewers, note) = choose_viewer_for_name(
+            FileKind::Meta,
+            "test.ymap",
+            &vec![0u8; 0x900],
+            Some(&resource(0x900)),
+        );
+        assert_eq!(viewer, "hex");
+        assert!(!viewers.contains(&"map"));
+        assert!(note.is_some());
+    }
+
+    /// Only the two placement formats get the map viewer: a `.ymt` of the same
+    /// bytes stays on the generic tree.
+    #[test]
+    fn only_the_placement_formats_get_the_map_view() {
+        let (viewer, _, _) = choose_viewer_for_name(
+            FileKind::Meta,
+            "test.ymt",
+            &synthetic_ytyp(),
+            Some(&resource(0x900)),
+        );
+        assert_ne!(viewer, "map");
+    }
+
+    /// A `.ytyp` stored as a binary entry has no resource split point, so the
+    /// typed readers cannot run and the file stays on the generic tree.
+    #[test]
+    fn does_not_open_the_map_view_for_a_binary_ytyp() {
+        let (viewer, viewers, _) =
+            choose_viewer_for_name(FileKind::Meta, "test.ytyp", &synthetic_ytyp(), None);
+        assert_ne!(viewer, "map");
+        assert!(!viewers.contains(&"map"));
     }
 
     /// `.yed` and its siblings are animation files with no ported reader, so
