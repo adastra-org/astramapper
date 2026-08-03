@@ -9,7 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
-import { decodeFloats, decodeUints, type ModelPreview } from "../lib/viewer";
+import { decodeBase64, decodeFloats, decodeUints, type ModelPreview } from "../lib/viewer";
 import {
   boundsOf,
   colorForLod,
@@ -1080,6 +1080,16 @@ function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
         metalness: 0,
         side: THREE.DoubleSide,
       });
+      const resolved = resolvePartTextures(part, load.model.textures);
+      if (resolved.diffuse) {
+        material.map = resolved.diffuse;
+        material.color.set(0xffffff);
+        material.needsUpdate = true;
+      }
+      if (resolved.normal) {
+        material.normalMap = resolved.normal;
+        material.needsUpdate = true;
+      }
       const mesh = new THREE.Mesh(geometry, material);
       mesh.castShadow = shadowed;
       mesh.receiveShadow = shadowed;
@@ -1087,6 +1097,41 @@ function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
     }
     return meshes;
   });
+}
+
+/** The texture map for one part, resolved against the model's decoded PNGs. */
+function resolvePartTextures(
+  part: { readonly diffuse: number | null; readonly normal: number | null },
+  textures: readonly { readonly hash: number; readonly png: string }[],
+): { diffuse: THREE.Texture | null; normal: THREE.Texture | null } {
+  const byHash = new Map(textures.map((texture) => [texture.hash, texture]));
+  const diffuse = part.diffuse === null ? null : byHash.get(part.diffuse);
+  const normal = part.normal === null ? null : byHash.get(part.normal);
+  return {
+    diffuse: diffuse ? textureFromPng(diffuse.png) : null,
+    normal: normal ? textureFromPng(normal.png) : null,
+  };
+}
+
+const textureCache = new Map<string, THREE.Texture>();
+
+/** Decode one resolved texture once and keep it for the session. */
+function textureFromPng(png: string): THREE.Texture {
+  let cached = textureCache.get(png);
+  if (cached) return cached;
+  const bytes = decodeBase64(png);
+  const blob = new Blob([bytes as BlobPart], { type: "image/png" });
+  const url = URL.createObjectURL(blob);
+  const image = new Image();
+  const texture = new THREE.Texture();
+  textureCache.set(png, texture);
+  image.addEventListener("load", () => {
+    texture.image = image;
+    texture.needsUpdate = true;
+    URL.revokeObjectURL(url);
+  });
+  image.src = url;
+  return texture;
 }
 
 /** Set one instance's matrix to a uniform scale (0 hides a marker). */
