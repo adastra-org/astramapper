@@ -23,7 +23,9 @@ archives, view and extract what is inside them, and render and edit the world in
   - **3D** for `.ydr` and `.ydd`, in three.js over mesh buffers decoded in Rust.
     Parts bind the diffuse and normal textures resolved from the model's
     `.ytd` dictionaries and drawn with shadow-casting lighting; a LOD picker
-    switches between High and VeryLow.
+    switches between High and VeryLow. The toolbar chooses lit or unlit,
+    adjusts the light and toggles shadows without moving the camera, and the
+    TXD panel hides individual textures or opens the `.ytd` they came from.
   - **Fragments** for `.yft`, the physics-wrapped drawables that make up most of
     the game's props, vehicles and peds — the main drawable, the cloth, the
     alternative array and every physics child, each named by where it sits.

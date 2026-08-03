@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { Box, CloudSun, Grid3x3, Layers, Loader2, Palette, Sun } from "lucide-react";
 import {
+  Box,
+  CloudSun,
+  ExternalLink,
+  Grid3x3,
+  Images,
+  Layers,
+  Loader2,
+  Palette,
+  RotateCcw,
+  Sun,
+  X,
+} from "lucide-react";
+import {
+  baseName,
   decodeBase64,
   decodeFloats,
   decodeUints,
@@ -10,6 +23,7 @@ import {
   type MeshBundle,
   type MeshPart,
   type ModelPreview,
+  type ModelTexture,
 } from "../../lib/viewer";
 import { formatHash } from "../../lib/format";
 
@@ -22,13 +36,22 @@ import { formatHash } from "../../lib/format";
  *
  * Textures cross as decoded PNGs (`ModelPreview.textures`) resolved from the
  * drawables' embedded dictionaries or sibling `.ytd` files; a part whose
- * texture hash has no resolution falls back to the flat material.
+ * texture hash has no resolution falls back to the flat material. The TXD panel
+ * lists them with a per-texture toggle and, for any that came from a sibling
+ * `.ytd`, a button that opens that dictionary.
  *
  * three.js is the documented phase 2 choice for Explorer previews;
  * `docs/architecture.md` leaves the wgpu-versus-three decision to the phase 3
  * world renderer, which is a different problem with different constraints.
  */
-export function ModelViewer({ path }: { path: string }): React.JSX.Element {
+export function ModelViewer({
+  path,
+  onOpenPath,
+}: {
+  path: string;
+  /** Open a sibling entry, e.g. the `.ytd` a texture was resolved from. */
+  onOpenPath?: (path: string) => void;
+}): React.JSX.Element {
   const [preview, setPreview] = useState<ModelPreview | null>(null);
   const [selected, setSelected] = useState(0);
   const [lod, setLod] = useState(0);
@@ -37,6 +60,11 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
   const [lighting, setLighting] = useState<"lit" | "unlit">("lit");
   const [light, setLight] = useState(1);
   const [shadows, setShadows] = useState(true);
+  const [texturePanel, setTexturePanel] = useState(false);
+  const [disabledTextures, setDisabledTextures] = useState<ReadonlySet<number>>(
+    new Set(),
+  );
+  const [previewTexture, setPreviewTexture] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -44,6 +72,9 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
     setPreview(null);
     setSelected(0);
     setLod(0);
+    setTexturePanel(false);
+    setDisabledTextures(new Set());
+    setPreviewTexture(null);
     readModel()
       .then((model) => {
         if (cancelled) return;
@@ -60,6 +91,18 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
       cancelled = true;
     };
   }, [path]);
+
+  const toggleTexture = (hash: number, on: boolean) => {
+    setDisabledTextures((disabled) => {
+      const next = new Set(disabled);
+      if (on) {
+        next.delete(hash);
+      } else {
+        next.add(hash);
+      }
+      return next;
+    });
+  };
 
   if (error) {
     return <p className="p-4 text-xs text-red-400">{error}</p>;
@@ -126,16 +169,29 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
         </button>
 
         {preview.textures.length > 0 && (
-          <button
-            type="button"
-            onClick={() => setTextures((on) => !on)}
-            className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 transition-colors hover:bg-surface-2 hover:text-ink ${
-              textures ? "text-accent" : ""
-            }`}
-          >
-            <Palette size={13} strokeWidth={1.75} />
-            Textures
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => setTextures((on) => !on)}
+              className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 transition-colors hover:bg-surface-2 hover:text-ink ${
+                textures ? "text-accent" : ""
+              }`}
+            >
+              <Palette size={13} strokeWidth={1.75} />
+              Textures
+            </button>
+            <button
+              type="button"
+              onClick={() => setTexturePanel((on) => !on)}
+              title="The model's texture dictionary"
+              className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 transition-colors hover:bg-surface-2 hover:text-ink ${
+                texturePanel ? "text-accent" : ""
+              }`}
+            >
+              <Images size={13} strokeWidth={1.75} />
+              TXD
+            </button>
+          </>
         )}
 
         <span className="flex items-center gap-1">
@@ -174,6 +230,17 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
             >
               Shadows
             </button>
+            <button
+              type="button"
+              onClick={() => {
+                setLight(1);
+                setShadows(true);
+              }}
+              title="Reset the light to its defaults"
+              className="flex items-center rounded px-1 py-0.5 text-ink-dim transition-colors hover:bg-surface-2 hover:text-ink"
+            >
+              <RotateCcw size={13} strokeWidth={1.75} />
+            </button>
           </>
         )}
 
@@ -193,21 +260,38 @@ export function ModelViewer({ path }: { path: string }): React.JSX.Element {
         )}
       </div>
 
-      {bundle ? (
-        <Canvas
-          bundle={bundle}
-          wireframe={wireframe}
-          textured={textures}
-          textures={textures ? preview.textures : null}
-          lighting={lighting}
-          light={light}
-          shadows={shadows}
-        />
-      ) : (
-        <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-dim">
-          {drawable?.name || "This drawable"} holds no renderable geometry.
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1">
+          {bundle ? (
+            <Canvas
+              bundle={bundle}
+              wireframe={wireframe}
+              textured={textures}
+              textures={textures ? preview.textures : null}
+              disabledTextures={disabledTextures}
+              lighting={lighting}
+              light={light}
+              shadows={shadows}
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-sm text-ink-dim">
+              {drawable?.name || "This drawable"} holds no renderable geometry.
+            </div>
+          )}
         </div>
-      )}
+
+        {texturePanel && preview.textures.length > 0 && (
+          <TexturePanel
+            textures={preview.textures}
+            disabled={disabledTextures}
+            selected={previewTexture}
+            onSelect={setPreviewTexture}
+            onToggle={toggleTexture}
+            onOpenYtd={onOpenPath}
+            onClose={() => setTexturePanel(false)}
+          />
+        )}
+      </div>
 
       {bundle && (
         <div className="shrink-0 overflow-x-auto border-t border-edge px-4 py-1.5 text-xs text-ink-dim">
@@ -233,10 +317,21 @@ type CanvasProps = {
     height: number;
     png: string;
   }[] | null;
+  disabledTextures: ReadonlySet<number>;
   lighting: "lit" | "unlit";
   light: number;
   shadows: boolean;
 };
+
+/** The resolved texture list with any disabled hashes dropped. */
+function activeTextures(
+  textures: CanvasProps["textures"],
+  disabled: ReadonlySet<number>,
+): CanvasProps["textures"] {
+  if (!textures) return null;
+  if (disabled.size === 0) return textures;
+  return textures.filter((t) => !disabled.has(t.hash));
+}
 
 /** The texture map for one part, resolved to three.js textures. */
 function resolvePartTextures(
@@ -331,20 +426,50 @@ function invertNormalGreen(
   return canvas;
 }
 
+const EMPTY_DISABLED: ReadonlySet<number> = new Set();
+
+type LightRig = {
+  hemi: THREE.HemisphereLight;
+  key: THREE.DirectionalLight;
+  fill: THREE.DirectionalLight;
+};
+
+type PartMesh = {
+  mesh: THREE.Mesh;
+  part: MeshPart;
+};
+
+type PartMaterialOptions = {
+  lighting: "lit" | "unlit";
+  textured: boolean;
+  textures: CanvasProps["textures"];
+  wireframe: boolean;
+  disabledTextures: ReadonlySet<number>;
+};
+
 /**
- * The WebGL surface. Split out so the scene is rebuilt when the bundle changes
- * and torn down exactly once, rather than on every toolbar re-render.
+ * The WebGL surface.
+ *
+ * The scene is built once per bundle; everything the toolbar can change — light
+ * intensity, shadows, materials, texture resolution — is applied imperatively
+ * afterwards, so the camera and orbit controls are never rebuilt and the view
+ * stays exactly where it was while a slider moves.
  */
 function Canvas({
   bundle,
   wireframe,
   textured,
   textures,
+  disabledTextures,
   lighting,
   light,
   shadows,
 }: CanvasProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
+  const rig = useRef<LightRig | null>(null);
+  const ground = useRef<THREE.Mesh | null>(null);
+  const partMeshes = useRef<PartMesh[]>([]);
+  const lightingMode = useRef<"lit" | "unlit">("lit");
 
   useEffect(() => {
     const container = host.current;
@@ -352,23 +477,25 @@ function Canvas({
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.shadowMap.enabled = shadows;
+    renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 10_000);
 
-    // Every light scales with the toolbar's intensity knob; MeshBasicMaterial
-    // in Unlit mode ignores them all, which is what the mode is for.
-    scene.add(new THREE.HemisphereLight(0xdfe8f5, 0x33383f, 1.1 * light));
-    const key = new THREE.DirectionalLight(0xffffff, 2.4 * light);
-    key.position.set(4, 8, 6);
-    key.castShadow = shadows;
+    const hemi = new THREE.HemisphereLight(0xdfe8f5, 0x33383f, 1.1);
+    scene.add(hemi);
+    const key = new THREE.DirectionalLight(0xffffff, 2.4);
+    key.castShadow = true;
+    key.shadow.bias = -0.0005;
     scene.add(key);
+    // A directional light aims at its target, and a target that is not in the
+    // scene never updates its matrix — without this the light keeps pointing at
+    // the origin and the shadow misses any model that is not centred there.
+    scene.add(key.target);
     // A warm low fill so the shadowed side of a prop is not pitch black.
-    const fill = new THREE.DirectionalLight(0xfff2dd, 0.5 * light);
-    fill.position.set(-6, -2, -4);
+    const fill = new THREE.DirectionalLight(0xfff2dd, 0.5);
     scene.add(fill);
 
     // GTA V is Z-up; three.js is Y-up. Rotating the whole model rather than
@@ -378,6 +505,7 @@ function Canvas({
     scene.add(model);
 
     const geometries: THREE.BufferGeometry[] = [];
+    const meshes: PartMesh[] = [];
     for (const part of bundle.parts) {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute(
@@ -397,18 +525,22 @@ function Canvas({
       if (!part.normals) geometry.computeVertexNormals();
       geometries.push(geometry);
 
-      const partMaterial = buildPartMaterial(part, {
-        lighting,
-        textured,
-        textures,
-        wireframe,
-      });
-
-      const mesh = new THREE.Mesh(geometry, partMaterial);
-      mesh.castShadow = shadows;
-      mesh.receiveShadow = shadows;
+      const mesh = new THREE.Mesh(
+        geometry,
+        buildPartMaterial(part, {
+          lighting: "lit",
+          textured: false,
+          textures: null,
+          wireframe: false,
+          disabledTextures: EMPTY_DISABLED,
+        }),
+      );
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       model.add(mesh);
+      meshes.push({ mesh, part });
     }
+    partMeshes.current = meshes;
 
     // Frame the model from its own geometry rather than from the declared
     // bounding box: for a skinned drawable the box is in a different space.
@@ -417,20 +549,32 @@ function Canvas({
     const center = box.getCenter(new THREE.Vector3());
     const extent = Math.max(size.x, size.y, size.z, 0.001);
 
-    // The shadow camera is a light's view box; it needs to just cover the
-    // model, or the shadow is either wasted resolution or clipped to nothing.
-    if (shadows) {
-      const shadowHalf = extent;
-      key.shadow.camera.left = -shadowHalf;
-      key.shadow.camera.right = shadowHalf;
-      key.shadow.camera.top = shadowHalf;
-      key.shadow.camera.bottom = -shadowHalf;
-      key.shadow.camera.near = 0.1;
-      key.shadow.camera.far = extent * 20;
-      key.shadow.mapSize.set(2048, 2048);
-      key.shadow.camera.updateProjectionMatrix();
-      key.target.position.copy(center);
-    }
+    // Place the key light relative to the model, not the origin, and fit its
+    // shadow frustum around the model so the shadow is neither wasted nor gone.
+    const keyDir = new THREE.Vector3(4, 8, 6).normalize();
+    key.position.copy(center).addScaledVector(keyDir, extent * 3);
+    key.target.position.copy(center);
+    const shadowHalf = extent * 1.5;
+    key.shadow.camera.left = -shadowHalf;
+    key.shadow.camera.right = shadowHalf;
+    key.shadow.camera.top = shadowHalf;
+    key.shadow.camera.bottom = -shadowHalf;
+    key.shadow.camera.near = extent * 0.5;
+    key.shadow.camera.far = extent * 10;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.updateProjectionMatrix();
+
+    // A shadow catcher under the model: self-shadowing on a prop is subtle
+    // enough to read as "no shadows", so the toggle needs a surface to land on.
+    const catcher = new THREE.Mesh(
+      new THREE.PlaneGeometry(extent * 4, extent * 4),
+      new THREE.ShadowMaterial({ opacity: 0.35 }),
+    );
+    catcher.rotation.x = -Math.PI / 2;
+    catcher.position.y = box.min.y - extent * 0.01;
+    catcher.receiveShadow = true;
+    scene.add(catcher);
+    ground.current = catcher;
 
     const grid = new THREE.GridHelper(extent * 4, 20, 0x3a4250, 0x2a303a);
     grid.position.y = box.min.y;
@@ -469,19 +613,82 @@ function Canvas({
     const observer = new ResizeObserver(resize);
     observer.observe(container);
 
+    rig.current = { hemi, key, fill };
+    lightingMode.current = "lit";
+
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
       controls.dispose();
       for (const geometry of geometries) geometry.dispose();
       grid.dispose();
+      catcher.geometry.dispose();
+      (catcher.material as THREE.ShadowMaterial).dispose();
       key.shadow.map?.dispose();
       renderer.dispose();
       container.removeChild(renderer.domElement);
+      rig.current = null;
+      ground.current = null;
+      partMeshes.current = [];
     };
-  }, [bundle, wireframe, textured, textures, lighting, light, shadows]);
+  }, [bundle]);
 
-  return <div ref={host} className="min-h-0 flex-1 overflow-hidden bg-surface-0" />;
+  // Apply whatever the toolbar controls. Runs after the scene is built and on
+  // every change to those controls; nothing here touches the camera.
+  useEffect(() => {
+    const lights = rig.current;
+    if (!lights) return;
+
+    lights.hemi.intensity = 1.1 * light;
+    lights.key.intensity = 2.4 * light;
+    lights.fill.intensity = 0.5 * light;
+
+    lights.key.castShadow = shadows;
+    if (ground.current) ground.current.visible = shadows;
+    for (const { mesh } of partMeshes.current) {
+      mesh.castShadow = shadows;
+      mesh.receiveShadow = shadows;
+    }
+    // Rebuilding the shadow map explicitly: three.js keeps the light's map
+    // around when castShadow toggles, so without this the toggle can seem to do
+    // nothing until the next scene rebuild.
+    if (shadows) {
+      lights.key.shadow.map?.dispose();
+      lights.key.shadow.map = null;
+    }
+
+    if (lightingMode.current !== lighting) {
+      lightingMode.current = lighting;
+      for (const { mesh, part } of partMeshes.current) {
+        mesh.material = buildPartMaterial(part, {
+          lighting,
+          textured,
+          textures,
+          wireframe,
+          disabledTextures,
+        });
+      }
+    } else {
+      for (const { mesh, part } of partMeshes.current) {
+        applyPartState(
+          mesh.material as THREE.MeshStandardMaterial | THREE.MeshBasicMaterial,
+          part,
+          { textured, textures, wireframe, disabledTextures },
+        );
+      }
+    }
+  }, [
+    bundle,
+    wireframe,
+    textured,
+    textures,
+    disabledTextures,
+    lighting,
+    light,
+    shadows,
+  ]);
+
+  return <div ref={host} className="h-full w-full overflow-hidden bg-surface-0" />;
 }
 
 /**
@@ -493,15 +700,13 @@ function Canvas({
  */
 function buildPartMaterial(
   part: MeshPart,
-  options: {
-    lighting: "lit" | "unlit";
-    textured: boolean;
-    textures: CanvasProps["textures"];
-    wireframe: boolean;
-  },
+  options: PartMaterialOptions,
 ): THREE.Material {
-  const { lighting, textured, textures, wireframe } = options;
-  const resolved = textured && textures ? resolvePartTextures(part, textures) : null;
+  const { lighting, textured, textures, wireframe, disabledTextures } = options;
+  const resolved =
+    textured && textures
+      ? resolvePartTextures(part, activeTextures(textures, disabledTextures))
+      : null;
 
   if (lighting === "unlit") {
     const material = new THREE.MeshBasicMaterial({
@@ -528,4 +733,129 @@ function buildPartMaterial(
     material.normalMap = resolved.normal;
   }
   return material;
+}
+
+/** Update an existing material in place, without rebuilding the mesh. */
+function applyPartState(
+  material: THREE.MeshStandardMaterial | THREE.MeshBasicMaterial,
+  part: MeshPart,
+  options: Omit<PartMaterialOptions, "lighting">,
+): void {
+  const { textured, textures, wireframe, disabledTextures } = options;
+  const resolved =
+    textured && textures
+      ? resolvePartTextures(part, activeTextures(textures, disabledTextures))
+      : null;
+
+  material.wireframe = wireframe;
+  if (resolved?.diffuse) {
+    material.map = resolved.diffuse;
+    material.color.set(0xffffff);
+  } else {
+    material.map = null;
+    material.color.set(0x9aa6b4);
+  }
+  if (material instanceof THREE.MeshStandardMaterial) {
+    material.normalMap = resolved?.normal ?? null;
+  }
+  material.needsUpdate = true;
+}
+
+type TexturePanelProps = {
+  textures: readonly ModelTexture[];
+  disabled: ReadonlySet<number>;
+  selected: number | null;
+  onSelect: (hash: number) => void;
+  onToggle: (hash: number, on: boolean) => void;
+  onOpenYtd: ((path: string) => void) | undefined;
+  onClose: () => void;
+};
+
+/** The texture dictionary the model's parts reference, editable per texture. */
+function TexturePanel({
+  textures,
+  disabled,
+  selected,
+  onSelect,
+  onToggle,
+  onOpenYtd,
+  onClose,
+}: TexturePanelProps): React.JSX.Element {
+  const shown = textures.find((t) => t.hash === selected) ?? null;
+
+  return (
+    <aside className="flex w-64 shrink-0 flex-col border-l border-edge bg-surface-0">
+      <div className="flex h-8 shrink-0 items-center justify-between border-b border-edge px-3 text-xs text-ink-dim">
+        <span>
+          Textures · {textures.length}
+          {disabled.size > 0 && `, ${disabled.size} off`}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded p-0.5 text-ink-dim transition-colors hover:bg-surface-2 hover:text-ink"
+          aria-label="Close the texture panel"
+        >
+          <X size={13} />
+        </button>
+      </div>
+
+      {shown && (
+        <div className="shrink-0 border-b border-edge p-3">
+          <img
+            src={`data:image/png;base64,${shown.png}`}
+            alt={shown.name}
+            className="max-h-40 w-full object-contain [image-rendering:pixelated]"
+          />
+          <p className="mt-1 truncate text-xs text-ink" title={shown.name}>
+            {shown.name}
+          </p>
+          <p className="text-xs text-ink-dim">
+            {shown.width}x{shown.height}
+          </p>
+        </div>
+      )}
+
+      <ul className="min-h-0 flex-1 overflow-y-auto">
+        {textures.map((texture) => {
+          const off = disabled.has(texture.hash);
+          const isSelected = texture.hash === selected;
+          const source = texture.source;
+          return (
+            <li
+              key={texture.hash}
+              className={`flex items-center gap-2 px-2 py-1 text-xs ${
+                off ? "opacity-45" : ""
+              } ${isSelected ? "bg-surface-2" : ""}`}
+            >
+              <input
+                type="checkbox"
+                checked={!off}
+                onChange={(e) => onToggle(texture.hash, e.target.checked)}
+                title={off ? "Show this texture" : "Hide this texture"}
+              />
+              <button
+                type="button"
+                onClick={() => onSelect(texture.hash)}
+                className="min-w-0 flex-1 truncate text-left text-ink transition-colors hover:text-accent"
+                title={`${texture.name} (${texture.width}x${texture.height})`}
+              >
+                {texture.name}
+              </button>
+              {source && onOpenYtd && (
+                <button
+                  type="button"
+                  onClick={() => onOpenYtd(source)}
+                  title={`Open ${baseName(source)}`}
+                  className="shrink-0 rounded p-0.5 text-ink-dim transition-colors hover:bg-surface-2 hover:text-ink"
+                >
+                  <ExternalLink size={12} strokeWidth={1.75} />
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </aside>
+  );
 }

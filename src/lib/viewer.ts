@@ -138,6 +138,8 @@ export type ModelTexture = {
   readonly height: number;
   /** Base64 of a complete PNG. */
   readonly png: string;
+  /** The `.ytd` this came from, or null for the drawable's embedded dictionary. */
+  readonly source: string | null;
 };
 
 export type ModelPreview = {

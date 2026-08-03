@@ -44,6 +44,8 @@ type Props = {
   /** Archive path of the file to show, or `null` for the empty state. */
   path: string | null;
   onClose: () => void;
+  /** Ask the Explorer to open a different entry, e.g. a texture's `.ytd`. */
+  onOpenPath: (path: string) => void;
 };
 
 /**
@@ -54,7 +56,7 @@ type Props = {
  * geometry actually parses. Every viewer it says will work is offered as a tab,
  * so the choice is never final.
  */
-export function FileViewer({ path, onClose }: Props): React.JSX.Element {
+export function FileViewer({ path, onClose, onOpenPath }: Props): React.JSX.Element {
   const [info, setInfo] = useState<EntryInfo | null>(null);
   const [viewer, setViewer] = useState<ViewerId>("hex");
   const [error, setError] = useState<string | null>(null);
@@ -176,7 +178,7 @@ export function FileViewer({ path, onClose }: Props): React.JSX.Element {
       )}
 
       {info ? (
-        <Body path={info.path} viewer={viewer} />
+        <Body path={info.path} viewer={viewer} onOpenPath={onOpenPath} />
       ) : (
         !error && (
           <div className="flex flex-1 items-center justify-center">
@@ -194,7 +196,15 @@ export function FileViewer({ path, onClose }: Props): React.JSX.Element {
   );
 }
 
-function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.Element {
+function Body({
+  path,
+  viewer,
+  onOpenPath,
+}: {
+  path: string;
+  viewer: ViewerId;
+  onOpenPath: (path: string) => void;
+}): React.JSX.Element {
   switch (viewer) {
     case "model":
       return (
@@ -205,7 +215,7 @@ function Body({ path, viewer }: { path: string; viewer: ViewerId }): React.JSX.E
             </div>
           }
         >
-          <ModelViewer path={path} />
+          <ModelViewer path={path} onOpenPath={onOpenPath} />
         </Suspense>
       );
     case "bounds":

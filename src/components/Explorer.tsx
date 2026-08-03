@@ -169,7 +169,11 @@ export function Explorer(): React.JSX.Element {
               onOpen={open}
             />
           </div>
-          <FileViewer path={selected} onClose={() => setSelected(null)} />
+          <FileViewer
+            path={selected}
+            onClose={() => setSelected(null)}
+            onOpenPath={(next) => setSelected(next)}
+          />
         </div>
       ) : (
         <div className="flex flex-1 items-center justify-center">

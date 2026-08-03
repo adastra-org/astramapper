@@ -128,6 +128,10 @@ pub struct ModelTexture {
     /// Base64 of a complete PNG. Decoded in Rust per the boundary rule: the
     /// browser would have no business reading BC-compressed blocks.
     pub png: String,
+    /// The `.ytd` this texture was resolved from, so the viewer can open the
+    /// dictionary that holds it. `None` when it lives in the drawable's own
+    /// embedded dictionary, which is not a file that can be opened.
+    pub source: Option<String>,
 }
 
 /// Everything drawable in one file.
@@ -692,7 +696,7 @@ fn resolve_model_textures<'a>(
 
     let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
         std::collections::HashMap::new();
-    for (_, dictionary) in &dictionaries {
+    for (label, dictionary) in &dictionaries {
         for hash in wanted {
             if by_hash.contains_key(hash) {
                 continue;
@@ -711,6 +715,9 @@ fn resolve_model_textures<'a>(
                     width: decoded.width,
                     height: decoded.height,
                     png: STANDARD.encode(png),
+                    // Embedded dictionaries are held in the drawable, not a file
+                    // of their own, so only a sibling `.ytd` has a source path.
+                    source: (label != "embedded").then(|| label.clone()),
                 },
             );
         }
