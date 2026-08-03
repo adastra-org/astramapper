@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures |
+| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move gizmo + undo/redo |
 
-Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 48 frontend**.
+Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 53 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -747,6 +747,32 @@ texture and whose sibling `.ytd` exists must resolve at least one texture.
 
 Not yet: the full streaming scheduler with per-map load regions, gizmos,
 undo/redo, and `.cwproj`.
+
+### 3.4 Placement editing: move gizmo and undo/redo — **DONE**
+
+The first editor slice of the phase: drag a placed entity instead of just
+looking at it.
+
+- **Edits overlay.** Every drag writes a `TransformEdit` into a keyed map that
+  the canvas lays onto the entity each frame — onto its geometry holder if the
+  model is streamed, onto its box instance otherwise — so nothing is rebuilt
+  while dragging and the placement source data stays untouched. The selection
+  outline and the details panel follow the edit live.
+- **Move gizmo.** Selecting an entity shows three coloured axis lines at its
+  position (the game's own X/Y/Z, in the Z-up world). Axis picking is done in
+  screen space, so a handle is grabbable at any zoom; dragging projects the
+  pointer onto a camera-facing plane and moves the entity along that axis. Left
+  drag grabs a handle, or falls back to rotating the camera.
+- **Undo/redo.** Each completed drag is one history entry (`before`/`after`),
+  popped by the buttons or Ctrl+Z / Ctrl+Y. The redo stack clears on a new drag,
+  the way editors behave.
+- **Testable core.** `applyEdit`/`editOf`, history push/pop and the gizmo axis
+  math are pure functions in `src/lib/world.ts`, covered by unit tests; the demo
+  plaza is editable, so the whole loop works without the game.
+
+Not yet: rotate and scale gizmos (the phase's plural "gizmos" is a move gizmo
+for now), the full streaming scheduler with per-map load regions, `.cwproj`
+projects, and the MLO entity-set expansion.
 
 ## Anti-goals
 
