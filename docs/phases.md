@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | not started |
+| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming |
 
-Branch: work happens on `dev`. Current tests: **191 unit + 35 gate + 27 frontend**.
+Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 48 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -638,6 +638,91 @@ overlay. Spike capped at two days; three.js is the documented fallback. Then Rus
 LOD streaming (ORPHANHD → HD → LOD0-4), HLSL→WGSL translation with a fidelity
 table, WASD camera, raycast selection, gizmos, undo/redo, `.cwproj`,
 `patchday*` DLC selection.
+
+### 3.0 Renderer spike — **decided: three.js in the WebView**
+
+The wgpu-native-surface spike concluded against the native route: Tauri v2 has no
+native-only window, so the surface would sit in a `tao` window beside Tauri's own
+event loop with a transparent WebView tracking it — two windowing worlds in one
+process, unsupported event-loop mixing, and known WebView-over-GPU compositing
+problems on Windows. The fidelity ceiling does not earn a modding tool's debug
+view. The decision and its consequences are recorded in `architecture.md` under
+**Rendering**. `crates/cw-render` is not a wgpu crate; world rendering is three.js
+in the WebView on the same Rust-prepared-buffers boundary as the Explorer.
+
+### 3.1 World mode foundation — **DONE**
+
+Files: `src-tauri/src/world.rs`, `src/components/World.tsx`,
+`src/lib/world.ts`, gate at `src-tauri/tests/world_gate.rs`.
+
+- **Content groups.** `world_status` groups every archive by which content it
+  belongs to: `base` for the root `x64a..w.rpf` set, one group per DLC pack for
+  `update\x64\dlcpacks\*` and `x64\dlcpacks\*` (the `patchday*`, `mp*` and
+  `sport` packs), and the directory for anything else. Each group reports its
+  archive and entry counts, so the UI can offer base/mod/DLC override selection
+  without scanning anything heavy.
+- **Map placement.** `world_map` reads any `.ymap` by archive path straight from
+  the index — it does *not* clobber the Explorer's one-open-file viewer state —
+  and returns every placed entity flattened to world space: position, the stored
+  quaternion, per-axis scale, LOD level, parent link and child count. The
+  frontend renders each map as instanced boxes in a Z-up→Y-up rotated world
+  group, coloured by LOD level (MLO a different hue), and raycasts to select.
+- **Camera and selection.** A WASD fly camera (drag to look, `Shift` to sprint,
+  `Space`/`Ctrl` up/down, wheel to dolly) over a grid, with click-to-select
+  showing the entity's archetype, position, LOD, priority and flags. Double-click
+  frames the selected entity.
+- **DLC/patchday selection.** The sidebar lists the content groups; ticking one
+  lists its `.ymap` files (capped at 200, sorted) and ticking a map places it.
+  Maps placed are listed with a remove control. When no game folder is open, the
+  mode shows a synthetic demo street so the pipeline is visible and testable
+  without the game.
+- **Place-the-open-map.** If a `.ymap` is open in Explorer, `world_status`
+  reports it and the world view offers to place it directly.
+
+Not yet: whole-install streaming (loading maps as the camera moves), gizmos,
+undo/redo, `.cwproj` projects, and drawing real geometry instead of placement
+markers. The MLO entity-set expansion (`MloInstanceData.CreateYmapEntities`)
+still belongs here rather than in the readers. The stored entity quaternion is
+passed through as the file carries it; the gate should confirm orientation
+matches the reference before real geometry is drawn.
+
+### 3.2 Real geometry and LOD streaming — **DONE**
+
+The next slice of the phase brief, after the camera and selection: place real
+models instead of boxes, and stream them by camera distance the way the engine
+does (`ORPHANHD` → HD → LOD0-4, here as the drawable's own High→VeryLow LODs).
+
+- **Archetype → asset resolution.** `world_asset` finds the model file for a
+  placed entity's resolved name — a `.ydr`, `.yft` or `.ydd` whose basename
+  matches, preferring an `update\` copy over the base game (a first pass at
+  the reference's content precedence) and `.ydr` over `.yft` over `.ydd`.
+  Names the name table cannot resolve have no file and are skipped, not failed.
+- **Geometry by path.** `world_model` reads any model file into mesh bundles
+  (every LOD) straight from the index, again past the viewer's one-open-file
+  state, so several entities can stream at once. Textures are not resolved yet —
+  streamed models render flat, on a neutral grey.
+- **Streaming.** A `Stream HD geometry` toggle loads the nearest unplaced
+  entities within a radius of the camera, up to a batch per pass, and unloads
+  them again beyond an outer radius. An asset cache and a model cache mean a
+  street of identical props resolves and decodes once, not per instance. The
+  selected entity gets a `Show model` / `Hide model` button whether or not the
+  streamer is on.
+- **LOD by distance.** Each streamed entity's drawable LODs are uploaded once
+  and swapped per frame by distance to the camera, using the entity's own
+  `lod_dist` as the HD boundary (`lodBandForDistance`). The marker box for an
+  entity with geometry steps aside (its instance matrix is zeroed) and comes
+  back when the entity is unloaded.
+- **Raycast through geometry.** A loaded entity is selectable through its real
+  triangles, not just its (hidden) box. Clicking still ignores a drag so
+  rotating the camera never deselects.
+
+The demo plaza has no assets to stream, so it stays boxes — the streaming
+pipeline is exercised only against a real install (gate: `streams_an_entitys_
+archetype_to_real_geometry`).
+
+Not yet: model *textures* in the world (flat materials while streaming), the
+full streaming scheduler with per-map load regions, gizmos, undo/redo, and
+`.cwproj`.
 
 ## Anti-goals
 

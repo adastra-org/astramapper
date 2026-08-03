@@ -8,7 +8,7 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 2 in progress — the whole install browses, and ten viewers work
+## Status: phase 3 in progress — Explorer done, World started
 
 **Works**
 
@@ -45,8 +45,21 @@ archives, view and extract what is inside them, and render and edit the world in
     the hash shown. GXT2 is the first file type that round-trips byte for byte.
   - **Text**, editable, for anything that sniffs as text whatever its extension.
   - **Hex**, paged, for everything else.
+- **World view** — the phase 3 renderer, settled on three.js in the WebView
+  (the wgpu-native-surface spike lost on the overlay problem; the decision and
+  trade-offs are recorded in `docs/architecture.md`). The world is a fly-camera
+  three.js scene over placements the Rust side already decoded. Content is
+  grouped into `base` plus every DLC/patchday pack, each browsable down to its
+  `.ymap` files; placing a map renders its entities as LOD-coloured instanced
+  boxes, click-to-select with a details panel, double-click to focus, and the
+  map open in Explorer can be placed with one button. A `Stream HD geometry`
+  toggle loads the nearest placed entities' real models as you fly — resolving
+  each archetype to its `.ydr`/`.yft`, streaming them in and out by distance
+  and swapping the drawable's High→VeryLow LODs per frame — with the selected
+  entity's model also loadable by hand. With no game folder open the same
+  renderer shows a demo plaza so the pipeline works without the game.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 191 unit tests, 35 install-dependent gate tests, 27 frontend tests. Format
+- 194 unit tests, 40 install-dependent gate tests, 48 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -75,7 +88,9 @@ archives, view and extract what is inside them, and render and edit the world in
 - Particles (`.ypt`) — embeds drawables behind `Particle.cs`, which is not
   ported, so it opens as hex with a note saying which parser is missing.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
-- World and Project are placeholder panels; `crates/cw-render` does not exist.
+- The world view streams flat-shaded geometry, not textured models yet, and the
+  remaining world features — whole-install streaming, gizmos, undo/redo and
+  `.cwproj` projects — are still ahead. `Project` is still a placeholder.
 
 See [docs/phases.md](docs/phases.md) for the handoff: what is done, what to do
 next, and the traps found so far.
