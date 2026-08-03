@@ -16,7 +16,7 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming |
+| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures |
 
 Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 48 frontend**.
 The gates are `#[ignore]`d and need a local install:
@@ -723,6 +723,30 @@ archetype_to_real_geometry`).
 Not yet: model *textures* in the world (flat materials while streaming), the
 full streaming scheduler with per-map load regions, gizmos, undo/redo, and
 `.cwproj`.
+
+### 3.3 Textures on streamed models — **DONE**
+
+The flat-shaded caveat of 3.2, closed. A streamed model now brings its pixels.
+
+- **Resolution, bounded.** `read_world_model` resolves each part's texture
+  hashes against the drawables' embedded dictionaries, then the sibling `.ytd`
+  (same folder and basename) found by one index lookup — deliberately skipping
+  the Explorer's third step, a full-tree scan of every `.ytd` in the model's
+  folder, which is too expensive per streamed model. Most stock pixels live in
+  the sibling anyway.
+- **Decode in Rust.** Each resolved texture is decoded to a PNG on the Rust
+  side (the boundary rule), so the WebView only ever uploads image bytes, never
+  BC blocks.
+- **Materials.** Each part binds its diffuse and normal maps onto a
+  `MeshStandardMaterial`, falling back to the flat grey when a hash resolves to
+  nothing — the same rule as the Explorer's model viewer. A session-wide
+  texture cache keeps repeated decodes off the main thread.
+
+The gate now asserts a real invariant: a model whose parts reference a diffuse
+texture and whose sibling `.ytd` exists must resolve at least one texture.
+
+Not yet: the full streaming scheduler with per-map load regions, gizmos,
+undo/redo, and `.cwproj`.
 
 ## Anti-goals
 
