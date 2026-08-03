@@ -54,9 +54,10 @@ archives, view and extract what is inside them, and render and edit the world in
   boxes, click-to-select with a details panel, double-click to focus, and the
   map open in Explorer can be placed with one button. A `Stream HD geometry`
   toggle loads the nearest placed entities' real models as you fly — resolving
-  each archetype to its `.ydr`/`.yft`, streaming them in and out by distance,
-  swapping the drawable's High→VeryLow LODs per frame and binding each part's
-  resolved diffuse/normal textures — with the selected entity's model also
+  each archetype to its `.ydr`/`.yft`, streaming maps by their own load regions
+  and entities by LOD tier (ORPHAN_HD nearest, SLOD fills farthest), swapping
+  the drawable's High→VeryLow LODs per frame and binding each part's resolved
+  diffuse/normal textures — with the selected entity's model also
   loadable by hand. Selecting an entity shows a move/rotate/scale gizmo — drag a
   handle to transform it, each drag one undo step (Ctrl+Z / Ctrl+Y, or the
   History buttons). The Project section saves the placed maps and edits as a
@@ -64,7 +65,7 @@ archives, view and extract what is inside them, and render and edit the world in
   folder open the same
   renderer shows a demo plaza so the pipeline works without the game.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 194 unit tests, 40 install-dependent gate tests, 61 frontend tests. Format
+- 194 unit tests, 40 install-dependent gate tests, 67 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -93,8 +94,8 @@ archives, view and extract what is inside them, and render and edit the world in
 - Particles (`.ypt`) — embeds drawables behind `Particle.cs`, which is not
   ported, so it opens as hex with a note saying which parser is missing.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
-- The remaining world features — the full streaming scheduler and the MLO
-  entity-set expansion — are still ahead. `Project` is still a placeholder.
+- The one remaining world feature is the MLO entity-set expansion, which needs
+  a real install to verify. `Project` is still a placeholder.
 
 See [docs/phases.md](docs/phases.md) for the handoff: what is done, what to do
 next, and the traps found so far.

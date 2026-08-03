@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load |
+| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming |
 
-Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 61 frontend**.
+Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 67 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -818,6 +818,29 @@ written to a `.cwproj` file and loaded back in another session.
 
 Not yet: the full streaming scheduler with per-map load regions, and the MLO
 entity-set expansion.
+
+### 3.7 Per-map load-region streaming — **DONE**
+
+The ad-hoc nearest-entity loop becomes a real scheduler, still one pass every
+`STREAM_INTERVAL_MS` but deciding from the maps' own data.
+
+- **Load regions.** A map streams only while the camera is inside its declared
+  streaming box (`streamingExtents`), with a margin, so content the camera has
+  left is dropped wholesale instead of lingering. That is the "per-map load
+  region" of the phase brief.
+- **Entity tiers.** Each entity's geometry streams within a radius derived from
+  its own `lodDist` and its placement LOD level — `ORPHAN_HD` nearest, then HD,
+  LOD, and the SLOD fills farthest — the `ORPHANHD → HD → LOD0-4` idea mapped
+  onto load *radius* rather than just the per-frame drawable-LOD swap from 3.2.
+  Unloading uses hysteresis (1.5× the radius) so a camera parked on a boundary
+  does not thrash.
+- **Pure and tested.** `streamingDecision` is a pure function over
+  `{ extents, placements }` regions taking the camera, the loaded and pending
+  key sets and a batch limit, returning what to load and what to unload. It is
+  unit-tested: nearest-first batching, hysteresis unload, out-of-region drop,
+  and never re-queuing a loaded or pending entity.
+
+Not yet: the MLO entity-set expansion.
 
 ## Anti-goals
 
