@@ -16,9 +16,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 0 — Scaffolding | **complete** |
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
-| 3 — World View | **in progress** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming |
+| 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
 
-Branch: work happens on `dev`. Current tests: **194 unit + 40 gate + 67 frontend**.
+Branch: work happens on `dev`. Current tests: **198 unit + 41 gate + 67 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -841,6 +841,36 @@ The ad-hoc nearest-entity loop becomes a real scheduler, still one pass every
   and never re-queuing a loaded or pending entity.
 
 Not yet: the MLO entity-set expansion.
+
+### 3.8 MLO entity-set expansion — **DONE**
+
+The last item the phase brief deferred here. An MLO interior instance in a
+`.ymap` is a position, a rotation and an archetype hash; the interior's actual
+contents live in the MLO archetype's entity list inside a `.ytyp`, in the
+interior's local space.
+
+- **Expansion.** `cw_core::filetypes::mlo` ports `MloInstanceData.CreateYmap
+  Entities`: each interior entity is placed at `world = R * local + T` with the
+  combined rotation `R_instance * R_local` — no instance scale, matching the
+  reference. The math is pure and unit-tested (identity, translation, a quarter
+  turn about Z mapping +X to +Y, and a unit-length combined rotation).
+- **Archetype resolution.** `index_mlo_archetypes` scans the `.ytyp` files once
+  and keys every MLO archetype by its lookup hash — the same value an
+  instance's `archetypeName` carries. `Loaded` keeps the index, so placing
+  several interior-bearing maps does not re-scan 2,759 `.ytyp` files. A map
+  with no MLO instances never pays for the scan.
+- **World placement.** `world_map` expands each MLO instance's interior into the
+  flattened entity list as `fromMlo` entities — real world-space positions,
+  rotations, scales and LOD distances — so they render, stream by LOD and edit
+  exactly like any other placed entity, with an "interior entity" badge in the
+  selection panel. The gate (`expands_an_mlo_instances_interior_into_the_world`)
+  asserts a city map's interiors expand, name their archetypes and sit at
+  finite positions.
+
+Phase 3 is complete against the brief: the renderer is settled, the world
+browses, streams, textures, edits with undo/redo, saves to `.cwproj`, and now
+shows interiors. What remains in the roadmap is the Explorer's writing work
+(`RpfFile.Write`, NG *encryption*) and the phase's anti-goals.
 
 ## Anti-goals
 

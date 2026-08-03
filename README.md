@@ -8,7 +8,7 @@ The goal is the same three things the original does: browse the game's `.rpf`
 archives, view and extract what is inside them, and render and edit the world in
 3D. Binary formats are ported bit-exactly; the UI and renderer are rebuilt.
 
-## Status: phase 3 in progress — Explorer done, World started
+## Status: phase 3 complete — World view done
 
 **Works**
 
@@ -61,11 +61,13 @@ archives, view and extract what is inside them, and render and edit the world in
   loadable by hand. Selecting an entity shows a move/rotate/scale gizmo — drag a
   handle to transform it, each drag one undo step (Ctrl+Z / Ctrl+Y, or the
   History buttons). The Project section saves the placed maps and edits as a
-  `.cwproj` and loads it back, so a session survives restart. With no game
-  folder open the same
+  `.cwproj` and loads it back, so a session survives restart. MLO interior
+  instances expand their archetype's contents into the world at the instance's
+  transform, so buildings show their interiors as placed entities too. With no
+  game folder open the same
   renderer shows a demo plaza so the pipeline works without the game.
 - **Extraction to disk** for any entry, decrypted and decompressed.
-- 194 unit tests, 40 install-dependent gate tests, 67 frontend tests. Format
+- 198 unit tests, 41 install-dependent gate tests, 67 frontend tests. Format
   work is cross-checked against `CodeWalker.Core.dll` loaded as an oracle:
 
   ```
@@ -94,8 +96,8 @@ archives, view and extract what is inside them, and render and edit the world in
 - Particles (`.ypt`) — embeds drawables behind `Particle.cs`, which is not
   ported, so it opens as hex with a note saying which parser is missing.
 - Stream names in `.awc`: `RelFile.cs` is not ported, so streams show as hashes.
-- The one remaining world feature is the MLO entity-set expansion, which needs
-  a real install to verify. `Project` is still a placeholder.
+- `Project` is still a placeholder; the world's `.cwproj` save/load lives in the
+  World mode. Writing into archives is the next phase's work.
 
 See [docs/phases.md](docs/phases.md) for the handoff: what is done, what to do
 next, and the traps found so far.
