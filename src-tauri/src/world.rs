@@ -21,23 +21,20 @@
 //! loop and the streamer issues these dozens at a time. See [`blocking`] for
 //! the one rule that keeps that safe.
 
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use cw_core::filetype::FileKind;
 use cw_core::filetypes::{
     expand_mlo_entities, index_mlo_archetypes, read_ymap, ArchetypeIndexes, MloArchetype,
 };
-use cw_core::image;
 use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, LodLevel, MetaFile};
 use cw_core::resources::{read_named_drawables, read_named_fragments, TextureDictionary};
 use cw_core::rpf::{size_from_flags, RpfManager};
-use cw_core::utils::{gen_hash, hash_string, GtaKeys};
+use cw_core::utils::{hash_string, GtaKeys};
 use serde::Serialize;
 use tauri::State;
 
 use crate::explorer::GameState;
-use crate::viewer::{ModelDrawable, ModelPreview, ModelTexture, ViewerState};
+use crate::viewer::{ModelDrawable, ModelPreview, ViewerState};
 
 /// How many `.ymap` files one group listing hands over. A city group can name
 /// thousands; the UI shows this many and the total.
@@ -309,11 +306,12 @@ pub fn read_world_model(
         _ => read_named_drawables(kind, &data, system_size).map_err(|e| format!("{e}"))?,
     };
 
-    // The embedded texture dictionaries, kept aside before the drawables are
-    // flattened into bundles.
-    let embedded: Vec<TextureDictionary> = named
+    // The embedded texture dictionaries, borrowed rather than cloned: a
+    // drawable's dictionary holds every mip of every texture it carries, and
+    // `named` outlives the resolution below.
+    let embedded: Vec<&TextureDictionary> = named
         .iter()
-        .filter_map(|entry| entry.drawable.texture_dictionary.clone())
+        .filter_map(|entry| entry.drawable.texture_dictionary.as_ref())
         .collect();
 
     let mut wanted = std::collections::BTreeSet::new();
@@ -344,7 +342,8 @@ pub fn read_world_model(
         })
         .collect();
 
-    let textures = resolve_world_textures(path, &wanted, &embedded, keys, manager, archetypes);
+    let textures =
+        crate::viewer::resolve_textures(path, &wanted, &embedded, keys, manager, archetypes);
 
     Ok(ModelPreview {
         path: path.to_string(),
@@ -352,150 +351,6 @@ pub fn read_world_model(
         empty_drawables,
         textures,
     })
-}
-
-/// Resolve a model's texture hashes into PNGs for the WebView.
-///
-/// The chain, cheapest first, stopping as soon as every wanted hash is filled:
-///
-/// 1. The drawables' own embedded dictionaries, already in memory.
-/// 2. **The archetype's `textureDictionary`**, one hash lookup to one `.ytd`.
-/// 3. The `.ytd` sharing the model's basename.
-/// 4. Every other `.ytd` in the model's folder.
-///
-/// Step 4 was the whole chain, and it is brutal: a folder holds 28.8
-/// dictionaries for the average model and 332 for the worst in a sample of
-/// 400, and each one is an extract plus an inflate plus a full parse. That
-/// worst folder is 1 GB and 3.2 seconds, to draw one model.
-///
-/// Step 2 is what the game itself does, and it answers outright for 158,574 of
-/// the install's 159,375 archetypes. Step 4 stays as the last resort because a
-/// modded or hand-built archetype may name nothing, and a model with no pixels
-/// renders flat grey.
-fn resolve_world_textures(
-    path: &str,
-    wanted: &std::collections::BTreeSet<u32>,
-    embedded: &[TextureDictionary],
-    keys: &GtaKeys,
-    manager: &RpfManager,
-    archetypes: Option<&ArchetypeIndexes>,
-) -> Vec<ModelTexture> {
-    if wanted.is_empty() {
-        return Vec::new();
-    }
-
-    let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
-        std::collections::HashMap::new();
-    for dictionary in embedded {
-        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None);
-        if by_hash.len() == wanted.len() {
-            break;
-        }
-    }
-
-    if by_hash.len() < wanted.len() {
-        // The model's folder and stem, for the archetype lookup and the scans.
-        let (folder, basename) = match path.rsplit_once('\\') {
-            Some((folder, name)) => {
-                let stem = name
-                    .strip_suffix(".ydr")
-                    .or_else(|| name.strip_suffix(".yft"))
-                    .or_else(|| name.strip_suffix(".ydd"))
-                    .unwrap_or(name);
-                (folder, stem)
-            }
-            None => ("", path),
-        };
-
-        // The archetype's own dictionary. A model file's stem *is* the asset
-        // name the archetype is keyed by, so this needs nothing the caller did
-        // not already have.
-        let named = archetypes
-            .and_then(|indexes| indexes.all.get(&gen_hash(basename)))
-            .filter(|archetype| archetype.texture_dictionary != 0)
-            .and_then(|archetype| manager.ytd_by_hash().get(&archetype.texture_dictionary))
-            .map(String::as_str);
-
-        let sibling = format!("{folder}\\{basename}.ytd");
-        let mut paths: Vec<&str> = manager
-            .ytds()
-            .get(folder)
-            .map(|paths| paths.iter().map(String::as_str).collect())
-            .unwrap_or_default();
-        // The archetype's dictionary need not sit in the model's folder, so it
-        // is prepended rather than sorted to the front.
-        if let Some(named) = named {
-            paths.retain(|p| *p != named);
-            paths.insert(0, named);
-            paths[1..].sort_by_key(|p| *p != sibling.as_str());
-        } else {
-            paths.sort_by_key(|p| *p != sibling.as_str());
-        }
-
-        for ytd_path in paths {
-            let Some(reference) = manager.find(ytd_path) else {
-                continue;
-            };
-            let entry = manager.entry(reference);
-            let Some((system_size, _)) = entry.resource_segments() else {
-                continue;
-            };
-            if let Ok(data) = manager.extract(reference, keys) {
-                if let Ok(dictionary) =
-                    cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
-                {
-                    resolve_from_dictionary(
-                        &dictionary,
-                        wanted,
-                        &mut by_hash,
-                        Some(ytd_path),
-                    );
-                }
-            }
-            if by_hash.len() == wanted.len() {
-                break;
-            }
-        }
-    }
-
-    by_hash.into_values().collect()
-}
-
-/// Decode every wanted hash a dictionary holds into the response.
-fn resolve_from_dictionary(
-    dictionary: &TextureDictionary,
-    wanted: &std::collections::BTreeSet<u32>,
-    by_hash: &mut std::collections::HashMap<u32, ModelTexture>,
-    source: Option<&str>,
-) {
-    for hash in wanted {
-        if by_hash.contains_key(hash) {
-            continue;
-        }
-        let Some(texture) = dictionary.lookup(*hash) else {
-            continue;
-        };
-        let Ok(decoded) = image::decode_mip(texture, 0) else {
-            continue;
-        };
-        let Ok(png) = image::to_png(&decoded) else {
-            continue;
-        };
-        by_hash.insert(
-            *hash,
-            ModelTexture {
-                hash: *hash,
-                name: texture
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
-                width: decoded.width,
-                height: decoded.height,
-                png: STANDARD.encode(png),
-                source: source.map(str::to_string),
-            },
-        );
-    }
 }
 
 #[tauri::command]

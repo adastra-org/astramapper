@@ -19,7 +19,9 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use cw_core::audio::AwcFile;
 use cw_core::filetype::FileKind;
-use cw_core::filetypes::{read_ymap, read_ytyp, Archetype, Extension, MloArchetype, MloEntity};
+use cw_core::filetypes::{
+    read_ymap, read_ytyp, Archetype, ArchetypeIndexes, Extension, MloArchetype, MloEntity,
+};
 use cw_core::image;
 use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, AssetType, LodLevel, Meta, MetaFile, MetaNode, PriorityLevel};
@@ -28,9 +30,9 @@ use cw_core::resources::{
     read_named_drawables, read_named_fragments, read_textures, Drawable, Texture,
     TextureDictionary,
 };
-use cw_core::rpf::EntryKind;
+use cw_core::rpf::{EntryKind, RpfManager};
 use cw_core::text::{self, Encoding, TextFile};
-use cw_core::utils::hash_string;
+use cw_core::utils::{hash_string, GtaKeys};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -577,12 +579,23 @@ pub fn read_model(
         }
     }
 
-    let textures = resolve_model_textures(
-        &open.info.path,
-        &wanted,
-        named.iter().filter_map(|e| e.drawable.texture_dictionary.as_ref()),
-        &game,
-    );
+    // The Explorer opens a file the user picked, which need not be in the
+    // index at all, so a missing install just means no sibling dictionaries.
+    let embedded: Vec<&cw_core::resources::TextureDictionary> = named
+        .iter()
+        .filter_map(|e| e.drawable.texture_dictionary.as_ref())
+        .collect();
+    let textures = match game.try_loaded() {
+        Some(loaded) => resolve_textures(
+            &open.info.path,
+            &wanted,
+            &embedded,
+            &loaded.keys,
+            &loaded.manager,
+            Some(loaded.archetypes()),
+        ),
+        None => resolve_embedded_only(&wanted, &embedded),
+    };
 
     let mut empty_drawables = 0;
     let drawables: Vec<ModelDrawable> = named
@@ -613,118 +626,165 @@ pub fn read_model(
     })
 }
 
-/// Resolve the texture hashes a model's shaders reference.
+/// Resolve a model's texture hashes into PNGs for the WebView.
 ///
-/// Resolution order, mirroring the reference's `GetTextureSamplerList` chain:
-/// the drawables' embedded dictionaries first, then a `.ytd` sharing the
-/// model's basename, then every `.ytd` in the same folder. Most stock drawables
-/// carry no embedded dictionary — the pixels live in sibling `.ytd` files the
-/// archetype loads — so the folder scan is what usually lands.
+/// The chain, cheapest first, stopping as soon as every wanted hash is filled:
 ///
-/// A hash that resolves to a texture that cannot be decoded is skipped, and a
-/// part referencing it renders untextured rather than aborting the model.
-fn resolve_model_textures<'a>(
+/// 1. The drawables' own embedded dictionaries, already in memory.
+/// 2. **The archetype's `textureDictionary`**, one hash lookup to one `.ytd`.
+/// 3. The `.ytd` sharing the model's basename.
+/// 4. Every other `.ytd` in the model's folder.
+///
+/// Step 4 was the whole chain, and it is brutal: a folder holds 28.8
+/// dictionaries for the average model and 332 for the worst in a sample of
+/// 400, and each one is an extract plus an inflate plus a full parse. That
+/// worst folder is 1 GB and 3.2 seconds, to draw one model.
+///
+/// Step 2 is what the game itself does, and it answers outright for 158,574 of
+/// the install's 159,375 archetypes. Step 4 stays as the last resort because a
+/// modded or hand-built archetype may name nothing, and a model with no pixels
+/// renders flat grey.
+pub(crate) fn resolve_textures(
     path: &str,
     wanted: &std::collections::BTreeSet<u32>,
-    embedded: impl Iterator<Item = &'a cw_core::resources::TextureDictionary>,
-    game: &GameState,
+    embedded: &[&TextureDictionary],
+    keys: &GtaKeys,
+    manager: &RpfManager,
+    archetypes: Option<&ArchetypeIndexes>,
 ) -> Vec<ModelTexture> {
     if wanted.is_empty() {
         return Vec::new();
     }
 
-    let (folder, basename) = match path.rsplit_once('\\') {
-        Some((folder, name)) => {
-            let stem = name
-                .strip_suffix(".ydr")
-                .or_else(|| name.strip_suffix(".ydd"))
-                .or_else(|| name.strip_suffix(".yft"))
-                .unwrap_or(name);
-            (folder, stem)
-        }
-        None => ("", path),
-    };
-
-    let mut dictionaries: Vec<(String, cw_core::resources::TextureDictionary)> = Vec::new();
-
-    // The drawables' own dictionaries first: they are already in memory, and
-    // they are what the shader *points* at.
-    for dictionary in embedded {
-        dictionaries.push(("embedded".into(), dictionary.clone()));
-    }
-
-    // Then the sibling `.ytd` files. The whole game archive tree is walked; a
-    // `.ytd` belongs to the model's folder when its path is the model's folder
-    // plus the file name. The same-basename sibling is visited first, since the
-    // reference tries it before falling back to the archetype's dictionary list.
-    if let Some(loaded) = game.try_loaded() {
-        let sibling = format!("{folder}\\{basename}.ytd");
-        let mut paths: Vec<String> = Vec::new();
-        for archive in &loaded.manager.archives {
-            for entry in &archive.entries {
-                if !entry.name_lower.ends_with(".ytd") {
-                    continue;
-                }
-                // Preferred sibling first, then same-folder files. A `.ytd`
-                // anywhere else in the tree is unrelated to this model.
-                if entry.path.as_str() != sibling.as_str()
-                    && !entry.path.starts_with(&format!("{folder}\\"))
-                {
-                    continue;
-                }
-                paths.push(entry.path.clone());
-            }
-        }
-        paths.sort_by_key(|p| *p != sibling);
-
-        for path in paths {
-            let Some(reference) = loaded.manager.find(&path) else { continue };
-            let entry = loaded.manager.entry(reference);
-            let Some((system_size, _)) = entry.resource_segments() else { continue };
-            if let Ok(data) = loaded.manager.extract(reference, &loaded.keys) {
-                if let Ok(dictionary) =
-                    cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
-                {
-                    dictionaries.push((path, dictionary));
-                }
-            }
-        }
-    }
-
     let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
         std::collections::HashMap::new();
-    for (label, dictionary) in &dictionaries {
-        for hash in wanted {
-            if by_hash.contains_key(hash) {
-                continue;
-            }
-            let Some(texture) = dictionary.lookup(*hash) else { continue };
-            let Ok(decoded) = image::decode_mip(texture, 0) else { continue };
-            let Ok(png) = image::to_png(&decoded) else { continue };
-            by_hash.insert(
-                *hash,
-                ModelTexture {
-                    hash: *hash,
-                    name: texture
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
-                    width: decoded.width,
-                    height: decoded.height,
-                    png: STANDARD.encode(png),
-                    // Embedded dictionaries are held in the drawable, not a file
-                    // of their own, so only a sibling `.ytd` has a source path.
-                    source: (label != "embedded").then(|| label.clone()),
-                },
-            );
-        }
-        // Once every requested hash has a texture, stop scanning folders.
+    for dictionary in embedded.iter().copied() {
+        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None);
         if by_hash.len() == wanted.len() {
             break;
         }
     }
 
-    by_hash.values().cloned().collect()
+    if by_hash.len() < wanted.len() {
+        // The model's folder and stem, for the archetype lookup and the scans.
+        let (folder, basename) = match path.rsplit_once('\\') {
+            Some((folder, name)) => {
+                let stem = name
+                    .strip_suffix(".ydr")
+                    .or_else(|| name.strip_suffix(".yft"))
+                    .or_else(|| name.strip_suffix(".ydd"))
+                    .unwrap_or(name);
+                (folder, stem)
+            }
+            None => ("", path),
+        };
+
+        // The archetype's own dictionary. A model file's stem *is* the asset
+        // name the archetype is keyed by, so this needs nothing the caller did
+        // not already have.
+        let named = archetypes
+            .and_then(|indexes| indexes.all.get(&cw_core::utils::gen_hash(basename)))
+            .filter(|archetype| archetype.texture_dictionary != 0)
+            .and_then(|archetype| manager.ytd_by_hash().get(&archetype.texture_dictionary))
+            .map(String::as_str);
+
+        let sibling = format!("{folder}\\{basename}.ytd");
+        let mut paths: Vec<&str> = manager
+            .ytds()
+            .get(folder)
+            .map(|paths| paths.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        // The archetype's dictionary need not sit in the model's folder, so it
+        // is prepended rather than sorted to the front.
+        if let Some(named) = named {
+            paths.retain(|p| *p != named);
+            paths.insert(0, named);
+            paths[1..].sort_by_key(|p| *p != sibling.as_str());
+        } else {
+            paths.sort_by_key(|p| *p != sibling.as_str());
+        }
+
+        for ytd_path in paths {
+            let Some(reference) = manager.find(ytd_path) else {
+                continue;
+            };
+            let entry = manager.entry(reference);
+            let Some((system_size, _)) = entry.resource_segments() else {
+                continue;
+            };
+            if let Ok(data) = manager.extract(reference, keys) {
+                if let Ok(dictionary) =
+                    cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
+                {
+                    resolve_from_dictionary(
+                        &dictionary,
+                        wanted,
+                        &mut by_hash,
+                        Some(ytd_path),
+                    );
+                }
+            }
+            if by_hash.len() == wanted.len() {
+                break;
+            }
+        }
+    }
+
+    by_hash.into_values().collect()
+}
+
+/// Decode every wanted hash a dictionary holds into the response.
+fn resolve_from_dictionary(
+    dictionary: &TextureDictionary,
+    wanted: &std::collections::BTreeSet<u32>,
+    by_hash: &mut std::collections::HashMap<u32, ModelTexture>,
+    source: Option<&str>,
+) {
+    for hash in wanted {
+        if by_hash.contains_key(hash) {
+            continue;
+        }
+        let Some(texture) = dictionary.lookup(*hash) else {
+            continue;
+        };
+        let Ok(decoded) = image::decode_mip(texture, 0) else {
+            continue;
+        };
+        let Ok(png) = image::to_png(&decoded) else {
+            continue;
+        };
+        by_hash.insert(
+            *hash,
+            ModelTexture {
+                hash: *hash,
+                name: texture
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
+                width: decoded.width,
+                height: decoded.height,
+                png: STANDARD.encode(png),
+                source: source.map(str::to_string),
+            },
+        );
+    }
+}
+
+/// The embedded dictionaries alone, for a file opened with no install behind
+/// it. Nothing else in the chain is reachable without the archive index.
+fn resolve_embedded_only(
+    wanted: &std::collections::BTreeSet<u32>,
+    embedded: &[&TextureDictionary],
+) -> Vec<ModelTexture> {
+    let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
+        std::collections::HashMap::new();
+    for dictionary in embedded.iter().copied() {
+        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None);
+        if by_hash.len() == wanted.len() {
+            break;
+        }
+    }
+    by_hash.into_values().collect()
 }
 
 /// One collision geometry in an open `.ybn`, as uploadable buffers.
