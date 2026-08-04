@@ -15,6 +15,11 @@
 //! Explorer's `ViewerState` holds exactly one. `world_map` parses from the
 //! `GameState` index on demand instead, so the two modes never fight over the
 //! open file.
+//!
+//! Every command that touches an archive is `async` and does its work through
+//! [`blocking`], because a synchronous `#[tauri::command]` runs on the event
+//! loop and the streamer issues these dozens at a time. See [`blocking`] for
+//! the one rule that keeps that safe.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -35,6 +40,28 @@ use crate::viewer::{ModelDrawable, ModelPreview, ModelTexture, ViewerState};
 /// How many `.ymap` files one group listing hands over. A city group can name
 /// thousands; the UI shows this many and the total.
 const MAX_YMAPS_PER_GROUP: usize = 200;
+
+/// Run a command's real work off the event loop.
+///
+/// A `#[tauri::command]` that is not `async` runs on the main thread, so every
+/// archive read, inflate and texture decode in this module used to serialize
+/// there and block the WebView. Streaming issues these dozens at a time, so
+/// they have to actually overlap.
+///
+/// **The invariant that makes this safe: no lock guard may cross the `.await`.**
+/// Take what you need out of [`GameState`] with [`GameState::loaded`] first,
+/// which hands back an owned `Arc<Loaded>` and drops the read guard before
+/// returning, then move that `Arc` into the closure. A `RwLockReadGuard` is
+/// neither `Send` nor `'static` and will not compile here, which is the point.
+async fn blocking<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("the task failed: {e}"))?
+}
 
 /// One content group: the archives that make up a slice of the install.
 ///
@@ -227,10 +254,17 @@ pub fn find_model_for(manager: &RpfManager, name: &str) -> Option<String> {
 }
 
 /// Resolve an archetype name to a model file, for the world view to draw.
+///
+/// A hash lookup once the asset index exists, but the *first* call builds it
+/// out of every entry in the install, so this cannot run on the event loop
+/// either.
 #[tauri::command]
-pub fn world_asset(name: String, game: State<'_, GameState>) -> Result<Option<String>, String> {
+pub async fn world_asset(
+    name: String,
+    game: State<'_, GameState>,
+) -> Result<Option<String>, String> {
     let loaded = game.loaded()?;
-    Ok(find_model_for(&loaded.manager, &name))
+    blocking(move || Ok(find_model_for(&loaded.manager, &name))).await
 }
 
 /// Read a model file's geometry, every LOD, for the world view to draw.
@@ -438,9 +472,12 @@ fn resolve_from_dictionary(
 }
 
 #[tauri::command]
-pub fn world_model(path: String, game: State<'_, GameState>) -> Result<ModelPreview, String> {
+pub async fn world_model(
+    path: String,
+    game: State<'_, GameState>,
+) -> Result<ModelPreview, String> {
     let loaded = game.loaded()?;
-    read_world_model(&path, &loaded.keys, &loaded.manager)
+    blocking(move || read_world_model(&path, &loaded.keys, &loaded.manager)).await
 }
 
 /// Save a world project payload to disk, as the frontend serialized it.
@@ -492,36 +529,41 @@ pub fn world_status(
 
 /// The `.ymap` files in one content group, capped for the sidebar.
 #[tauri::command]
-pub fn world_dlc_ymaps(
+pub async fn world_dlc_ymaps(
     group: String,
     game: State<'_, GameState>,
 ) -> Result<YmapListingPage, String> {
     let loaded = game.loaded()?;
+    blocking(move || {
+        let all = ymaps_in_group(&loaded.manager, &group);
+        let total = all.len();
+        let ymaps = all
+            .into_iter()
+            .take(MAX_YMAPS_PER_GROUP)
+            .map(|(path, name)| YmapListing { path, name })
+            .collect();
 
-    let all = ymaps_in_group(&loaded.manager, &group);
-    let total = all.len();
-    let ymaps = all
-        .into_iter()
-        .take(MAX_YMAPS_PER_GROUP)
-        .map(|(path, name)| YmapListing { path, name })
-        .collect();
-
-    Ok(YmapListingPage { total, ymaps })
+        Ok(YmapListingPage { total, ymaps })
+    })
+    .await
 }
 
 /// Every `.ymap` in one content group, uncapped. The sidebar page caps at
 /// `MAX_YMAPS_PER_GROUP`; loading a whole group (the base game, say) wants the
 /// full list.
 #[tauri::command]
-pub fn world_maps_in_group(
+pub async fn world_maps_in_group(
     group: String,
     game: State<'_, GameState>,
 ) -> Result<Vec<YmapListing>, String> {
     let loaded = game.loaded()?;
-    Ok(ymaps_in_group(&loaded.manager, &group)
-        .into_iter()
-        .map(|(path, name)| YmapListing { path, name })
-        .collect())
+    blocking(move || {
+        Ok(ymaps_in_group(&loaded.manager, &group)
+            .into_iter()
+            .map(|(path, name)| YmapListing { path, name })
+            .collect())
+    })
+    .await
 }
 
 /// Read one `.ymap` by archive path into flattened world placements.
@@ -530,39 +572,46 @@ pub fn world_maps_in_group(
 /// note — so placing several maps does not fight the Explorer over what is
 /// open.
 #[tauri::command]
-pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
+pub async fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
     let loaded = game.loaded()?;
-
-    // Both indexes are built once and kept: scanning every `.ytyp` is the
-    // expensive part, and only a map that places interiors needs it.
-    read_world_map(
-        &path,
-        &loaded.keys,
-        &loaded.manager,
-        Some(loaded.mlo_archetypes()),
-        Some(loaded.names()),
-    )
+    blocking(move || {
+        // Both indexes are built once and kept: scanning every `.ytyp` is the
+        // expensive part, and only a map that places interiors needs it.
+        read_world_map(
+            &path,
+            &loaded.keys,
+            &loaded.manager,
+            Some(loaded.mlo_archetypes()),
+            Some(loaded.names()),
+        )
+    })
+    .await
 }
 
 /// Place a `.ymap` the user picked from disk, whether or not the install's
 /// index knows it — a custom/mod map. Reads the payload off the filesystem and
 /// shares the flattening with `read_world_map`.
 #[tauri::command]
-pub fn world_map_file(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
+pub async fn world_map_file(
+    path: String,
+    game: State<'_, GameState>,
+) -> Result<WorldMap, String> {
     let loaded = game.loaded()?;
+    blocking(move || {
+        let raw = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
+        let (payload, system_size) = loose_ymap_payload(&raw);
 
-    let raw = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
-    let (payload, system_size) = loose_ymap_payload(&raw);
-
-    flatten_ymap(
-        &path,
-        &payload,
-        system_size,
-        &loaded.keys,
-        &loaded.manager,
-        Some(loaded.mlo_archetypes()),
-        Some(loaded.names()),
-    )
+        flatten_ymap(
+            &path,
+            &payload,
+            system_size,
+            &loaded.keys,
+            &loaded.manager,
+            Some(loaded.mlo_archetypes()),
+            Some(loaded.names()),
+        )
+    })
+    .await
 }
 
 /// A standalone `.ymap` on disk, as a mod author distributes one.
