@@ -458,6 +458,8 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
     let mut compared = 0usize;
     let mut mips = 0usize;
     let mut fallbacks = 0usize;
+    let mut narrowed_parts = 0usize;
+    let mut total_parts = 0usize;
     // Which block formats real placed geometry actually uses, printed below.
     // The shader work needs this to know what it has to handle.
     let mut by_format: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -468,7 +470,20 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
             continue;
         };
         png_time += started.elapsed();
+        // Everything the JSON path puts on the wire, so the comparison below is
+        // like for like: the envelope carries geometry *and* textures.
         png_bytes += png.textures.iter().map(|t| t.png.len()).sum::<usize>();
+        for drawable in &png.drawables {
+            for bundle in &drawable.lods {
+                for part in &bundle.parts {
+                    let base64_of = |bytes: usize| bytes.div_ceil(3) * 4;
+                    png_bytes += base64_of(part.positions.len());
+                    png_bytes += part.normals.as_ref().map_or(0, |b| base64_of(b.len()));
+                    png_bytes += part.uvs.as_ref().map_or(0, |b| base64_of(b.len()));
+                    png_bytes += base64_of(part.indices.len());
+                }
+            }
+        }
 
         let started = Instant::now();
         let Ok(blob) = compile_world_model(model, &keys, &manager, Some(&archetypes), caps) else {
@@ -481,6 +496,81 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
         assert_eq!(view.kind, Kind::Model);
         let meta: serde_json::Value = serde_json::from_str(view.meta).expect("the metadata is JSON");
         let textures = meta["textures"].as_array().expect("textures");
+
+        // Geometry: the envelope's sections must carry byte for byte what the
+        // JSON path carried as base64, with indices narrowed where they fit.
+        // The frontend takes typed-array *views* over these sections, so a
+        // single byte out of place is a mesh drawn from the wrong floats.
+        for (drawable, from_json) in meta["drawables"]
+            .as_array()
+            .expect("drawables")
+            .iter()
+            .zip(&png.drawables)
+        {
+            for (bundle, json_bundle) in drawable["lods"]
+                .as_array()
+                .expect("lods")
+                .iter()
+                .zip(&from_json.lods)
+            {
+                for (part, json_part) in bundle["parts"]
+                    .as_array()
+                    .expect("parts")
+                    .iter()
+                    .zip(&json_bundle.parts)
+                {
+                    let section = |key: &str| -> Option<&[u8]> {
+                        part[key].as_u64().and_then(|i| view.section(i as usize))
+                    };
+                    assert_eq!(
+                        section("positions"),
+                        Some(json_part.positions.as_bytes()),
+                        "{model}: {} positions differ",
+                        json_part.name
+                    );
+                    assert_eq!(
+                        section("normals"),
+                        json_part.normals.as_ref().map(|b| b.as_bytes()),
+                        "{model}: {} normals differ",
+                        json_part.name
+                    );
+                    assert_eq!(
+                        section("uvs"),
+                        json_part.uvs.as_ref().map(|b| b.as_bytes()),
+                        "{model}: {} uvs differ",
+                        json_part.name
+                    );
+
+                    // Narrowed or not, the indices must name the same vertices.
+                    let bits = part["indexBits"].as_u64().unwrap();
+                    let bytes = section("indices").expect("an index section");
+                    let narrowed: Vec<u32> = match bits {
+                        16 => bytes
+                            .chunks_exact(2)
+                            .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+                            .collect(),
+                        32 => bytes
+                            .chunks_exact(4)
+                            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .collect(),
+                        other => panic!("{model}: index width {other}"),
+                    };
+                    let wide: Vec<u32> = json_part
+                        .indices
+                        .as_bytes()
+                        .chunks_exact(4)
+                        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    assert_eq!(narrowed, wide, "{model}: {} indices differ", json_part.name);
+                    // A view needs its offset to divide its element width, and
+                    // the encoder's alignment is what guarantees it.
+                    let offset = bytes.as_ptr() as usize - blob.as_ptr() as usize;
+                    assert_eq!(offset % 16, 0, "{model}: an index section is misaligned");
+                    narrowed_parts += usize::from(bits == 16);
+                    total_parts += 1;
+                }
+            }
+        }
 
         let mut a: Vec<u64> = png.textures.iter().map(|t| t.hash as u64).collect();
         let mut b: Vec<u64> = textures.iter().map(|t| t["hash"].as_u64().unwrap()).collect();
@@ -561,14 +651,16 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
     println!(
         "{compared} placed models, {mips} mip levels ({fallbacks} textures fell back to rgba8)"
     );
+    println!("  {narrowed_parts}/{total_parts} parts index fewer than 65,536 vertices");
     println!(
-        "  png    {png_time:.2?}  {:.1} MB of base64",
+        "  json+base64  {png_time:.2?}  {:.1} MB",
         mb(png_bytes)
     );
     println!(
-        "  blocks {block_time:.2?}  {:.1} MB of envelope ({:.0}x cpu)",
+        "  envelope     {block_time:.2?}  {:.1} MB  ({:.0}x cpu, {:.2}x wire)",
         mb(block_bytes),
-        png_time.as_secs_f64() / block_time.as_secs_f64().max(f64::EPSILON)
+        png_time.as_secs_f64() / block_time.as_secs_f64().max(f64::EPSILON),
+        png_bytes as f64 / block_bytes.max(1) as f64
     );
     let total: usize = by_format.values().sum();
     for (format, count) in &by_format {

@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
-import { decodeFloats, decodeUints } from "../lib/viewer";
+
 import { reportGpuCaps } from "../lib/gpu";
 import {
   applyEdit,
@@ -1914,21 +1914,20 @@ function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
   return drawable.lods.map((bundle) => {
     const meshes: THREE.Mesh[] = [];
     for (const part of bundle.parts) {
+      if (part.positions.length === 0) continue;
+      // Every array here is a view over the IPC response, handed to three.js
+      // without a copy. `BufferAttribute` uploads it and three.js keeps the
+      // reference, which is what keeps the response buffer alive exactly as
+      // long as the meshes that need it.
       const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute(
-        "position",
-        new THREE.BufferAttribute(decodeFloats(part.positions), 3),
-      );
+      geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
       if (part.normals) {
-        geometry.setAttribute(
-          "normal",
-          new THREE.BufferAttribute(decodeFloats(part.normals), 3),
-        );
+        geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
       }
       if (part.uvs) {
-        geometry.setAttribute("uv", new THREE.BufferAttribute(decodeFloats(part.uvs), 2));
+        geometry.setAttribute("uv", new THREE.BufferAttribute(part.uvs, 2));
       }
-      geometry.setIndex(new THREE.BufferAttribute(decodeUints(part.indices), 1));
+      geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
       if (!part.normals) geometry.computeVertexNormals();
       const material = new THREE.MeshStandardMaterial({
         color: 0xb9c0ca,

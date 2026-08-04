@@ -7,8 +7,8 @@
  * here (demo world, axis conversion, bounds, colours), not the wrappers.
  */
 import { invoke } from "@tauri-apps/api/core";
-import type { ModelPreview } from "./viewer";
-import { Kind, readEnvelope, splitMips } from "./wire";
+
+import { asFloat32, asUint16, asUint32, Kind, readEnvelope, splitMips } from "./wire";
 
 /** One content group: the archives that make up a slice of the install. */
 export type ContentGroup = {
@@ -162,17 +162,64 @@ export type WireTexture = {
   readonly source: string | null;
 };
 
+/** One draw call, decoded into views over the response buffer. */
+export type WorldPart = {
+  readonly name: string;
+  readonly shader: number;
+  readonly diffuse: number | null;
+  readonly normal: number | null;
+  readonly specular: number | null;
+  readonly vertexCount: number;
+  readonly triangleCount: number;
+  readonly positions: Float32Array;
+  readonly normals: Float32Array | null;
+  readonly uvs: Float32Array | null;
+  /** `Uint16Array` unless the part indexes 65,536 vertices or more. */
+  readonly indices: Uint16Array | Uint32Array;
+};
+
+export type WorldBundle = {
+  readonly name: string | null;
+  readonly lod: string;
+  readonly availableLods: readonly string[];
+  readonly boundingBoxMin: readonly [number, number, number];
+  readonly boundingBoxMax: readonly [number, number, number];
+  readonly boundingSphereRadius: number;
+  readonly vertexCount: number;
+  readonly triangleCount: number;
+  readonly parts: readonly WorldPart[];
+};
+
+export type WorldDrawable = {
+  readonly index: number;
+  readonly name: string;
+  readonly hash: number;
+  readonly lods: readonly WorldBundle[];
+};
+
 /**
- * A streamed model: the same drawables as before, with textures as GPU blocks.
+ * A streamed model: geometry and textures as views over one response buffer.
  *
- * `textures[].levels` are views over the response buffer, so this object owns
- * the only reference keeping those bytes alive. Upload them and let it go.
+ * **Nothing here is a copy.** Every typed array aliases the `ArrayBuffer` the
+ * IPC response arrived in, so this object owns the only reference keeping those
+ * bytes alive — and dropping it frees the lot. That is the point: the base64
+ * path copied every buffer three times on the main thread before three.js ever
+ * saw it.
  */
 export type WorldModel = {
   readonly path: string;
-  readonly drawables: ModelPreview["drawables"];
+  readonly drawables: readonly WorldDrawable[];
   readonly emptyDrawables: number;
   readonly textures: readonly (WireTexture & { readonly levels: readonly Uint8Array[] })[];
+};
+
+/** The metadata shape the backend writes into the envelope, before decoding. */
+type MetaPart = Omit<WorldPart, "positions" | "normals" | "uvs" | "indices"> & {
+  readonly positions: number;
+  readonly normals: number | null;
+  readonly uvs: number | null;
+  readonly indices: number;
+  readonly indexBits: number;
 };
 
 /**
@@ -189,13 +236,48 @@ export async function worldModel(path: string): Promise<WorldModel> {
   if (envelope.kind !== Kind.Model) {
     throw new Error(`${path} came back as envelope kind ${envelope.kind}, not a model`);
   }
-  const meta = envelope.meta as Omit<WorldModel, "textures"> & {
+  const meta = envelope.meta as {
+    readonly path: string;
+    readonly emptyDrawables: number;
     readonly textures: readonly WireTexture[];
+    readonly drawables: readonly (Omit<WorldDrawable, "lods"> & {
+      readonly lods: readonly (Omit<WorldBundle, "parts"> & {
+        readonly parts: readonly MetaPart[];
+      })[];
+    })[];
   };
+
+  const floats = (index: number | null): Float32Array | null => {
+    if (index === null) return null;
+    const section = envelope.section(index);
+    return section ? asFloat32(section) : null;
+  };
+
   return {
     path: meta.path,
-    drawables: meta.drawables,
     emptyDrawables: meta.emptyDrawables,
+    drawables: meta.drawables.map((drawable) => ({
+      ...drawable,
+      lods: drawable.lods.map((bundle) => ({
+        ...bundle,
+        parts: bundle.parts.map((part): WorldPart => {
+          const indices = envelope.section(part.indices);
+          return {
+            ...part,
+            // A part with no positions cannot be drawn; an empty view is what
+            // the caller already skips, rather than a throw from here.
+            positions: floats(part.positions) ?? new Float32Array(0),
+            normals: floats(part.normals),
+            uvs: floats(part.uvs),
+            indices: !indices
+              ? new Uint16Array(0)
+              : part.indexBits === 16
+                ? asUint16(indices)
+                : asUint32(indices),
+          };
+        }),
+      })),
+    })),
     textures: meta.textures.map((texture) => {
       const section = envelope.section(texture.section);
       return {

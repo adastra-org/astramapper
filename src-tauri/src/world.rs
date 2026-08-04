@@ -30,6 +30,7 @@ use cw_core::meta::{read_meta as read_metadata, LodLevel, MetaFile};
 use cw_core::resources::{read_named_drawables, read_named_fragments, TextureDictionary};
 use cw_core::rpf::{size_from_flags, RpfManager};
 use cw_core::utils::{hash_string, GtaKeys};
+use cw_core::wire::{Envelope, Kind};
 use serde::Serialize;
 use tauri::State;
 
@@ -395,19 +396,122 @@ pub fn read_world_model(
     })
 }
 
-/// A compiled model's metadata: everything but the pixels, which ride in the
+/// A compiled model's metadata: everything but the bytes, which ride in the
 /// envelope's sections.
 ///
-/// Geometry is still base64 inside `drawables` — the vertex half of the binary
-/// envelope is its own change. Textures were the measured 660x (see
-/// [`crate::textures`]) and move first.
+/// The shapes below deliberately mirror `cw_core::mesh` rather than reusing it.
+/// A `MeshPart` carries its buffers; a `WirePart` carries the section indices
+/// they were put in, and the two transports genuinely describe different
+/// things. Reusing one struct for both would mean a serde mode flag, which is
+/// how a format ends up with fields that are sometimes there.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorldModelMeta {
     pub path: String,
-    pub drawables: Vec<ModelDrawable>,
+    pub drawables: Vec<WireDrawable>,
     pub empty_drawables: usize,
     pub textures: Vec<crate::textures::WireTexture>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireDrawable {
+    pub index: usize,
+    pub name: String,
+    pub hash: u32,
+    pub lods: Vec<WireBundle>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireBundle {
+    pub name: Option<String>,
+    pub lod: &'static str,
+    pub available_lods: Vec<&'static str>,
+    pub bounding_box_min: [f32; 3],
+    pub bounding_box_max: [f32; 3],
+    pub bounding_sphere_radius: f32,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    pub parts: Vec<WirePart>,
+}
+
+/// One draw call, with its buffers named by section index.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WirePart {
+    pub name: String,
+    pub shader: u32,
+    pub diffuse: Option<u32>,
+    pub normal: Option<u32>,
+    pub specular: Option<u32>,
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    /// Section holding `f32` triples.
+    pub positions: usize,
+    /// Section holding `f32` triples, absent when the declaration had no normal.
+    pub normals: Option<usize>,
+    /// Section holding `f32` pairs, absent when there was no texcoord0.
+    pub uvs: Option<usize>,
+    pub indices: usize,
+    /// 16 or 32. Every part in a 3,382-part sample of stock geometry indexed
+    /// fewer than 65,536 vertices, which halves the index payload, but a part
+    /// that needs the width still gets it — so the frontend reads this rather
+    /// than assuming either one.
+    pub index_bits: u8,
+}
+
+/// Push one drawable's buffers into the envelope, naming the sections.
+fn wire_drawables(drawables: &[ModelDrawable], envelope: &mut Envelope) -> Vec<WireDrawable> {
+    drawables
+        .iter()
+        .map(|drawable| WireDrawable {
+            index: drawable.index,
+            name: drawable.name.clone(),
+            hash: drawable.hash,
+            lods: drawable
+                .lods
+                .iter()
+                .map(|bundle| WireBundle {
+                    name: bundle.name.clone(),
+                    lod: bundle.lod,
+                    available_lods: bundle.available_lods.clone(),
+                    bounding_box_min: bundle.bounding_box_min,
+                    bounding_box_max: bundle.bounding_box_max,
+                    bounding_sphere_radius: bundle.bounding_sphere_radius,
+                    vertex_count: bundle.vertex_count,
+                    triangle_count: bundle.triangle_count,
+                    parts: bundle
+                        .parts
+                        .iter()
+                        .map(|part| {
+                            let (indices, index_bits) = part.narrow_indices();
+                            WirePart {
+                                name: part.name.clone(),
+                                shader: part.shader,
+                                diffuse: part.diffuse,
+                                normal: part.normal,
+                                specular: part.specular,
+                                vertex_count: part.vertex_count,
+                                triangle_count: part.triangle_count,
+                                positions: envelope.push(part.positions.as_bytes()),
+                                normals: part
+                                    .normals
+                                    .as_ref()
+                                    .map(|buffer| envelope.push(buffer.as_bytes())),
+                                uvs: part
+                                    .uvs
+                                    .as_ref()
+                                    .map(|buffer| envelope.push(buffer.as_bytes())),
+                                indices: envelope.push(indices),
+                                index_bits,
+                            }
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Read a model and pack it into a wire envelope, textures as GPU blocks.
@@ -448,22 +552,26 @@ pub fn compile_world_model(
     let mut encoded = encoded;
     encoded.sort_by_key(|texture| texture.meta.section);
 
-    let mut envelope = cw_core::wire::Envelope::new();
+    // Textures are pushed first because their section indexes were assigned
+    // during resolution, before the envelope existed. Geometry follows and
+    // takes whatever comes next.
+    let mut envelope = Envelope::new();
     let mut textures = Vec::with_capacity(encoded.len());
     for texture in encoded {
         let section = envelope.push(texture.bytes);
         debug_assert_eq!(section, texture.meta.section);
         textures.push(texture.meta);
     }
+    let drawables = wire_drawables(&read.drawables, &mut envelope);
 
     let meta = WorldModelMeta {
         path: path.to_string(),
-        drawables: read.drawables,
+        drawables,
         empty_drawables: read.empty_drawables,
         textures,
     };
     let json = serde_json::to_string(&meta).map_err(|e| format!("could not encode {path}: {e}"))?;
-    Ok(envelope.finish(cw_core::wire::Kind::Model, &json))
+    Ok(envelope.finish(Kind::Model, &json))
 }
 
 #[tauri::command]

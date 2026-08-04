@@ -102,6 +102,39 @@ export function readEnvelope(buffer: ArrayBuffer): Envelope {
 }
 
 /**
+ * A typed view over a section, without copying it.
+ *
+ * The envelope aligns every section to 16 bytes precisely so these cannot
+ * throw, but the check stays: a misaligned view is the failure mode this whole
+ * format exists to prevent, and finding out through a `RangeError` from deep
+ * inside a constructor is not how anyone wants to learn the encoder regressed.
+ */
+function viewAs<T>(
+  section: Uint8Array,
+  bytesPer: number,
+  make: (buffer: ArrayBufferLike, offset: number, length: number) => T,
+): T {
+  if (section.byteOffset % bytesPer !== 0) {
+    throw new Error(
+      `a section at byte ${section.byteOffset} is not aligned for ${bytesPer}-byte reads`,
+    );
+  }
+  return make(section.buffer, section.byteOffset, Math.floor(section.byteLength / bytesPer));
+}
+
+export function asFloat32(section: Uint8Array): Float32Array {
+  return viewAs(section, 4, (b, o, n) => new Float32Array(b, o, n));
+}
+
+export function asUint16(section: Uint8Array): Uint16Array {
+  return viewAs(section, 2, (b, o, n) => new Uint16Array(b, o, n));
+}
+
+export function asUint32(section: Uint8Array): Uint32Array {
+  return viewAs(section, 4, (b, o, n) => new Uint32Array(b, o, n));
+}
+
+/**
  * Split one section into the mip levels a texture's metadata declares.
  *
  * Every level is a view, not a copy, so a whole chain costs one allocation for
