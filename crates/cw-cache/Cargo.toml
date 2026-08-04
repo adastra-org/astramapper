@@ -1,0 +1,16 @@
+[package]
+name = "cw-cache"
+description = "A pack-file disk cache for compiled assets. Knows nothing about Tauri or about GTA formats."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately depends on neither `tauri` nor `cw-core`. The cache stores opaque
+# bytes under an opaque key; what those bytes mean is the caller's business, and
+# that is what makes the round trip testable without an app or an install.
+[dependencies]
+memmap2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
