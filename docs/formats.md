@@ -519,9 +519,21 @@ them, by hash.
 
 ## Shader fidelity
 
-Filled in during phase 3, when `CodeWalker/Shaders/*.hlsl` is translated to WGSL.
-Any shader that does not translate cleanly gets a row here naming the
-approximation used. Unlit flat materials are not an acceptable default.
+Filled in during phase 4, when `CodeWalker/Shaders/*.hlsl` is translated to
+**GLSL** for three.js. WGSL was the plan until the phase 3.0 spike chose
+three.js in the WebView over a native wgpu surface; there is no wgpu renderer
+and no WGSL. Any shader that does not translate cleanly gets a row here naming
+the approximation used. Unlit flat materials are not an acceptable default: an
+unrecognised shader still resolves to a profile built from what the material
+binds plus its render bucket.
+
+Approximations already in the tree, before the shader work proper:
+
+| Unit | Approximation |
+| --- | --- |
+| BC5/ATI2 normal maps | Blue is left at zero rather than reconstructed as `sqrt(1 - x² - y²)`. The PNG path did the same, so this is not a regression, but it is wrong and belongs in the uber-shader. None appeared in a 510-texture sample of placed city geometry (93.3% BC1, 6.5% BC3). |
+| BC4/ATI1 | Decoded into red with green and blue at zero, following the reference. |
+| Normal map handedness | Corrected with a negative `normalScale.y` in the shader rather than by inverting the green channel on the CPU, which is not possible without decoding the blocks. |
 
 ## Open questions
 

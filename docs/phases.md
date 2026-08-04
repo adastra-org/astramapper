@@ -17,8 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope with GPU texture blocks |
 
-Branch: work happens on `dev`. Current tests: **198 unit + 41 gate + 67 frontend**.
+Branch: work happens on `dev`. Current tests: **225 unit + 46 gate + 83 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -871,6 +872,100 @@ Phase 3 is complete against the brief: the renderer is settled, the world
 browses, streams, textures, edits with undo/redo, saves to `.cwproj`, and now
 shows interiors. What remains in the roadmap is the Explorer's writing work
 (`RpfFile.Write`, NG *encryption*) and the phase's anti-goals.
+
+---
+
+## Phase 4 — World performance, shaders and tooling
+
+Phase 3 made the world view work. It does not scale: nothing is cached to disk,
+so every launch re-scans 179 archives and 403,642 entries; every command is a
+sync `#[tauri::command]` on the event loop; and there are no shaders, just one
+`MeshStandardMaterial` per part per LOD.
+
+The phase is measurement-led. Three findings so far each corrected the plan it
+came from, and each is recorded where it landed rather than where it was
+guessed.
+
+### 4.1 I/O and threading — **DONE**
+
+- **Archives are read through a memory mapping** (`rpf/mapped.rs`), keyed by
+  physical path because 5,199 nested archives resolve to 179 files. Capped at 64
+  live mappings with LRU unmap plus a "Release archives" action, because a
+  mapping holds a Windows file lock and the user may want to patch the game.
+- **Measured 1.13x**, not the several-times win the plan assumed. At 7.5 GB
+  decompressed across 4,000 reads the run is dominated by deflate at ~380 MB/s,
+  so `File::open` per extraction was never the bottleneck. **This is why the
+  disk cache is the centrepiece of the phase and not an optimisation on top of
+  one.**
+- Every world command that touches an archive is `async` and runs its body in
+  `spawn_blocking`. The invariant: no lock guard crosses an `.await`, which is
+  enforced by `GameState` handing out an `Arc<Loaded>` rather than a guard.
+- The `.ytyp` archetype scan is rayon, and now indexes every archetype rather
+  than only MLO ones.
+
+### 4.2 Textures resolve through the archetype — **DONE**
+
+Supersedes 3.3's resolution rule. `read_world_model` used to extract, inflate
+and fully parse **every** `.ytd` in a model's folder: 28.8 dictionaries for the
+average model in a sample of 400, and 332 dictionaries, 1 GB and 3.2 seconds for
+the worst, to draw one model.
+
+An archetype names the dictionary it wants, and 158,574 of the install's 159,375
+archetypes name one. The chain is now embedded → the archetype's
+`textureDictionary` → the sibling `.ytd` → the folder scan as a last resort,
+kept because a modded archetype may name nothing. Measured **1.8x** over 58
+placed city models with identical texture coverage, and that is a lower bound:
+the archetype path runs first and pays the cold cost.
+
+**GTA ships base and HD texture dictionaries side by side**, `foo.ytd` next to
+`foo+hi.ytd` / `foo+hidr.ytd`, same texture names at different resolutions,
+swapped at `hdTextureDist`. The folder scan took whichever tier its ordering
+reached first. The archetype names the base tier, so the choice is deterministic
+now, and this is the mechanism LOD-aware texture selection should hang off
+rather than anything invented.
+
+### 4.3 Binary IPC: textures as GPU blocks — **DONE**
+
+Supersedes 3.3's "the WebView only ever uploads image bytes, never BC blocks".
+
+Textures crossed as base64 PNGs: decode the BC blocks to full-resolution RGBA,
+deflate that into a PNG, base64 it, JSON-escape the base64, and on the far side
+inflate it again so the driver could re-compress nothing. Over 600 real textures
+that costs **12.92s and 443.9 MB of intermediate RGBA that is thrown away**;
+copying the stored mip chain costs **19.58ms**.
+
+So the streaming path ships the blocks, in a binary envelope
+(`crates/cw-core/src/wire.rs`): JSON metadata in front of 16-byte-aligned raw
+sections, returned through `tauri::ipc::Response`. `docs/architecture.md`
+defends the boundary-rule change; the short version is that BC blocks are the
+GPU's own format rather than an archive format, and the WebView parses nothing.
+The frontend declares its context's extensions through `set_gpu_capabilities`
+and anything unsupported is decoded to RGBA in Rust — still not a PNG.
+
+End to end over 58 placed city models: **12.62s to 2.87s and 86.9 MB to
+61.1 MB**, with the envelope carrying every mip against the PNG path's mip 0
+alone. The blocks are 93.3% BC1 and 6.5% BC3. VRAM drops to roughly a quarter.
+
+The gate (`the_block_path_resolves_the_same_textures_as_the_png_path`) checks
+every mip's byte length against `TextureFormat::compute_pitch`, which is the
+arithmetic the driver does. The frontend uploads on the metadata's word and has
+no way to check it, so this is where it gets checked.
+
+Three fidelity fixes fell out of writing the upload path: diffuse uploads as
+sRGB and normal maps stay linear (both were linear, which washes the scene out);
+`normalScale.y` is negative, the shader-side equivalent of the green-channel
+inversion the Explorer's viewer does on the CPU for RAGE's left-handed bump
+maps; and textures wrap rather than clamp. `CompressedTexture` also forces
+`flipY` off, which the Explorer's viewer already documents as correct for GTA's
+Direct3D UVs — the world view's PNG path had it on and was mirroring every
+texture vertically.
+
+### Still to come
+
+Geometry in the same envelope (`u16` indices where the vertex count allows),
+the `crates/cw-cache` pack-file disk cache and its background bake pass, the
+`World.tsx` decomposition and spatial streaming index, GLSL shader profiles,
+layers/search/multi-select, and the collision and AI path layers.
 
 ## Anti-goals
 

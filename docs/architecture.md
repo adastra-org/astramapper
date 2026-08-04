@@ -8,23 +8,26 @@ in the system WebView.
 
 ```
 Cargo.toml            workspace root, shared dependency versions
-crates/cw-core/       parsers, crypto, RPF reader, meta, world models
-crates/cw-render/     wgpu renderer and world streaming (phase 3)
+crates/cw-core/       parsers, crypto, RPF reader, meta, world models, wire format
 src-tauri/            Tauri app: commands, state, IPC, windows
 src/                  React frontend
 ```
 
-`cw-core` and `cw-render` **must not depend on `tauri`**. They stay testable
-with plain `cargo test` and reusable from a CLI or another frontend. `src-tauri`
-is the only crate that knows an app exists; it owns state and IPC and delegates
-every parse downward.
+There is no `cw-render`. Early drafts of this document listed one, holding a
+wgpu renderer; the phase 3 spike decided against a native surface (see
+[Rendering](#rendering-phase-3)) and the crate was never created.
 
-The three map onto the original like this:
+`cw-core` **must not depend on `tauri`**. It stays testable with plain
+`cargo test` and reusable from a CLI or another frontend. `src-tauri` is the
+only crate that knows an app exists; it owns state and IPC and delegates every
+parse downward.
+
+The layout maps onto the original like this:
 
 | CodeWalker | AstraMapper |
 | --- | --- |
 | `CodeWalker.Core` (~178k lines) | `crates/cw-core` |
-| `CodeWalker/Rendering/DirectX` + HLSL | `crates/cw-render` (wgpu + WGSL) |
+| `CodeWalker/Rendering/DirectX` + HLSL | `src/` (three.js in the WebView) |
 | `CodeWalker/Forms`, `Tools`, `CodeWalker.WinForms` | `src/` (React) |
 | SharpDX.Mathematics | `glam` |
 | XAudio2 | Web Audio, decoded in Rust |
@@ -50,6 +53,30 @@ Buffers that are genuinely bytes — mesh attributes, hex pages, decoded audio �
 cross as base64 rather than as JSON number arrays. A 60k-vertex drawable is about
 2 MB of JSON digits versus 700 KB of base64 that decodes straight into a
 `Float32Array`. Same channel, very different parse on the far side.
+
+That reasoning was right and stopped one step short: base64 still copies every
+buffer three times before it reaches the GPU. The world view's streaming path
+uses a **binary envelope** instead (`crates/cw-core/src/wire.rs`): a fixed
+header, UTF-8 JSON metadata, then raw sections on 16-byte boundaries, returned
+through `tauri::ipc::Response` and read as an `ArrayBuffer`. The alignment is
+what lets the frontend take `Float32Array` and `Uint8Array` *views* over the
+response rather than copies. The metadata stays JSON on purpose: it is the part
+that churns, and the bytes that matter are already zero-copy. The Explorer's
+commands still use base64 — one file at a time is not where the copies hurt.
+
+**Textures on the streaming path cross as GPU blocks, not as images.** This is a
+deliberate change to the rule above, so here is the defence. The rule exists
+because the WebView has no business *parsing* archive formats, and it still does
+not: the vertex declaration, the mip layout, the dictionary chain and the format
+identification all resolve in Rust. BC1 through BC7 are not an archive format,
+they are the GPU's own storage format, and the WebView's entire involvement is
+one `compressedTexImage2D` call per mip level. The alternative measured at 12.62s
+against 2.87s over 58 placed city models, for a *larger* payload and four times
+the VRAM, because it decoded blocks to RGBA and re-encoded them as PNG so the
+browser could decode them again and the driver could re-compress nothing. The
+frontend declares which formats its context accepts through
+`set_gpu_capabilities`; anything it cannot take is decoded to RGBA in Rust. See
+`src-tauri/src/textures.rs`.
 
 One file is open at a time, and its extracted payload is held in Rust state
 (`viewer::ViewerState`). Extraction is a seek, a decrypt and an inflate; paging
