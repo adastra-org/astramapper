@@ -7,10 +7,11 @@
 //! ```
 
 use astramapper_lib::world::{
-    content_groups, find_model_for, read_world_map, read_world_model, ymaps_in_group,
+    content_groups, find_model_for, read_world_map, read_world_model, ymaps_in_group, WorldMap,
 };
 use cw_core::rpf::RpfManager;
 use cw_core::utils::GtaKeys;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 const DEFAULT_GTA_PATH: &str = r"E:\SteamLibrary\steamapps\common\Grand Theft Auto V";
@@ -25,6 +26,44 @@ fn scan() -> (RpfManager, GtaKeys) {
     let keys = GtaKeys::from_exe(&data).expect("key recovery failed");
     let manager = RpfManager::scan(&gta_path(), &keys).expect("scan the game folder");
     (manager, keys)
+}
+
+/// Every `.ymap` under `levels\gta5`, in index order.
+///
+/// The interiors subtree is excluded: those are the MLO archetypes' own maps,
+/// not placement files, and they place nothing on their own.
+fn city_maps(manager: &RpfManager) -> Vec<&String> {
+    manager
+        .archives
+        .iter()
+        .flat_map(|a| a.entries.iter())
+        .map(|e| &e.path)
+        .filter(|p| {
+            p.ends_with(".ymap")
+                && p.contains(r"\levels\gta5\_city")
+                && !p.contains(r"\.rpf\interiors\")
+        })
+        .collect()
+}
+
+/// The first city map satisfying `wanted`, read with the same indexes the
+/// commands use.
+///
+/// Picking the *first* city map and asserting about it is what made this gate
+/// brittle: the first one in index order is `hei_dt1_00.ymap`, which holds
+/// nine entities and not one of them is HD. A map is only a fair witness for a
+/// property if it was chosen for having it.
+fn first_city_map(
+    manager: &RpfManager,
+    keys: &GtaKeys,
+    names: &HashMap<u32, String>,
+    wanted: impl Fn(&WorldMap) -> bool,
+) -> WorldMap {
+    city_maps(manager)
+        .into_iter()
+        .filter_map(|p| read_world_map(p, keys, manager, None, Some(names)).ok())
+        .find(|map| wanted(map))
+        .expect("no city map matched")
 }
 
 /// The install has to split into a `base` group plus DLC packs, with the
@@ -106,23 +145,13 @@ fn a_group_lists_its_ymaps() {
 #[ignore = "needs a local GTA V install"]
 fn reads_a_ymap_into_world_placements() {
     let (manager, keys) = scan();
+    let names = manager.index_names();
 
-    // Find a real city map: one of the `_city` maps is the safest bet for a
-    // placement file with entities. Prefer one with children, since the world
-    // view is what the hierarchy is for.
-    let candidate = manager
-        .archives
-        .iter()
-        .flat_map(|a| a.entries.iter())
-        .map(|e| &e.path)
-        .find(|p| {
-            p.ends_with(".ymap")
-                && p.contains(r"\levels\gta5\_city")
-                && !p.contains(r"\.rpf\interiors\")
-        })
-        .expect("the install should have a city map");
-
-    let map = read_world_map(candidate, &keys, &manager, None, None).expect("read the map");
+    // A map that actually places HD geometry. Most `_city` maps are LOD-only
+    // companions, so the property under test has to drive the choice.
+    let map = first_city_map(&manager, &keys, &names, |map| {
+        map.entities.iter().any(|e| e.lod_level == "HD")
+    });
     assert!(map.entity_count > 0, "{} places nothing", map.path);
 
     let hd = map.entities.iter().filter(|e| e.lod_level == "HD").count();
@@ -155,16 +184,13 @@ fn reads_a_ymap_into_world_placements() {
 #[ignore = "needs a local GTA V install"]
 fn expands_an_mlo_instances_interior_into_the_world() {
     let (manager, keys) = scan();
+    let names = manager.index_names();
 
-    let map = manager
-        .archives
-        .iter()
-        .flat_map(|a| a.entries.iter())
-        .map(|e| &e.path)
-        .filter(|p| p.ends_with(".ymap") && p.contains(r"\levels\gta5\_city"))
-        .filter_map(|p| read_world_map(p, &keys, &manager, None, None).ok())
-        .find(|m| m.mlo_expanded > 0)
-        .expect("a city map with MLO interiors");
+    // Names come from the entry-basename index, as the commands pass them. The
+    // static `metanames` table alone resolves a few thousand of the install's
+    // archetypes, so without this every expanded entity reads back as `hash_*`
+    // and the assertion below is unwinnable.
+    let map = first_city_map(&manager, &keys, &names, |map| map.mlo_expanded > 0);
 
     let expanded: Vec<_> = map.entities.iter().filter(|e| e.from_mlo).collect();
     assert_eq!(expanded.len(), map.mlo_expanded);
@@ -204,26 +230,28 @@ fn format_3(v: &[f32; 3]) -> String {
 #[ignore = "needs a local GTA V install"]
 fn streams_an_entitys_archetype_to_real_geometry() {
     let (manager, keys) = scan();
+    let names = manager.index_names();
 
-    let candidate = manager
-        .archives
-        .iter()
-        .flat_map(|a| a.entries.iter())
-        .map(|e| &e.path)
-        .find(|p| p.ends_with(".ymap") && p.contains(r"\levels\gta5\_city"))
-        .expect("the install should have a city map");
-    let map = read_world_map(candidate, &keys, &manager, None, None).expect("read the map");
-
-    // Take the first entity whose archetype resolved to a real name; only those
-    // can name a file on disk.
-    let entity = map
-        .entities
-        .iter()
-        .find(|e| !e.name.starts_with("hash_"))
-        .expect("a city map should have nameable entities");
-
-    let model_path = find_model_for(&manager, &entity.name)
-        .unwrap_or_else(|| panic!("no model file for {}", entity.name));
+    // The streamer only ever draws an entity whose archetype resolves to a
+    // file, so the witness has to be one of those. Choosing the first entity of
+    // the first map instead tests whichever accident is at the front.
+    let mut found = None;
+    for path in city_maps(&manager) {
+        let Ok(map) = read_world_map(path, &keys, &manager, None, Some(&names)) else {
+            continue;
+        };
+        let hit = map
+            .entities
+            .iter()
+            .filter(|e| e.lod_level == "HD" && !e.name.starts_with("hash_"))
+            .find_map(|e| find_model_for(&manager, &e.name).map(|p| (e.name.clone(), p)));
+        if let Some(hit) = hit {
+            found = Some(hit);
+            break;
+        }
+    }
+    let (entity_name, model_path) =
+        found.expect("a city map should place an HD entity whose archetype names a model");
     assert!(
         model_path.to_lowercase().ends_with(".ydr")
             || model_path.to_lowercase().ends_with(".yft")
@@ -265,7 +293,7 @@ fn streams_an_entitys_archetype_to_real_geometry() {
 
     println!(
         "{} -> {}: {} drawable, {} LODs, {} triangles at high, {} textures",
-        entity.name,
+        entity_name,
         model_path,
         preview.drawables.len(),
         drawable.lods.len(),
