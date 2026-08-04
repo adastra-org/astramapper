@@ -29,7 +29,7 @@ use cw_core::utils::{hash_string, GtaKeys};
 use serde::Serialize;
 use tauri::State;
 
-use crate::explorer::{GameState, Loaded};
+use crate::explorer::GameState;
 use crate::viewer::{ModelDrawable, ModelPreview, ModelTexture, ViewerState};
 
 /// How many `.ymap` files one group listing hands over. A city group can name
@@ -222,7 +222,6 @@ pub fn find_model_for(manager: &RpfManager, name: &str) -> Option<String> {
     }
     manager
         .assets()
-        .as_ref()?
         .get(&needle)
         .map(|(_, _, path)| path.clone())
 }
@@ -230,8 +229,7 @@ pub fn find_model_for(manager: &RpfManager, name: &str) -> Option<String> {
 /// Resolve an archetype name to a model file, for the world view to draw.
 #[tauri::command]
 pub fn world_asset(name: String, game: State<'_, GameState>) -> Result<Option<String>, String> {
-    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = game.loaded()?;
     Ok(find_model_for(&loaded.manager, &name))
 }
 
@@ -366,16 +364,15 @@ fn resolve_world_textures(
         // the reference tries it before the archetype's dictionary list. The
         // folder index is scanned once per install, not per model.
         let sibling = format!("{folder}\\{basename}.ytd");
-        let mut paths: Vec<String> = manager
+        let mut paths: Vec<&str> = manager
             .ytds()
-            .as_ref()
-            .and_then(|by_folder| by_folder.get(folder))
-            .cloned()
+            .get(folder)
+            .map(|paths| paths.iter().map(String::as_str).collect())
             .unwrap_or_default();
-        paths.sort_by_key(|p| *p != sibling);
+        paths.sort_by_key(|p| *p != sibling.as_str());
 
         for ytd_path in paths {
-            let Some(reference) = manager.find(&ytd_path) else {
+            let Some(reference) = manager.find(ytd_path) else {
                 continue;
             };
             let entry = manager.entry(reference);
@@ -390,7 +387,7 @@ fn resolve_world_textures(
                         &dictionary,
                         wanted,
                         &mut by_hash,
-                        Some(ytd_path.as_str()),
+                        Some(ytd_path),
                     );
                 }
             }
@@ -442,8 +439,7 @@ fn resolve_from_dictionary(
 
 #[tauri::command]
 pub fn world_model(path: String, game: State<'_, GameState>) -> Result<ModelPreview, String> {
-    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = game.loaded()?;
     read_world_model(&path, &loaded.keys, &loaded.manager)
 }
 
@@ -468,7 +464,7 @@ pub fn world_status(
     game: State<'_, GameState>,
     viewer: State<'_, ViewerState>,
 ) -> Result<WorldStatus, String> {
-    let game_guard = game.0.read().map_err(|_| "game state is poisoned")?;
+    let opened = game.try_loaded();
     let open_map_path = viewer
         .0
         .lock()
@@ -478,7 +474,7 @@ pub fn world_status(
         .filter(|info| info.name.to_ascii_lowercase().ends_with(".ymap"))
         .map(|info| info.path.clone());
 
-    match game_guard.as_ref() {
+    match opened.as_ref() {
         Some(loaded) => Ok(WorldStatus {
             game_open: true,
             folder: Some(loaded.folder.clone()),
@@ -500,8 +496,7 @@ pub fn world_dlc_ymaps(
     group: String,
     game: State<'_, GameState>,
 ) -> Result<YmapListingPage, String> {
-    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = game.loaded()?;
 
     let all = ymaps_in_group(&loaded.manager, &group);
     let total = all.len();
@@ -522,8 +517,7 @@ pub fn world_maps_in_group(
     group: String,
     game: State<'_, GameState>,
 ) -> Result<Vec<YmapListing>, String> {
-    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = game.loaded()?;
     Ok(ymaps_in_group(&loaded.manager, &group)
         .into_iter()
         .map(|(path, name)| YmapListing { path, name })
@@ -537,25 +531,16 @@ pub fn world_maps_in_group(
 /// open.
 #[tauri::command]
 pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
-    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = game.loaded()?;
 
-    // The MLO archetype index is built once and kept: scanning every `.ytyp`
-    // is the expensive part, and only a map that places interiors needs it.
-    let mut cache = loaded
-        .mlo_archetypes
-        .lock()
-        .map_err(|_| "mlo index is poisoned")?;
-    if cache.is_none() {
-        *cache = Some(index_mlo_archetypes(&loaded.manager, &loaded.keys));
-    }
-    let names = names_index(loaded)?;
+    // Both indexes are built once and kept: scanning every `.ytyp` is the
+    // expensive part, and only a map that places interiors needs it.
     read_world_map(
         &path,
         &loaded.keys,
         &loaded.manager,
-        cache.as_ref(),
-        names.as_ref(),
+        Some(loaded.mlo_archetypes()),
+        Some(loaded.names()),
     )
 }
 
@@ -564,41 +549,20 @@ pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, S
 /// shares the flattening with `read_world_map`.
 #[tauri::command]
 pub fn world_map_file(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
-    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = game.loaded()?;
 
     let raw = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
     let (payload, system_size) = loose_ymap_payload(&raw);
 
-    let mut cache = loaded
-        .mlo_archetypes
-        .lock()
-        .map_err(|_| "mlo index is poisoned")?;
-    if cache.is_none() {
-        *cache = Some(index_mlo_archetypes(&loaded.manager, &loaded.keys));
-    }
-    let names = names_index(loaded)?;
     flatten_ymap(
         &path,
         &payload,
         system_size,
         &loaded.keys,
         &loaded.manager,
-        cache.as_ref(),
-        names.as_ref(),
+        Some(loaded.mlo_archetypes()),
+        Some(loaded.names()),
     )
-}
-
-/// The entry-basename index, built once per install and kept. The guard is
-/// held so a map read sees the same table without copying it.
-fn names_index<'a>(
-    loaded: &'a Loaded,
-) -> Result<std::sync::MutexGuard<'a, Option<std::collections::HashMap<u32, String>>>, String> {
-    let mut names = loaded.names.lock().map_err(|_| "name index is poisoned")?;
-    if names.is_none() {
-        *names = Some(loaded.manager.index_names());
-    }
-    Ok(names)
 }
 
 /// A standalone `.ymap` on disk, as a mod author distributes one.

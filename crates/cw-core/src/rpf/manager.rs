@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::OnceLock;
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -58,11 +58,16 @@ pub struct RpfManager {
     /// model's textures scans the same folder's dictionaries; without this the
     /// whole archive tree would be walked per model, which is costly when many
     /// stream at once.
-    ytds_by_folder: Mutex<Option<HashMap<String, Vec<String>>>>,
+    ytds_by_folder: OnceLock<HashMap<String, Vec<String>>>,
     /// The best model file for each lowercase basename stem, built once —
     /// `update` copies beat base, `.ydr` beats `.yft` beats `.ydd`. Resolving
     /// an archetype to its asset is then a hash lookup, not a tree walk.
-    asset_index: Mutex<Option<HashMap<String, (u8, u8, String)>>>,
+    ///
+    /// A `OnceLock` rather than a `Mutex<Option<_>>`: readers get a plain
+    /// reference with no guard to hold, so a caller cannot accidentally keep
+    /// the lock across a long read and serialize every other streaming request
+    /// behind itself.
+    asset_index: OnceLock<HashMap<String, (u8, u8, String)>>,
 }
 
 impl RpfManager {
@@ -253,9 +258,8 @@ impl RpfManager {
     }
 
     /// Every `.ytd`'s path grouped by its folder, built once and kept.
-    pub fn ytds(&self) -> MutexGuard<'_, Option<HashMap<String, Vec<String>>>> {
-        let mut guard = self.ytds_by_folder.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
+    pub fn ytds(&self) -> &HashMap<String, Vec<String>> {
+        self.ytds_by_folder.get_or_init(|| {
             let mut by_folder: HashMap<String, Vec<String>> = HashMap::new();
             for archive in &self.archives {
                 for entry in &archive.entries {
@@ -269,9 +273,8 @@ impl RpfManager {
                     by_folder.entry(folder).or_default().push(entry.path.clone());
                 }
             }
-            *guard = Some(by_folder);
-        }
-        guard
+            by_folder
+        })
     }
 
     /// The best model file per lowercase basename stem, built once.
@@ -279,9 +282,8 @@ impl RpfManager {
     /// The value's first two tuple elements mirror `find_model_for`'s
     /// precedence: `update\` copies beat the base game, and `.ydr` beats
     /// `.yft` beats `.ydd`. The path breaks a tie.
-    pub fn assets(&self) -> MutexGuard<'_, Option<HashMap<String, (u8, u8, String)>>> {
-        let mut guard = self.asset_index.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_none() {
+    pub fn assets(&self) -> &HashMap<String, (u8, u8, String)> {
+        self.asset_index.get_or_init(|| {
             let ext_priority = |lower: &str| -> u8 {
                 if lower.ends_with(".ydr") {
                     0
@@ -320,9 +322,8 @@ impl RpfManager {
                     }
                 }
             }
-            *guard = Some(index);
-        }
-        guard
+            index
+        })
     }
 }
 
@@ -449,8 +450,8 @@ mod tests {
             errors: Vec::new(),
             entry_index: HashMap::new(),
             archive_index: HashMap::new(),
-            ytds_by_folder: Mutex::new(None),
-            asset_index: Mutex::new(None),
+            ytds_by_folder: OnceLock::new(),
+            asset_index: OnceLock::new(),
         };
 
         let names = manager.index_names();
@@ -504,12 +505,11 @@ mod tests {
             errors: Vec::new(),
             entry_index: HashMap::new(),
             archive_index: HashMap::new(),
-            ytds_by_folder: Mutex::new(None),
-            asset_index: Mutex::new(None),
+            ytds_by_folder: OnceLock::new(),
+            asset_index: OnceLock::new(),
         };
 
-        let guard = manager.ytds();
-        let by_folder = guard.as_ref().expect("index built");
+        let by_folder = manager.ytds();
         assert_eq!(
             by_folder.get(r"x64\levels").map(|v| v.len()),
             Some(2),
@@ -571,12 +571,11 @@ mod tests {
             errors: Vec::new(),
             entry_index: HashMap::new(),
             archive_index: HashMap::new(),
-            ytds_by_folder: Mutex::new(None),
-            asset_index: Mutex::new(None),
+            ytds_by_folder: OnceLock::new(),
+            asset_index: OnceLock::new(),
         };
 
-        let assets = manager.assets();
-        let index = assets.as_ref().expect("index built");
+        let index = manager.assets();
         let (update_flag, ext, path) = index.get("fence").expect("fence indexed");
         assert_eq!(*update_flag, 0, "the update copy wins");
         assert_eq!(*ext, 0, "and the .ydr over the .yft");

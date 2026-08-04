@@ -657,10 +657,7 @@ fn resolve_model_textures<'a>(
     // `.ytd` belongs to the model's folder when its path is the model's folder
     // plus the file name. The same-basename sibling is visited first, since the
     // reference tries it before falling back to the archetype's dictionary list.
-    let game_guard = game.0.read().ok();
-    let loaded = game_guard.as_ref().and_then(|g| g.as_ref());
-
-    if let Some(loaded) = loaded {
+    if let Some(loaded) = game.try_loaded() {
         let sibling = format!("{folder}\\{basename}.ytd");
         let mut paths: Vec<String> = Vec::new();
         for archive in &loaded.manager.archives {

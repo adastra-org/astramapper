@@ -5,10 +5,11 @@
 //! these commands hand back listings — names, kinds and sizes — and nothing
 //! else. Extraction and per-type viewers come later in phase 2.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
-use cw_core::filetypes::MloArchetype;
+use cw_core::filetypes::{index_mlo_archetypes, MloArchetype};
 use cw_core::rpf::{EntryKind, RpfManager};
 use cw_core::utils::GtaKeys;
 use serde::Serialize;
@@ -26,18 +27,58 @@ pub struct Loaded {
     /// The MLO archetype index, built once when the first interior-bearing map
     /// is placed. Scanning every `.ytyp` is expensive, so it is kept, not
     /// rebuilt per map.
-    pub mlo_archetypes: Mutex<Option<std::collections::HashMap<u32, MloArchetype>>>,
+    mlo_archetypes: OnceLock<HashMap<u32, MloArchetype>>,
     /// Every entry basename keyed by its hash, built once — the table that
     /// turns a `.ymap` archetype hash back into a model name. See
     /// [`RpfManager::index_names`].
-    pub names: Mutex<Option<std::collections::HashMap<u32, String>>>,
+    names: OnceLock<HashMap<u32, String>>,
+}
+
+impl Loaded {
+    /// The MLO archetype index, built on first use.
+    ///
+    /// A `OnceLock` rather than a `Mutex<Option<_>>`: the caller gets a plain
+    /// reference and has no guard to hold, so a long map read cannot serialize
+    /// every other one behind it. Concurrent first calls block until the one
+    /// that won finishes, so the `.ytyp` scan still happens exactly once.
+    pub fn mlo_archetypes(&self) -> &HashMap<u32, MloArchetype> {
+        self.mlo_archetypes
+            .get_or_init(|| index_mlo_archetypes(&self.manager, &self.keys))
+    }
+
+    /// The entry-basename index, built on first use. Same reasoning as
+    /// [`Self::mlo_archetypes`].
+    pub fn names(&self) -> &HashMap<u32, String> {
+        self.names.get_or_init(|| self.manager.index_names())
+    }
 }
 
 /// A `RwLock` rather than a `Mutex`: the world streams many maps and models at
 /// once, and every read of the scanned install must not queue behind the
 /// others. Only opening a new folder takes the write side.
+///
+/// The install is behind an `Arc` so a command can clone it, drop the guard,
+/// and carry it into `spawn_blocking`. A `RwLockReadGuard` is neither `Send`
+/// nor `'static` and cannot cross an `.await`; an `Arc<Loaded>` is both.
 #[derive(Default)]
-pub struct GameState(pub RwLock<Option<Loaded>>);
+pub struct GameState(pub RwLock<Option<Arc<Loaded>>>);
+
+impl GameState {
+    /// The open install, or an error naming why there is none.
+    ///
+    /// Clones the `Arc` and releases the read lock before returning, which is
+    /// what keeps the "no guard crosses an await" rule mechanical rather than
+    /// a thing each command has to remember.
+    pub fn loaded(&self) -> Result<Arc<Loaded>, String> {
+        let guard = self.0.read().map_err(|_| "game state is poisoned")?;
+        guard.clone().ok_or_else(|| "no game folder is open".into())
+    }
+
+    /// The open install, or `None` when no folder is open.
+    pub fn try_loaded(&self) -> Option<Arc<Loaded>> {
+        self.0.read().ok().and_then(|g| g.clone())
+    }
+}
 
 /// What the frontend learns about a freshly opened folder.
 #[derive(Serialize)]
@@ -85,7 +126,7 @@ pub async fn open_game_folder(
         .await
         .map_err(|e| format!("the scan task failed: {e}"))??;
 
-    *state.0.write().map_err(|_| "game state is poisoned")? = Some(loaded);
+    *state.0.write().map_err(|_| "game state is poisoned")? = Some(Arc::new(loaded));
     Ok(summary)
 }
 
@@ -123,8 +164,8 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
             folder: folder.display().to_string(),
             keys,
             manager,
-            mlo_archetypes: Mutex::new(None),
-            names: Mutex::new(None),
+            mlo_archetypes: OnceLock::new(),
+            names: OnceLock::new(),
         },
         summary,
     ))
@@ -133,8 +174,7 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
 /// List a directory. An empty or absent `path` lists the top-level archives.
 #[tauri::command]
 pub fn list_dir(path: Option<String>, state: State<'_, GameState>) -> Result<Vec<Listing>, String> {
-    let guard = state.0.read().map_err(|_| "game state is poisoned")?;
-    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    let loaded = state.loaded()?;
     listing_for(&loaded.manager, &path.unwrap_or_default())
 }
 
