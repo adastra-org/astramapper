@@ -11,17 +11,63 @@
 //!   nothing without it, and the rule from `docs/architecture.md` is that the
 //!   frontend never parses archive data. So positions, normals and texcoords
 //!   come out as plain `f32` arrays and the frontend only uploads them.
-//! - **Buffers cross as base64, not as JSON numbers.** A 60k-vertex drawable is
-//!   about 2 MB of JSON digits versus 700 KB of base64 that decodes straight
-//!   into a `Float32Array`. The channel is the same; the parse on the other side
-//!   is not.
+//! - **Buffers are kept as bytes, and how they cross is the caller's choice.**
+//!   A [`Buffer`] serializes as base64, which is what the Explorer's commands
+//!   send and is still far better than JSON number arrays: a 60k-vertex
+//!   drawable is about 2 MB of digits versus 700 KB of base64. The world view's
+//!   streaming path takes [`Buffer::as_bytes`] instead and puts it in a wire
+//!   envelope section, where it costs nothing at all. Same buffers, two
+//!   transports, one flattening.
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::resources::drawable::{Drawable, DrawableGeometry, Lod};
 use crate::resources::vertex::VertexSemantic;
+
+/// A vertex or index buffer: tightly packed, little-endian, ready to upload.
+///
+/// Serializes as base64 so the JSON commands are unchanged, and hands out its
+/// bytes for the envelope so that path never encodes anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Buffer(Vec<u8>);
+
+impl Buffer {
+    pub fn from_f32(values: &[f32]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Self(bytes)
+    }
+
+    pub fn from_u32(values: &[u32]) -> Self {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl Serialize for Buffer {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(&self.0))
+    }
+}
 
 /// One drawable, ready to render.
 #[derive(Debug, Clone, Serialize)]
@@ -60,14 +106,14 @@ pub struct MeshPart {
     pub specular: Option<u32>,
     pub vertex_count: usize,
     pub triangle_count: usize,
-    /// Base64 of tightly packed `f32` triples.
-    pub positions: String,
-    /// Base64 of `f32` triples, absent when the declaration has no normal.
-    pub normals: Option<String>,
-    /// Base64 of `f32` pairs, absent when the declaration has no texcoord0.
-    pub uvs: Option<String>,
-    /// Base64 of `u32` triples.
-    pub indices: String,
+    /// Tightly packed `f32` triples.
+    pub positions: Buffer,
+    /// `f32` triples, absent when the declaration has no normal.
+    pub normals: Option<Buffer>,
+    /// `f32` pairs, absent when the declaration has no texcoord0.
+    pub uvs: Option<Buffer>,
+    /// `u32` triples.
+    pub indices: Buffer,
 }
 
 impl MeshBundle {
@@ -220,28 +266,32 @@ impl MeshPart {
             specular,
             vertex_count,
             triangle_count: indices.len() / 3,
-            positions: encode_f32(&positions),
-            normals: normals.as_deref().map(encode_f32),
-            uvs: uvs.as_deref().map(encode_f32),
-            indices: encode_u32(&indices),
+            positions: Buffer::from_f32(&positions),
+            normals: normals.as_deref().map(Buffer::from_f32),
+            uvs: uvs.as_deref().map(Buffer::from_f32),
+            indices: Buffer::from_u32(&indices),
         })
     }
-}
 
-fn encode_f32(values: &[f32]) -> String {
-    let mut bytes = Vec::with_capacity(values.len() * 4);
-    for v in values {
-        bytes.extend_from_slice(&v.to_le_bytes());
+    /// The index buffer as the narrowest integer that still addresses every
+    /// vertex, and how wide that is in bits.
+    ///
+    /// `geometry.indices` is already `Vec<u16>` in the parsed drawable and gets
+    /// widened to `u32` on the way out, which doubles roughly a quarter of a
+    /// part's payload for nothing. A part with 65,536 vertices or more genuinely
+    /// needs the width, so the caller records what it got rather than assuming.
+    pub fn narrow_indices(&self) -> (Vec<u8>, u8) {
+        if self.vertex_count > u16::MAX as usize {
+            return (self.indices.as_bytes().to_vec(), 32);
+        }
+        let mut out = Vec::with_capacity(self.indices.len() / 2);
+        for index in self.indices.as_bytes().chunks_exact(4) {
+            // Safe to truncate: every index is below `vertex_count`, which this
+            // branch has already bounded by `u16::MAX`.
+            out.extend_from_slice(&[index[0], index[1]]);
+        }
+        (out, 16)
     }
-    STANDARD.encode(bytes)
-}
-
-fn encode_u32(values: &[u32]) -> String {
-    let mut bytes = Vec::with_capacity(values.len() * 4);
-    for v in values {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    STANDARD.encode(bytes)
 }
 
 #[cfg(test)]
@@ -286,10 +336,9 @@ mod tests {
         }
     }
 
-    fn decode_f32(encoded: &str) -> Vec<f32> {
-        STANDARD
-            .decode(encoded)
-            .unwrap()
+    fn decode_f32(buffer: &Buffer) -> Vec<f32> {
+        buffer
+            .as_bytes()
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
@@ -317,9 +366,9 @@ mod tests {
             vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
         );
 
-        let indices: Vec<u32> = STANDARD
-            .decode(&part.indices)
-            .unwrap()
+        let indices: Vec<u32> = part
+            .indices
+            .as_bytes()
             .chunks_exact(4)
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
