@@ -20,6 +20,7 @@ pub mod resources;
 pub mod rpf;
 pub mod text;
 pub mod utils;
+pub mod wire;
 
 /// Errors raised while reading GTA V data.
 #[derive(Debug, thiserror::Error)]
