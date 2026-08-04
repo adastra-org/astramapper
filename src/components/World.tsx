@@ -1968,7 +1968,12 @@ function resolvePartTextures(
   part: { readonly diffuse: number | null; readonly normal: number | null },
   textures: WorldModel["textures"],
 ): { diffuse: THREE.Texture | null; normal: THREE.Texture | null } {
-  const byHash = new Map(textures.map((texture) => [texture.hash, texture]));
+  // A texture whose section came back empty counts as unresolved, which the
+  // caller already handles by leaving the part flat grey. Better that than a
+  // throw from inside the render setup.
+  const byHash = new Map(
+    textures.filter((texture) => texture.levels.length > 0).map((t) => [t.hash, t]),
+  );
   const diffuse = part.diffuse === null ? null : byHash.get(part.diffuse);
   const normal = part.normal === null ? null : byHash.get(part.normal);
   return {
