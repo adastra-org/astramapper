@@ -15,12 +15,14 @@
 use std::collections::HashMap;
 
 use glam::{Quat, Vec3};
+use rayon::prelude::*;
+use serde::Serialize;
 
 use crate::filetype::FileKind;
 use crate::filetypes::{read_ytyp, Archetype, MloArchetype, MloEntity};
-use crate::meta::typed::LodLevel;
+use crate::meta::typed::{AssetType, LodLevel};
 use crate::meta::{read_meta, MetaFile};
-use crate::rpf::RpfManager;
+use crate::rpf::{EntryRef, RpfManager};
 use crate::utils::GtaKeys;
 
 /// One interior entity, expanded into world space.
@@ -64,46 +66,146 @@ pub fn expand_mlo_entities(
         .collect()
 }
 
-/// Index every MLO archetype in the install by its lookup hash.
+/// What a placed entity's archetype says about the asset behind it.
 ///
-/// The map keys on the archetype's `hash()` — `assetName`, else `name` — the
-/// same value an MLO instance's `archetypeName` carries, so an instance can
-/// find its interior. Reading every `.ytyp` is the expensive part, so callers
-/// build this once per scan and keep it.
-pub fn index_mlo_archetypes(manager: &RpfManager, keys: &GtaKeys) -> HashMap<u32, MloArchetype> {
-    let mut index = HashMap::new();
-    for archive in &manager.archives {
-        for entry in &archive.entries {
-            if !entry.name_lower.ends_with(".ytyp") {
-                continue;
-            }
-            let Some(reference) = manager.find(&entry.path) else {
-                continue;
+/// A `.ymap` entity names an archetype and nothing else; everything about what
+/// to actually load — which model, which texture dictionary, which collision —
+/// lives on the archetype. The reference reaches these through
+/// `GameFileCache.GetArchetype`; this is the same information, flattened, and
+/// deliberately small so indexing all of them costs a few MB rather than
+/// holding every `.ytyp` in memory.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchetypeInfo {
+    pub name: u32,
+    /// The file to load, when it differs from `name`.
+    pub asset_name: u32,
+    pub asset_type: AssetType,
+    /// The `.ydd` holding the model, when it is not a standalone `.ydr`.
+    pub drawable_dictionary: u32,
+    /// The `.ytd` holding the pixels. This is what the reference consults
+    /// before falling back to scanning a folder.
+    pub texture_dictionary: u32,
+    /// The `.ybn` holding the collision bounds.
+    pub physics_dictionary: u32,
+    pub bb_min: [f32; 3],
+    pub bb_max: [f32; 3],
+    pub lod_dist: f32,
+    pub flags: u32,
+    /// True for a `CMloArchetypeDef`, an interior.
+    pub is_mlo: bool,
+}
+
+/// Everything one pass over the install's `.ytyp` files yields.
+///
+/// Both indexes come out of the same pass because reading 2,759 `.ytyp` files
+/// is the expensive part and neither index is worth a second one.
+#[derive(Debug, Default)]
+pub struct ArchetypeIndexes {
+    /// Interiors, keyed as an MLO instance's `archetypeName` refers to them.
+    pub mlo: HashMap<u32, MloArchetype>,
+    /// Every archetype, interiors included, keyed the same way.
+    pub all: HashMap<u32, ArchetypeInfo>,
+}
+
+impl ArchetypeIndexes {
+    fn absorb(&mut self, archetypes: Vec<Archetype>) {
+        for archetype in archetypes {
+            let hash = archetype.hash();
+            let (base, is_mlo) = match &archetype {
+                Archetype::Base(base) => (base, false),
+                Archetype::Time(time) => (&time.base, false),
+                Archetype::Mlo(mlo) => (&mlo.base, true),
             };
-            let Some((system_size, _)) = entry.resource_segments() else {
-                continue;
-            };
-            let Ok(data) = manager.extract(reference, keys) else {
-                continue;
-            };
-            let Ok(meta) = read_meta(FileKind::Meta, &data, Some(system_size)) else {
-                continue;
-            };
-            let ytyp = match meta {
-                MetaFile::Rsc(meta) => read_ytyp(&meta).ok(),
-                _ => None,
-            };
-            let Some(ytyp) = ytyp else {
-                continue;
-            };
-            for archetype in ytyp.archetypes {
-                if let Archetype::Mlo(mlo) = archetype {
-                    index.insert(mlo.base.hash(), mlo);
-                }
+            self.all.insert(
+                hash,
+                ArchetypeInfo {
+                    name: base.name,
+                    asset_name: base.asset_name,
+                    asset_type: base.asset_type,
+                    drawable_dictionary: base.drawable_dictionary,
+                    texture_dictionary: base.texture_dictionary,
+                    physics_dictionary: base.physics_dictionary,
+                    bb_min: base.bb_min,
+                    bb_max: base.bb_max,
+                    lod_dist: base.lod_dist,
+                    flags: base.flags,
+                    is_mlo,
+                },
+            );
+            if let Archetype::Mlo(mlo) = archetype {
+                self.mlo.insert(hash, mlo);
             }
         }
     }
-    index
+
+    fn merge(mut self, other: Self) -> Self {
+        self.mlo.extend(other.mlo);
+        self.all.extend(other.all);
+        self
+    }
+}
+
+/// Index every archetype in the install by its lookup hash.
+///
+/// The map keys on the archetype's `hash()` — `assetName`, else `name` — the
+/// same value a `.ymap` entity's `archetypeName` carries.
+///
+/// Parallel across `.ytyp` files. The reference is serial and so was this;
+/// there are 2,759 of them and reading one tells you nothing about the next,
+/// so the whole pass used to stall the first map that placed an interior. The
+/// fold-then-reduce shape keeps peak memory to one partial index per thread
+/// rather than every file's archetypes at once.
+pub fn index_archetypes(manager: &RpfManager, keys: &GtaKeys) -> ArchetypeIndexes {
+    let refs: Vec<(EntryRef, usize)> = manager
+        .archives
+        .iter()
+        .flat_map(|archive| archive.entries.iter())
+        .filter(|entry| entry.name_lower.ends_with(".ytyp"))
+        .filter_map(|entry| {
+            let reference = manager.find(&entry.path)?;
+            let (system_size, _) = entry.resource_segments()?;
+            Some((reference, system_size))
+        })
+        .collect();
+
+    refs.par_iter()
+        .fold(ArchetypeIndexes::default, |mut acc, (reference, size)| {
+            acc.absorb(read_archetypes(manager, keys, *reference, *size));
+            acc
+        })
+        .reduce(ArchetypeIndexes::default, ArchetypeIndexes::merge)
+}
+
+/// One `.ytyp`'s archetypes, or nothing if it will not read.
+///
+/// A `.ytyp` that fails to extract or parse costs its own archetypes and not
+/// the pass: a modded install with one broken file must still index the other
+/// 2,758.
+fn read_archetypes(
+    manager: &RpfManager,
+    keys: &GtaKeys,
+    reference: EntryRef,
+    system_size: usize,
+) -> Vec<Archetype> {
+    let Ok(data) = manager.extract(reference, keys) else {
+        return Vec::new();
+    };
+    let Ok(meta) = read_meta(FileKind::Meta, &data, Some(system_size)) else {
+        return Vec::new();
+    };
+    match meta {
+        MetaFile::Rsc(meta) => read_ytyp(&meta).map(|y| y.archetypes).unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Index every MLO archetype in the install by its lookup hash.
+///
+/// The interiors half of [`index_archetypes`]. Prefer that when the caller
+/// wants both, since the two share one pass over the `.ytyp` files.
+pub fn index_mlo_archetypes(manager: &RpfManager, keys: &GtaKeys) -> HashMap<u32, MloArchetype> {
+    index_archetypes(manager, keys).mlo
 }
 
 #[cfg(test)]

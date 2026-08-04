@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
-use cw_core::filetypes::{index_mlo_archetypes, MloArchetype};
+use cw_core::filetypes::{index_archetypes, ArchetypeIndexes, MloArchetype};
 use cw_core::rpf::{EntryKind, RpfManager};
 use cw_core::utils::GtaKeys;
 use serde::Serialize;
@@ -24,10 +24,10 @@ pub struct Loaded {
     /// extraction.
     pub keys: GtaKeys,
     pub manager: RpfManager,
-    /// The MLO archetype index, built once when the first interior-bearing map
-    /// is placed. Scanning every `.ytyp` is expensive, so it is kept, not
-    /// rebuilt per map.
-    mlo_archetypes: OnceLock<HashMap<u32, MloArchetype>>,
+    /// The archetype indexes, built once when the first map is placed. Reading
+    /// every `.ytyp` is expensive, so they are kept, not rebuilt per map, and
+    /// both halves come out of the same pass.
+    archetypes: OnceLock<ArchetypeIndexes>,
     /// Every entry basename keyed by its hash, built once — the table that
     /// turns a `.ymap` archetype hash back into a model name. See
     /// [`RpfManager::index_names`].
@@ -35,19 +35,24 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    /// The MLO archetype index, built on first use.
+    /// The archetype indexes, built on first use.
     ///
     /// A `OnceLock` rather than a `Mutex<Option<_>>`: the caller gets a plain
     /// reference and has no guard to hold, so a long map read cannot serialize
     /// every other one behind it. Concurrent first calls block until the one
     /// that won finishes, so the `.ytyp` scan still happens exactly once.
+    pub fn archetypes(&self) -> &ArchetypeIndexes {
+        self.archetypes
+            .get_or_init(|| index_archetypes(&self.manager, &self.keys))
+    }
+
+    /// The interiors half of [`Self::archetypes`].
     pub fn mlo_archetypes(&self) -> &HashMap<u32, MloArchetype> {
-        self.mlo_archetypes
-            .get_or_init(|| index_mlo_archetypes(&self.manager, &self.keys))
+        &self.archetypes().mlo
     }
 
     /// The entry-basename index, built on first use. Same reasoning as
-    /// [`Self::mlo_archetypes`].
+    /// [`Self::archetypes`].
     pub fn names(&self) -> &HashMap<u32, String> {
         self.names.get_or_init(|| self.manager.index_names())
     }
@@ -164,7 +169,7 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
             folder: folder.display().to_string(),
             keys,
             manager,
-            mlo_archetypes: OnceLock::new(),
+            archetypes: OnceLock::new(),
             names: OnceLock::new(),
         },
         summary,

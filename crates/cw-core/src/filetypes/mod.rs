@@ -15,7 +15,10 @@ pub mod mlo;
 pub mod ymap;
 pub mod ytyp;
 
-pub use mlo::{expand_mlo_entities, index_mlo_archetypes, MloWorldEntity};
+pub use mlo::{
+    expand_mlo_entities, index_archetypes, index_mlo_archetypes, ArchetypeIndexes, ArchetypeInfo,
+    MloWorldEntity,
+};
 pub use ymap::{read_ymap, DistantLodLights, Entity, GrassBatch, LodLights, YmapFile};
 pub use ytyp::{
     read_ytyp, Archetype, BaseArchetype, Extension, MloArchetype, MloEntity, MloEntitySetData,
