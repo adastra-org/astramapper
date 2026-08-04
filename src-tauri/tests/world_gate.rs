@@ -122,7 +122,7 @@ fn reads_a_ymap_into_world_placements() {
         })
         .expect("the install should have a city map");
 
-    let map = read_world_map(candidate, &keys, &manager, None).expect("read the map");
+    let map = read_world_map(candidate, &keys, &manager, None, None).expect("read the map");
     assert!(map.entity_count > 0, "{} places nothing", map.path);
 
     let hd = map.entities.iter().filter(|e| e.lod_level == "HD").count();
@@ -162,7 +162,7 @@ fn expands_an_mlo_instances_interior_into_the_world() {
         .flat_map(|a| a.entries.iter())
         .map(|e| &e.path)
         .filter(|p| p.ends_with(".ymap") && p.contains(r"\levels\gta5\_city"))
-        .filter_map(|p| read_world_map(p, &keys, &manager, None).ok())
+        .filter_map(|p| read_world_map(p, &keys, &manager, None, None).ok())
         .find(|m| m.mlo_expanded > 0)
         .expect("a city map with MLO interiors");
 
@@ -212,7 +212,7 @@ fn streams_an_entitys_archetype_to_real_geometry() {
         .map(|e| &e.path)
         .find(|p| p.ends_with(".ymap") && p.contains(r"\levels\gta5\_city"))
         .expect("the install should have a city map");
-    let map = read_world_map(candidate, &keys, &manager, None).expect("read the map");
+    let map = read_world_map(candidate, &keys, &manager, None, None).expect("read the map");
 
     // Take the first entity whose archetype resolved to a real name; only those
     // can name a file on disk.

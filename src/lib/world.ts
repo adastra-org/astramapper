@@ -84,8 +84,33 @@ export function worldDlcYmaps(group: string): Promise<YmapListingPage> {
   return invoke<YmapListingPage>("world_dlc_ymaps", { group });
 }
 
+/** Every `.ymap` in a content group, uncapped — for loading a whole group. */
+export function worldMapsInGroup(group: string): Promise<readonly YmapListing[]> {
+  return invoke<YmapListing[]>("world_maps_in_group", { group });
+}
+
+/** Parsed maps kept for the session, so re-entering World (or re-placing the
+ *  same map) skips the backend parse entirely. Maps are immutable by contract —
+ *  edits live separately — so sharing the object is safe. */
+const mapCache = new Map<string, WorldMap>();
+
+/** Drop the parsed-map cache — called when the mounted game folder changes. */
+export function clearWorldCaches(): void {
+  mapCache.clear();
+}
+
 export function worldMap(path: string): Promise<WorldMap> {
-  return invoke<WorldMap>("world_map", { path });
+  const cached = mapCache.get(path);
+  if (cached) return Promise.resolve(cached);
+  return invoke<WorldMap>("world_map", { path }).then((map) => {
+    mapCache.set(path, map);
+    return map;
+  });
+}
+
+/** Place a `.ymap` the user picked from disk, custom/mod maps included. */
+export function worldMapFile(path: string): Promise<WorldMap> {
+  return invoke<WorldMap>("world_map_file", { path });
 }
 
 /** Resolve an archetype name to a model file, or `null` when there is none. */
@@ -351,18 +376,21 @@ export type RegionEntry = {
   readonly placements: readonly Placed[];
 };
 
-/** How far out an entity's geometry streams, by its placement LOD tier. */
+/** How far out an entity's geometry streams, by its placement LOD tier.
+ *  The factors are generous so a whole neighbourhood fills in around the
+ *  camera, not just a handful of nearby models — the LOD swap keeps the far
+ *  ones cheap. */
 export function entityStreamRadius(entity: Placed): number {
   const base = Math.max(entity.lodDist, 50);
   switch (entity.lodLevel) {
     case "ORPHAN_HD":
-      return base * 1.5;
+      return base * 4;
     case "HD":
-      return base * 3;
+      return base * 7;
     case "LOD":
-      return base * 6;
+      return base * 14;
     default:
-      return base * 9;
+      return base * 20;
   }
 }
 
@@ -386,13 +414,14 @@ export function streamingDecision(
   const unload: string[] = [];
 
   for (const entry of entries) {
+    // The map's footprint decides in-range, not its height: a camera overhead
+    // still streams what is below it, and the per-entity radius governs how
+    // far out geometry actually loads.
     const inRange =
       cameraGta[0] >= entry.extentsMin[0] - STREAM_REGION_MARGIN &&
       cameraGta[0] <= entry.extentsMax[0] + STREAM_REGION_MARGIN &&
       cameraGta[1] >= entry.extentsMin[1] - STREAM_REGION_MARGIN &&
-      cameraGta[1] <= entry.extentsMax[1] + STREAM_REGION_MARGIN &&
-      cameraGta[2] >= entry.extentsMin[2] - STREAM_REGION_MARGIN &&
-      cameraGta[2] <= entry.extentsMax[2] + STREAM_REGION_MARGIN;
+      cameraGta[1] <= entry.extentsMax[1] + STREAM_REGION_MARGIN;
 
     for (const placement of entry.placements) {
       const key = keyFor(entry.key, placement.index);

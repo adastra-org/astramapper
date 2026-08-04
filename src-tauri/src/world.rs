@@ -24,12 +24,12 @@ use cw_core::image;
 use cw_core::mesh::MeshBundle;
 use cw_core::meta::{read_meta as read_metadata, LodLevel, MetaFile};
 use cw_core::resources::{read_named_drawables, read_named_fragments, TextureDictionary};
-use cw_core::rpf::RpfManager;
+use cw_core::rpf::{size_from_flags, RpfManager};
 use cw_core::utils::{hash_string, GtaKeys};
 use serde::Serialize;
 use tauri::State;
 
-use crate::explorer::GameState;
+use crate::explorer::{GameState, Loaded};
 use crate::viewer::{ModelDrawable, ModelPreview, ModelTexture, ViewerState};
 
 /// How many `.ymap` files one group listing hands over. A city group can name
@@ -209,57 +209,28 @@ pub fn ymaps_in_group(manager: &RpfManager, group: &str) -> Vec<(String, String)
 /// The best model file for an archetype name, or `None`.
 ///
 /// A placed entity names its archetype; the engine loads that archetype's
-/// `assetName`, which is a file in the archives. This finds it: a `.ydr`,
-/// `.yft` or `.ydd` whose basename matches the resolved name, preferring a
-/// `update\` copy over the base game the way the reference's content precedence
-/// does, and a `.ydr` over a `.yft` over a `.ydd`. Names the name table cannot
-/// resolve (`hash_XXXXXXXX`) have no file to find. Pure of Tauri state so the
-/// gate can drive it against a real scan; see `tests/world_gate.rs`.
+/// `assetName`, which is a file in the archives. The `RpfManager` keeps a
+/// per-stem asset index (see [`RpfManager::assets`]) that prefers an `update\`
+/// copy over the base game and a `.ydr` over a `.yft` over a `.ydd`, so this
+/// is a lookup rather than a tree walk. Names the name table cannot resolve
+/// (`hash_XXXXXXXX`) have no file to find. Pure of Tauri state so the gate can
+/// drive it against a real scan; see `tests/world_gate.rs`.
 pub fn find_model_for(manager: &RpfManager, name: &str) -> Option<String> {
     let needle = name.trim().to_lowercase();
     if needle.is_empty() || needle.starts_with("hash_") {
         return None;
     }
-    let ext_priority = |lower: &str| -> u8 {
-        if lower.ends_with(".ydr") {
-            0
-        } else if lower.ends_with(".yft") {
-            1
-        } else {
-            2
-        }
-    };
-    // A lower `candidate` tuple wins: `update` beats base, a `.ydr` beats a
-    // `.yft`, then the path breaks the tie.
-    let mut best: Option<(u8, u8, &str)> = None;
-    for archive in &manager.archives {
-        for entry in &archive.entries {
-            let lower = &entry.name_lower;
-            if !(lower.ends_with(".ydr") || lower.ends_with(".yft") || lower.ends_with(".ydd")) {
-                continue;
-            }
-            let basename = lower.rsplit('\\').next().unwrap_or(lower);
-            let stem = &basename[..basename.len().saturating_sub(4)];
-            if stem != needle {
-                continue;
-            }
-            let candidate = (
-                u8::from(!lower.starts_with("update\\")),
-                ext_priority(lower),
-                entry.path.as_str(),
-            );
-            if best.is_none_or(|current| candidate < current) {
-                best = Some(candidate);
-            }
-        }
-    }
-    best.map(|(_, _, path)| path.to_string())
+    manager
+        .assets()
+        .as_ref()?
+        .get(&needle)
+        .map(|(_, _, path)| path.clone())
 }
 
 /// Resolve an archetype name to a model file, for the world view to draw.
 #[tauri::command]
 pub fn world_asset(name: String, game: State<'_, GameState>) -> Result<Option<String>, String> {
-    let guard = game.0.lock().map_err(|_| "game state is poisoned")?;
+    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
     let loaded = guard.as_ref().ok_or("no game folder is open")?;
     Ok(find_model_for(&loaded.manager, &name))
 }
@@ -350,8 +321,13 @@ pub fn read_world_model(
     })
 }
 
-/// Resolve a model's texture hashes against its embedded dictionaries and its
-/// sibling `.ytd`, decoding each hit to a PNG for the WebView.
+/// Resolve a model's texture hashes into PNGs for the WebView.
+///
+/// The drawables' embedded dictionaries come first, then a `.ytd` sharing the
+/// model's basename, then every `.ytd` in the same folder — the chain the
+/// Explorer uses. Most stock drawables carry no embedded dictionary and the
+/// pixels live in same-folder `.ytd` files the archetype loads, so the folder
+/// scan is what usually lands; without it streamed models render flat grey.
 fn resolve_world_textures(
     path: &str,
     wanted: &std::collections::BTreeSet<u32>,
@@ -373,23 +349,53 @@ fn resolve_world_textures(
     }
 
     if by_hash.len() < wanted.len() {
-        if let Some(sibling) = sibling_texture_path(path) {
-            if let Some(reference) = manager.find(&sibling) {
-                let entry = manager.entry(reference);
-                if let Some((system_size, _)) = entry.resource_segments() {
-                    if let Ok(data) = manager.extract(reference, keys) {
-                        if let Ok(dictionary) =
-                            cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
-                        {
-                            resolve_from_dictionary(
-                                &dictionary,
-                                wanted,
-                                &mut by_hash,
-                                Some(sibling.as_str()),
-                            );
-                        }
-                    }
+        // The model's folder and stem, for the sibling and folder scans.
+        let (folder, basename) = match path.rsplit_once('\\') {
+            Some((folder, name)) => {
+                let stem = name
+                    .strip_suffix(".ydr")
+                    .or_else(|| name.strip_suffix(".yft"))
+                    .or_else(|| name.strip_suffix(".ydd"))
+                    .unwrap_or(name);
+                (folder, stem)
+            }
+            None => ("", path),
+        };
+
+        // Every `.ytd` in the model's folder, the same-basename sibling first —
+        // the reference tries it before the archetype's dictionary list. The
+        // folder index is scanned once per install, not per model.
+        let sibling = format!("{folder}\\{basename}.ytd");
+        let mut paths: Vec<String> = manager
+            .ytds()
+            .as_ref()
+            .and_then(|by_folder| by_folder.get(folder))
+            .cloned()
+            .unwrap_or_default();
+        paths.sort_by_key(|p| *p != sibling);
+
+        for ytd_path in paths {
+            let Some(reference) = manager.find(&ytd_path) else {
+                continue;
+            };
+            let entry = manager.entry(reference);
+            let Some((system_size, _)) = entry.resource_segments() else {
+                continue;
+            };
+            if let Ok(data) = manager.extract(reference, keys) {
+                if let Ok(dictionary) =
+                    cw_core::resources::read_textures(FileKind::Texture, &data, system_size)
+                {
+                    resolve_from_dictionary(
+                        &dictionary,
+                        wanted,
+                        &mut by_hash,
+                        Some(ytd_path.as_str()),
+                    );
                 }
+            }
+            if by_hash.len() == wanted.len() {
+                break;
             }
         }
     }
@@ -434,27 +440,9 @@ fn resolve_from_dictionary(
     }
 }
 
-/// The `.ytd` that shares a model's folder and basename, if the path has a
-/// basename worth matching.
-fn sibling_texture_path(path: &str) -> Option<String> {
-    let (folder, basename) = match path.rsplit_once('\\') {
-        Some((folder, name)) => (folder, name),
-        None => ("", path),
-    };
-    let stem = basename
-        .strip_suffix(".ydr")
-        .or_else(|| basename.strip_suffix(".yft"))
-        .or_else(|| basename.strip_suffix(".ydd"))?;
-    Some(if folder.is_empty() {
-        format!("{stem}.ytd")
-    } else {
-        format!("{folder}\\{stem}.ytd")
-    })
-}
-
 #[tauri::command]
 pub fn world_model(path: String, game: State<'_, GameState>) -> Result<ModelPreview, String> {
-    let guard = game.0.lock().map_err(|_| "game state is poisoned")?;
+    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
     let loaded = guard.as_ref().ok_or("no game folder is open")?;
     read_world_model(&path, &loaded.keys, &loaded.manager)
 }
@@ -480,7 +468,7 @@ pub fn world_status(
     game: State<'_, GameState>,
     viewer: State<'_, ViewerState>,
 ) -> Result<WorldStatus, String> {
-    let game_guard = game.0.lock().map_err(|_| "game state is poisoned")?;
+    let game_guard = game.0.read().map_err(|_| "game state is poisoned")?;
     let open_map_path = viewer
         .0
         .lock()
@@ -512,7 +500,7 @@ pub fn world_dlc_ymaps(
     group: String,
     game: State<'_, GameState>,
 ) -> Result<YmapListingPage, String> {
-    let guard = game.0.lock().map_err(|_| "game state is poisoned")?;
+    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
     let loaded = guard.as_ref().ok_or("no game folder is open")?;
 
     let all = ymaps_in_group(&loaded.manager, &group);
@@ -526,6 +514,22 @@ pub fn world_dlc_ymaps(
     Ok(YmapListingPage { total, ymaps })
 }
 
+/// Every `.ymap` in one content group, uncapped. The sidebar page caps at
+/// `MAX_YMAPS_PER_GROUP`; loading a whole group (the base game, say) wants the
+/// full list.
+#[tauri::command]
+pub fn world_maps_in_group(
+    group: String,
+    game: State<'_, GameState>,
+) -> Result<Vec<YmapListing>, String> {
+    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
+    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+    Ok(ymaps_in_group(&loaded.manager, &group)
+        .into_iter()
+        .map(|(path, name)| YmapListing { path, name })
+        .collect())
+}
+
 /// Read one `.ymap` by archive path into flattened world placements.
 ///
 /// Reads past the viewer's one-open-file state on purpose — see the module
@@ -533,7 +537,7 @@ pub fn world_dlc_ymaps(
 /// open.
 #[tauri::command]
 pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
-    let guard = game.0.lock().map_err(|_| "game state is poisoned")?;
+    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
     let loaded = guard.as_ref().ok_or("no game folder is open")?;
 
     // The MLO archetype index is built once and kept: scanning every `.ytyp`
@@ -545,7 +549,72 @@ pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, S
     if cache.is_none() {
         *cache = Some(index_mlo_archetypes(&loaded.manager, &loaded.keys));
     }
-    read_world_map(&path, &loaded.keys, &loaded.manager, cache.as_ref())
+    let names = names_index(loaded)?;
+    read_world_map(
+        &path,
+        &loaded.keys,
+        &loaded.manager,
+        cache.as_ref(),
+        names.as_ref(),
+    )
+}
+
+/// Place a `.ymap` the user picked from disk, whether or not the install's
+/// index knows it — a custom/mod map. Reads the payload off the filesystem and
+/// shares the flattening with `read_world_map`.
+#[tauri::command]
+pub fn world_map_file(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
+    let guard = game.0.read().map_err(|_| "game state is poisoned")?;
+    let loaded = guard.as_ref().ok_or("no game folder is open")?;
+
+    let raw = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let (payload, system_size) = loose_ymap_payload(&raw);
+
+    let mut cache = loaded
+        .mlo_archetypes
+        .lock()
+        .map_err(|_| "mlo index is poisoned")?;
+    if cache.is_none() {
+        *cache = Some(index_mlo_archetypes(&loaded.manager, &loaded.keys));
+    }
+    let names = names_index(loaded)?;
+    flatten_ymap(
+        &path,
+        &payload,
+        system_size,
+        &loaded.keys,
+        &loaded.manager,
+        cache.as_ref(),
+        names.as_ref(),
+    )
+}
+
+/// The entry-basename index, built once per install and kept. The guard is
+/// held so a map read sees the same table without copying it.
+fn names_index<'a>(
+    loaded: &'a Loaded,
+) -> Result<std::sync::MutexGuard<'a, Option<std::collections::HashMap<u32, String>>>, String> {
+    let mut names = loaded.names.lock().map_err(|_| "name index is poisoned")?;
+    if names.is_none() {
+        *names = Some(loaded.manager.index_names());
+    }
+    Ok(names)
+}
+
+/// A standalone `.ymap` on disk, as a mod author distributes one.
+///
+/// A resource payload may carry its 16-byte RSC7 header (the form OpenIV and
+/// the reference export); when it does, the system segment size comes from the
+/// header's system flags and the header is trimmed. Without the header, the
+/// whole payload is one system segment — the reference's fallback for a bare
+/// resource file.
+fn loose_ymap_payload(data: &[u8]) -> (Vec<u8>, usize) {
+    if data.len() >= 16 && &data[..4] == b"RSC7" {
+        let system_flags = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        (data[16..].to_vec(), size_from_flags(system_flags) as usize)
+    } else {
+        (data.to_vec(), data.len())
+    }
 }
 
 /// The placement read itself, free of Tauri state so the gate can drive it
@@ -553,12 +622,14 @@ pub fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, S
 ///
 /// `mlo_index` resolves each MLO instance to its archetype's interior. When
 /// `None`, one is built from the manager on the spot — convenient for the
-/// gate; the app command passes its cached index.
+/// gate; the app command passes its cached index. `names` resolves an
+/// archetype hash back to its model name; `None` falls back to the meta table.
 pub fn read_world_map(
     path: &str,
     keys: &GtaKeys,
     manager: &RpfManager,
     mlo_index: Option<&std::collections::HashMap<u32, MloArchetype>>,
+    names: Option<&std::collections::HashMap<u32, String>>,
 ) -> Result<WorldMap, String> {
     let entry_ref = manager
         .find(path)
@@ -575,7 +646,25 @@ pub fn read_world_map(
         .extract(entry_ref, keys)
         .map_err(|e| format!("could not read {path}: {e}"))?;
 
-    let meta = read_metadata(FileKind::Meta, &data, Some(system_size))
+    flatten_ymap(path, &data, system_size, keys, manager, mlo_index, names)
+}
+
+/// Flatten a `.ymap` payload into world placements — the part `read_world_map`
+/// and the standalone-file read (`world_map_file`) share.
+///
+/// `data` is the payload the manager hands out (the 16-byte RSC7 header already
+/// stripped) and `system_size` its system segment length; a standalone file is
+/// prepared the same way by `loose_ymap_payload`.
+pub fn flatten_ymap(
+    path: &str,
+    data: &[u8],
+    system_size: usize,
+    keys: &GtaKeys,
+    manager: &RpfManager,
+    mlo_index: Option<&std::collections::HashMap<u32, MloArchetype>>,
+    names: Option<&std::collections::HashMap<u32, String>>,
+) -> Result<WorldMap, String> {
+    let meta = read_metadata(FileKind::Meta, data, Some(system_size))
         .map_err(|e| format!("could not read the metadata: {e}"))?;
     let ymap = match &meta {
         MetaFile::Rsc(meta) => read_ymap(meta).map_err(|e| format!("{e}"))?,
@@ -588,7 +677,7 @@ pub fn read_world_map(
         .enumerate()
         .map(|(index, entity)| WorldEntity {
             index,
-            name: hash_string(entity.def.archetype_name),
+            name: name_for(entity.def.archetype_name, names),
             name_hash: entity.def.archetype_name,
             is_mlo: entity.is_mlo,
             from_mlo: false,
@@ -633,7 +722,7 @@ pub fn read_world_map(
         for entity in &expanded {
             entities.push(WorldEntity {
                 index: entities.len(),
-                name: hash_string(entity.archetype_name),
+                name: name_for(entity.archetype_name, names),
                 name_hash: entity.archetype_name,
                 is_mlo: false,
                 from_mlo: true,
@@ -650,18 +739,46 @@ pub fn read_world_map(
         mlo_expanded += expanded.len();
     }
 
+    // The streamer keys off these extents, and many files declare degenerate
+    // (zero) ones — the box the placements actually live in is what should
+    // decide whether the map streams.
+    let mut extents_min = [f32::INFINITY; 3];
+    let mut extents_max = [f32::NEG_INFINITY; 3];
+    for entity in &entities {
+        for axis in 0..3 {
+            extents_min[axis] = extents_min[axis].min(entity.position[axis]);
+            extents_max[axis] = extents_max[axis].max(entity.position[axis]);
+        }
+    }
+    // A map with no placements streams nothing, so the degenerate box is fine.
+    if entities.is_empty() {
+        extents_min = ymap.entities_extents_min;
+        extents_max = ymap.entities_extents_max;
+    }
+
     Ok(WorldMap {
         path: path.to_string(),
-        name: hash_string(ymap.name),
+        name: name_for(ymap.name, names),
         name_hash: ymap.name,
         parent: hash_string(ymap.parent),
         entity_count: ymap.entities.len(),
         mlo_entities: ymap.mlo_entities.len(),
-        extents_min: ymap.entities_extents_min,
-        extents_max: ymap.entities_extents_max,
+        extents_min,
+        extents_max,
         entities,
         mlo_expanded,
     })
+}
+
+/// Resolve a hash to its asset name. The entry-basename index is what the
+/// archives actually name (a prop's archetype hash is the hash of its model's
+/// basename); the static meta table is the fallback when the archives do not
+/// know it.
+fn name_for(hash: u32, names: Option<&std::collections::HashMap<u32, String>>) -> String {
+    names
+        .and_then(|index| index.get(&hash))
+        .cloned()
+        .unwrap_or_else(|| hash_string(hash))
 }
 
 fn lod_level_label(level: LodLevel) -> String {
@@ -703,5 +820,24 @@ mod tests {
     fn groups_anything_else_by_directory() {
         assert_eq!(group_key(r"update\update.rpf"), "update");
         assert_eq!(group_key(r"update\x64\dlc.rpf"), "update");
+    }
+
+    #[test]
+    fn strips_an_rsc7_header_for_its_system_size() {
+        let mut raw = vec![0u8; 16 + 8192];
+        raw[..4].copy_from_slice(b"RSC7");
+        // 0x0800_0004 decodes to 8192 bytes (see cw-core's size_from_flags).
+        raw[8..12].copy_from_slice(&0x0800_0004u32.to_le_bytes());
+        let (payload, system) = loose_ymap_payload(&raw);
+        assert_eq!(system, 8192);
+        assert_eq!(payload.len(), 8192);
+    }
+
+    #[test]
+    fn treats_a_headerless_payload_as_one_system_segment() {
+        let raw = vec![7u8; 512];
+        let (payload, system) = loose_ymap_payload(&raw);
+        assert_eq!(payload.len(), 512);
+        assert_eq!(system, 512);
     }
 }

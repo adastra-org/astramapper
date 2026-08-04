@@ -338,7 +338,7 @@ describe("entityStreamRadius", () => {
   });
 
   test("floors a degenerate LOD distance", () => {
-    expect(entityStreamRadius({ ...entryFixture, lodDist: 0 })).toBe(50 * 3);
+    expect(entityStreamRadius({ ...entryFixture, lodDist: 0 })).toBe(50 * 7);
   });
 });
 
@@ -357,8 +357,8 @@ describe("streamingDecision", () => {
   });
 
   test("unloads entities beyond their radius with hysteresis", () => {
-    const entries = [region("m1", [placedAt("m1", 0, 1000)])];
-    // 1000 is well beyond HD radius * 1.5 (450).
+    const entries = [region("m1", [placedAt("m1", 0, 2000)])];
+    // 2000 is well beyond HD radius * 1.5 (700 * 1.5 = 1050).
     const decision = streamingDecision([0, 0, 0], entries, new Set(["m1:0"]), new Set(), 4);
     expect(decision.unload).toEqual(["m1:0"]);
   });

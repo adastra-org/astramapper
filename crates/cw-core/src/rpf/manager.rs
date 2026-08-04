@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -53,6 +54,15 @@ pub struct RpfManager {
     /// the same string as the `.rpf` entry that contains it, which is what lets
     /// a directory listing step from one into the other.
     archive_index: HashMap<String, usize>,
+    /// Every `.ytd`'s path grouped by its folder, built once. Resolving a
+    /// model's textures scans the same folder's dictionaries; without this the
+    /// whole archive tree would be walked per model, which is costly when many
+    /// stream at once.
+    ytds_by_folder: Mutex<Option<HashMap<String, Vec<String>>>>,
+    /// The best model file for each lowercase basename stem, built once —
+    /// `update` copies beat base, `.ydr` beats `.yft` beats `.ydd`. Resolving
+    /// an archetype to its asset is then a hash lookup, not a tree walk.
+    asset_index: Mutex<Option<HashMap<String, (u8, u8, String)>>>,
 }
 
 impl RpfManager {
@@ -210,6 +220,110 @@ impl RpfManager {
         let archive = &self.archives[r.archive];
         archive.extract(&archive.entries[r.entry], keys)
     }
+
+    /// Every entry's basename keyed by its Jenkins hash.
+    ///
+    /// Port of CodeWalker's `BuildBaseJenkIndex`: a `.ymap` archetype hash is
+    /// the Jenkins hash of the archetype's name, and that name is the model's
+    /// basename — so hashing every archive entry's stem builds the table that
+    /// turns an entity's archetype hash back into `prop_bin_04a`. Both the
+    /// original case and the lowercase form are registered, since a hash made
+    /// from the original case and one from the lowercase differ.
+    pub fn index_names(&self) -> HashMap<u32, String> {
+        let mut names: HashMap<u32, String> = HashMap::new();
+        let register = |names: &mut HashMap<u32, String>, basename: &str| {
+            let stem = match basename.rfind('.') {
+                Some(dot) => &basename[..dot],
+                None => basename,
+            };
+            if stem.is_empty() {
+                return;
+            }
+            names
+                .entry(crate::utils::gen_hash(stem))
+                .or_insert_with(|| stem.to_string());
+        };
+        for archive in &self.archives {
+            for entry in &archive.entries {
+                register(&mut names, &entry.name);
+                register(&mut names, &entry.name_lower);
+            }
+        }
+        names
+    }
+
+    /// Every `.ytd`'s path grouped by its folder, built once and kept.
+    pub fn ytds(&self) -> MutexGuard<'_, Option<HashMap<String, Vec<String>>>> {
+        let mut guard = self.ytds_by_folder.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            let mut by_folder: HashMap<String, Vec<String>> = HashMap::new();
+            for archive in &self.archives {
+                for entry in &archive.entries {
+                    if !entry.name_lower.ends_with(".ytd") {
+                        continue;
+                    }
+                    let folder = match entry.path.rsplit_once('\\') {
+                        Some((folder, _)) => folder.to_string(),
+                        None => String::new(),
+                    };
+                    by_folder.entry(folder).or_default().push(entry.path.clone());
+                }
+            }
+            *guard = Some(by_folder);
+        }
+        guard
+    }
+
+    /// The best model file per lowercase basename stem, built once.
+    ///
+    /// The value's first two tuple elements mirror `find_model_for`'s
+    /// precedence: `update\` copies beat the base game, and `.ydr` beats
+    /// `.yft` beats `.ydd`. The path breaks a tie.
+    pub fn assets(&self) -> MutexGuard<'_, Option<HashMap<String, (u8, u8, String)>>> {
+        let mut guard = self.asset_index.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            let ext_priority = |lower: &str| -> u8 {
+                if lower.ends_with(".ydr") {
+                    0
+                } else if lower.ends_with(".yft") {
+                    1
+                } else {
+                    2
+                }
+            };
+            let mut index: HashMap<String, (u8, u8, String)> = HashMap::new();
+            for archive in &self.archives {
+                for entry in &archive.entries {
+                    let lower = &entry.name_lower;
+                    if !(lower.ends_with(".ydr")
+                        || lower.ends_with(".yft")
+                        || lower.ends_with(".ydd"))
+                    {
+                        continue;
+                    }
+                    let stem = &lower[..lower.len().saturating_sub(4)];
+                    if stem.is_empty() {
+                        continue;
+                    }
+                    // `name_lower` is the basename; the `update\` precedence
+                    // lives in the full path, so the two are read apart.
+                    let candidate = (
+                        u8::from(!entry.path.starts_with("update\\")),
+                        ext_priority(lower),
+                        entry.path.clone(),
+                    );
+                    let keep = index
+                        .get(stem)
+                        .is_some_and(|existing| existing < &candidate);
+                    if !keep {
+                        index.insert(stem.to_string(), candidate);
+                    }
+                }
+            }
+            *guard = Some(index);
+        }
+        guard
+    }
 }
 
 /// Accept both separators and fold case, so a path from the frontend matches
@@ -291,5 +405,182 @@ mod tests {
         let mut out = Vec::new();
         collect_rpf_paths(Path::new("astramapper-does-not-exist"), &mut out).unwrap();
         assert!(out.is_empty());
+    }
+
+    /// The name index keys an entry's stem by its Jenkins hash, in both the
+    /// original case and the lowercase form.
+    #[test]
+    fn indexes_entry_basenames_by_hash() {
+        use crate::rpf::entry::{BinaryEntry, EntryKind, RpfEncryption, RpfEntry};
+        use crate::rpf::file::RpfFile;
+
+        let entry = |name: &str| RpfEntry {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            name_offset: 0,
+            path: name.to_lowercase(),
+            parent: None,
+            h1: 0,
+            h2: 0,
+            kind: EntryKind::Binary(BinaryEntry {
+                file_offset: 0,
+                file_size: 0,
+                uncompressed_size: 0,
+                encrypted: false,
+            }),
+        };
+        let manager = RpfManager {
+            folder: PathBuf::new(),
+            archives: vec![RpfFile {
+                name: "dlc.rpf".into(),
+                name_lower: "dlc.rpf".into(),
+                path: "dlc.rpf".into(),
+                physical_path: PathBuf::new(),
+                file_size: 0,
+                start_pos: 0,
+                version: 7,
+                entry_count: 2,
+                names_length: 0,
+                encryption: RpfEncryption::None,
+                entries: vec![entry("prop_bin_04a.ydr"), entry("td_prop_ground_01.yft")],
+                children: Vec::new(),
+            }],
+            archive_parent: vec![None],
+            errors: Vec::new(),
+            entry_index: HashMap::new(),
+            archive_index: HashMap::new(),
+            ytds_by_folder: Mutex::new(None),
+            asset_index: Mutex::new(None),
+        };
+
+        let names = manager.index_names();
+        assert_eq!(names.get(&crate::utils::gen_hash("prop_bin_04a")), Some(&"prop_bin_04a".to_string()));
+        assert_eq!(names.get(&crate::utils::gen_hash("td_prop_ground_01")), Some(&"td_prop_ground_01".to_string()));
+        assert_eq!(names.get(&crate::utils::gen_hash("prop_bin_04a.ydr")), None);
+    }
+
+    /// The `.ytd` folder index groups dictionaries by their containing folder.
+    #[test]
+    fn groups_ytds_by_folder() {
+        use crate::rpf::entry::{BinaryEntry, EntryKind, RpfEncryption, RpfEntry};
+        use crate::rpf::file::RpfFile;
+
+        let entry = |name: &str, path: &str| RpfEntry {
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            name_offset: 0,
+            path: path.to_string(),
+            parent: None,
+            h1: 0,
+            h2: 0,
+            kind: EntryKind::Binary(BinaryEntry {
+                file_offset: 0,
+                file_size: 0,
+                uncompressed_size: 0,
+                encrypted: false,
+            }),
+        };
+        let manager = RpfManager {
+            folder: PathBuf::new(),
+            archives: vec![RpfFile {
+                name: "dlc.rpf".into(),
+                name_lower: "dlc.rpf".into(),
+                path: "dlc.rpf".into(),
+                physical_path: PathBuf::new(),
+                file_size: 0,
+                start_pos: 0,
+                version: 7,
+                entry_count: 3,
+                names_length: 0,
+                encryption: RpfEncryption::None,
+                entries: vec![
+                    entry("a.ytd", r"x64\levels\a.ytd"),
+                    entry("b.ytd", r"x64\levels\b.ytd"),
+                    entry("c.ytd", r"update\x64\c.ytd"),
+                ],
+                children: Vec::new(),
+            }],
+            archive_parent: vec![None],
+            errors: Vec::new(),
+            entry_index: HashMap::new(),
+            archive_index: HashMap::new(),
+            ytds_by_folder: Mutex::new(None),
+            asset_index: Mutex::new(None),
+        };
+
+        let guard = manager.ytds();
+        let by_folder = guard.as_ref().expect("index built");
+        assert_eq!(
+            by_folder.get(r"x64\levels").map(|v| v.len()),
+            Some(2),
+            "the folder should hold both dictionaries"
+        );
+        assert_eq!(
+            by_folder.get(r"update\x64").map(|v| v.len()),
+            Some(1)
+        );
+    }
+
+    /// The asset index picks the best model for a stem: `update` beats base,
+    /// and a `.ydr` beats a `.yft` of the same name.
+    #[test]
+    fn asset_index_prefers_update_and_ydr() {
+        use crate::rpf::entry::{BinaryEntry, EntryKind, RpfEncryption, RpfEntry};
+        use crate::rpf::file::RpfFile;
+
+        let entry = |path: &str| {
+            let name = path.rsplit('\\').next().unwrap().to_string();
+            RpfEntry {
+                name: name.clone(),
+                name_lower: name.to_lowercase(),
+                name_offset: 0,
+                path: path.to_string(),
+                parent: None,
+                h1: 0,
+                h2: 0,
+                kind: EntryKind::Binary(BinaryEntry {
+                    file_offset: 0,
+                    file_size: 0,
+                    uncompressed_size: 0,
+                    encrypted: false,
+                }),
+            }
+        };
+        let manager = RpfManager {
+            folder: PathBuf::new(),
+            archives: vec![RpfFile {
+                name: "dlc.rpf".into(),
+                name_lower: "dlc.rpf".into(),
+                path: "dlc.rpf".into(),
+                physical_path: PathBuf::new(),
+                file_size: 0,
+                start_pos: 0,
+                version: 7,
+                entry_count: 4,
+                names_length: 0,
+                encryption: RpfEncryption::None,
+                entries: vec![
+                    entry(r"x64\props\fence.ydr"),
+                    entry(r"x64\props\fence.yft"),
+                    entry(r"update\x64\props\fence.ydr"),
+                    entry(r"x64\props\car.ydd"),
+                ],
+                children: Vec::new(),
+            }],
+            archive_parent: vec![None],
+            errors: Vec::new(),
+            entry_index: HashMap::new(),
+            archive_index: HashMap::new(),
+            ytds_by_folder: Mutex::new(None),
+            asset_index: Mutex::new(None),
+        };
+
+        let assets = manager.assets();
+        let index = assets.as_ref().expect("index built");
+        let (update_flag, ext, path) = index.get("fence").expect("fence indexed");
+        assert_eq!(*update_flag, 0, "the update copy wins");
+        assert_eq!(*ext, 0, "and the .ydr over the .yft");
+        assert_eq!(path, r"update\x64\props\fence.ydr");
+        assert!(index.contains_key("car"));
     }
 }

@@ -6,7 +6,7 @@
 //! else. Extraction and per-type viewers come later in phase 2.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use cw_core::filetypes::MloArchetype;
 use cw_core::rpf::{EntryKind, RpfManager};
@@ -27,10 +27,17 @@ pub struct Loaded {
     /// is placed. Scanning every `.ytyp` is expensive, so it is kept, not
     /// rebuilt per map.
     pub mlo_archetypes: Mutex<Option<std::collections::HashMap<u32, MloArchetype>>>,
+    /// Every entry basename keyed by its hash, built once — the table that
+    /// turns a `.ymap` archetype hash back into a model name. See
+    /// [`RpfManager::index_names`].
+    pub names: Mutex<Option<std::collections::HashMap<u32, String>>>,
 }
 
+/// A `RwLock` rather than a `Mutex`: the world streams many maps and models at
+/// once, and every read of the scanned install must not queue behind the
+/// others. Only opening a new folder takes the write side.
 #[derive(Default)]
-pub struct GameState(pub Mutex<Option<Loaded>>);
+pub struct GameState(pub RwLock<Option<Loaded>>);
 
 /// What the frontend learns about a freshly opened folder.
 #[derive(Serialize)]
@@ -78,7 +85,7 @@ pub async fn open_game_folder(
         .await
         .map_err(|e| format!("the scan task failed: {e}"))??;
 
-    *state.0.lock().map_err(|_| "game state is poisoned")? = Some(loaded);
+    *state.0.write().map_err(|_| "game state is poisoned")? = Some(loaded);
     Ok(summary)
 }
 
@@ -117,6 +124,7 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
             keys,
             manager,
             mlo_archetypes: Mutex::new(None),
+            names: Mutex::new(None),
         },
         summary,
     ))
@@ -125,7 +133,7 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
 /// List a directory. An empty or absent `path` lists the top-level archives.
 #[tauri::command]
 pub fn list_dir(path: Option<String>, state: State<'_, GameState>) -> Result<Vec<Listing>, String> {
-    let guard = state.0.lock().map_err(|_| "game state is poisoned")?;
+    let guard = state.0.read().map_err(|_| "game state is poisoned")?;
     let loaded = guard.as_ref().ok_or("no game folder is open")?;
     listing_for(&loaded.manager, &path.unwrap_or_default())
 }
@@ -191,7 +199,7 @@ pub fn listing_for(manager: &RpfManager, path: &str) -> Result<Vec<Listing>, Str
 pub fn game_is_open(state: State<'_, GameState>) -> Result<bool, String> {
     Ok(state
         .0
-        .lock()
+        .read()
         .map_err(|_| "game state is poisoned")?
         .is_some())
 }

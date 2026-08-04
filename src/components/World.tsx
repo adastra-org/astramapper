@@ -4,6 +4,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import {
   ChevronRight,
   Crosshair,
+  FilePlus,
   Globe2,
   Loader2,
   MapPin,
@@ -15,6 +16,7 @@ import {
   applyEdit,
   axisRotate,
   boundsOf,
+  clearWorldCaches,
   colorForLod,
   commitHistory,
   demoWorld,
@@ -31,6 +33,8 @@ import {
   worldAsset,
   worldDlcYmaps,
   worldMap,
+  worldMapFile,
+  worldMapsInGroup,
   worldModel,
   worldStatus,
   worldToGta,
@@ -50,9 +54,21 @@ const SHADOW_LIMIT = 5_000;
 /** How many `.ymap` rows a group's expanded list shows. */
 const MAX_YMAP_ROWS = 40;
 /** How many entities one streaming pass may start loading. */
-const STREAM_BATCH = 4;
+const STREAM_BATCH = 24;
+/** How many base-game maps one auto-load chunk reads at once. */
+const LOAD_BATCH = 16;
 /** How often the streaming pass re-decides what is loaded. */
-const STREAM_INTERVAL_MS = 600;
+const STREAM_INTERVAL_MS = 250;
+
+/**
+ * Session-wide caches, outside the component so they survive tab switches:
+ * re-entering World re-streams without re-resolving archetype names or
+ * re-decoding model geometry.
+ */
+const assetCache = new Map<string, string | null>();
+const modelCache = new Map<string, ModelPreview>();
+/** The mounted game folder, so the session caches drop when it changes. */
+let lastFolder: string | null = null;
 
 export type Selection = {
   readonly mapKey: string;
@@ -84,6 +100,12 @@ export function World(): React.JSX.Element {
   const [pages, setPages] = useState<Readonly<Record<string, YmapListingPage>>>({});
   const [placed, setPlaced] = useState<readonly WorldMap[]>([]);
   const [busy, setBusy] = useState(false);
+  /** A load with a known count, for the progress bar. */
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    label: string;
+  } | null>(null);
   const [selected, setSelected] = useState<Selection | null>(null);
   /** Entities whose real geometry is loaded, streamed or asked for by hand. */
   const [geometry, setGeometry] = useState<readonly GeometryLoad[]>([]);
@@ -96,20 +118,31 @@ export function World(): React.JSX.Element {
 
   // Asset and model reads are cached so that a street of a hundred identical
   // streetlamps resolves and loads its model once, not a hundred times. The
-  // caches live in refs so the streamer never rebuilds them.
-  const assetCache = useRef(new Map<string, string | null>());
-  const modelCache = useRef(new Map<string, ModelPreview>());
+  // caches are module-level so they survive a tab switch: re-entering World
+  // re-streams without re-resolving names or re-decoding geometry.
   const pending = useRef(new Set<string>());
   /** The camera's world position, written by the canvas every frame. */
   const cameraRef = useRef<{ position: [number, number, number] | null }>({ position: null });
+  /** Base maps are loaded once per mount, not every time status re-resolves. */
+  const autoLoadedBase = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     worldStatus()
       .then((loaded) => {
         if (cancelled) return;
+        if (loaded.folder !== lastFolder) {
+          lastFolder = loaded.folder;
+          assetCache.clear();
+          modelCache.clear();
+          clearWorldCaches();
+        }
         setStatus(loaded);
         setError(null);
+        // A game folder means real geometry: stream it from the start so the
+        // world reads like the engine's — fly and the city builds around you.
+        // The demo plaza has no assets to stream, so it stays off there.
+        if (loaded.gameOpen) setStreaming(true);
       })
       .catch((cause: unknown) => {
         if (!cancelled) setError(String(cause));
@@ -153,6 +186,74 @@ export function World(): React.JSX.Element {
     }
   }, []);
 
+  /** Load every base-game map, the world the install ships. Runs once per
+   *  mount so the world is never an empty grid; the reads are batched and the
+   *  canvas rebuilds once, not per map. */
+  const loadBaseMaps = useCallback(async () => {
+    setBusy(true);
+    try {
+      const maps = await worldMapsInGroup("base");
+      const all: WorldMap[] = [];
+      setProgress({ done: 0, total: maps.length, label: "Loading base maps" });
+      // Chunks bound concurrency so hundreds of parses do not all start at
+      // once; the single `setPlaced` below means the canvas rebuilds once.
+      for (let i = 0; i < maps.length; i += LOAD_BATCH) {
+        const chunk = maps.slice(i, i + LOAD_BATCH);
+        // oxlint-disable-next-line no-await-in-loop
+        const results = await Promise.allSettled(chunk.map((m) => worldMap(m.path)));
+        const done = results.filter((r) => r.status === "fulfilled").length;
+        for (const result of results) {
+          if (result.status === "fulfilled") all.push(result.value);
+        }
+        setProgress((current) =>
+          current ? { ...current, done: current.done + done } : current,
+        );
+      }
+      setPlaced((current) => {
+        const next = [...current];
+        for (const map of all) {
+          if (!next.some((m) => m.path === map.path)) next.push(map);
+        }
+        return next;
+      });
+      setError(null);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }, []);
+
+  /** Place a `.ymap` the user picked from disk — custom or mod maps. */
+  const loadCustomYmap = useCallback(async () => {
+    const path = await openDialog({
+      filters: [{ name: "GTA V maps", extensions: ["ymap"] }],
+      title: "Load a custom YMAP",
+    });
+    if (typeof path !== "string") return;
+    setBusy(true);
+    try {
+      const map = await worldMapFile(path);
+      setPlaced((current) =>
+        current.some((m) => m.path === path) ? current : [...current, map],
+      );
+      setError(null);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  // A game folder is open: fill the world with the base game maps, so entering
+  // World is never an empty grid. Once per mount; the demo stays for no-folder.
+  useEffect(() => {
+    if (!status?.gameOpen || autoLoadedBase.current) return;
+    autoLoadedBase.current = true;
+    void loadBaseMaps();
+  }, [status?.gameOpen, loadBaseMaps]);
+
   const remove = useCallback((path: string) => {
     setPlaced((current) => current.filter((m) => m.path !== path));
     setGeometry((current) => current.filter((g) => g.mapKey !== path));
@@ -170,16 +271,16 @@ export function World(): React.JSX.Element {
 
       pending.current.add(key);
       try {
-        let modelPath = assetCache.current.get(entity.name);
+        let modelPath = assetCache.get(entity.name);
         if (modelPath === undefined) {
           modelPath = await worldAsset(entity.name);
-          assetCache.current.set(entity.name, modelPath);
+          assetCache.set(entity.name, modelPath);
         }
         if (!modelPath) return;
-        let model = modelCache.current.get(modelPath);
+        let model = modelCache.get(modelPath);
         if (!model) {
           model = await worldModel(modelPath);
-          modelCache.current.set(modelPath, model);
+          modelCache.set(modelPath, model);
         }
         setGeometry((current) =>
           current.some((g) => keyFor(g.mapKey, g.entity.index) === key)
@@ -271,11 +372,21 @@ export function World(): React.JSX.Element {
     try {
       const parsed = parseProject(await projectLoad(path));
       // Re-place every map the project names, then layer the edits back on.
-      const results = await Promise.allSettled(parsed.maps.map((mapPath) => worldMap(mapPath)));
-      const loaded = results.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : [],
-      );
-      const failed = results.length - loaded.length;
+      const loaded: WorldMap[] = [];
+      setProgress({ done: 0, total: parsed.maps.length, label: "Loading project" });
+      for (let i = 0; i < parsed.maps.length; i += LOAD_BATCH) {
+        const chunk = parsed.maps.slice(i, i + LOAD_BATCH);
+        // oxlint-disable-next-line no-await-in-loop
+        const results = await Promise.allSettled(chunk.map((mapPath) => worldMap(mapPath)));
+        const done = results.filter((r) => r.status === "fulfilled").length;
+        for (const result of results) {
+          if (result.status === "fulfilled") loaded.push(result.value);
+        }
+        setProgress((current) =>
+          current ? { ...current, done: current.done + done } : current,
+        );
+      }
+      const failed = parsed.maps.length - loaded.length;
       setPlaced(loaded);
       setEdits(new Map(parsed.edits.map((e) => [e.key, e.edit])));
       setGeometry([]);
@@ -283,14 +394,13 @@ export function World(): React.JSX.Element {
       setRedo([]);
       setSelected(null);
       setError(
-        failed > 0
-          ? `${failed} of ${parsed.maps.length} maps could not be loaded`
-          : null,
+        failed > 0 ? `${failed} of ${parsed.maps.length} maps could not be loaded` : null,
       );
     } catch (cause) {
       setError(String(cause));
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }, []);
 
@@ -411,6 +521,26 @@ export function World(): React.JSX.Element {
         {error && <span className="ml-auto truncate text-xs text-red-400">{error}</span>}
       </header>
 
+      {progress && (
+        <div className="shrink-0 border-b border-edge bg-surface-1 px-4 py-1.5 text-xs text-ink-dim">
+          <div className="flex items-center justify-between gap-3">
+            <span>
+              {progress.label} · {progress.done.toLocaleString()} of{" "}
+              {progress.total.toLocaleString()} maps
+            </span>
+            <span>{Math.round((progress.done / Math.max(progress.total, 1)) * 100)}%</span>
+          </div>
+          <div className="mt-1 h-1 overflow-hidden rounded bg-surface-2">
+            <div
+              className="h-full rounded bg-accent transition-[width] duration-150"
+              style={{
+                width: `${(progress.done / Math.max(progress.total, 1)) * 100}%`,
+              }}
+            />
+          </div>
+        </div>
+      )}
+
       <div className="flex min-h-0 flex-1">
         <aside className="flex w-80 shrink-0 flex-col overflow-y-auto border-r border-edge bg-surface-1">
           {!status ? (
@@ -479,6 +609,15 @@ export function World(): React.JSX.Element {
                         Place the map open in Explorer
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => void loadCustomYmap()}
+                      disabled={busy}
+                      className="mx-4 mt-2 flex items-center gap-1.5 rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-50"
+                    >
+                      <FilePlus size={13} strokeWidth={1.75} />
+                      Load custom YMAP…
+                    </button>
                   </Section>
 
                   <Section title="Streaming">
@@ -664,6 +803,7 @@ export function World(): React.JSX.Element {
           selected={selected}
           onSelect={setSelected}
           shadowed={totalPlaced <= SHADOW_LIMIT}
+          busy={busy}
         />
       </div>
     </div>
@@ -764,6 +904,8 @@ type CanvasProps = {
   selected: Selection | null;
   onSelect: (selection: Selection | null) => void;
   shadowed: boolean;
+  /** A world-level load is running; hides the "empty" hint while it does. */
+  busy: boolean;
 };
 
 /** A hit produced by the raycast, tied back to the placement it landed on. */
@@ -811,6 +953,7 @@ function Canvas({
   selected,
   onSelect,
   shadowed,
+  busy,
 }: CanvasProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
   const entriesRef = useRef(entries);
@@ -872,7 +1015,21 @@ function Canvas({
     world.add(geometryGroupObject);
     geometryGroup.current = geometryGroupObject;
 
-    const grid = new THREE.GridHelper(400, 40, 0x3a4250, 0x2a303a);
+    // The placed content decides how big the grid is: a map a few thousand
+    // units across still sits on a grid that covers it. The cell size stays
+    // constant (10 units) while the total grows with the content's radius.
+    const { center, radius } = boundsOf(entries.flatMap((entry) => entry.placements));
+    const gridSize = Math.max(400, Math.ceil((radius * 2.4) / 100) * 100);
+    const grid = new THREE.GridHelper(
+      gridSize,
+      Math.round(gridSize / 10),
+      0x3a4250,
+      0x2a303a,
+    );
+    // Centre the grid on the content's horizontal centre (the GTA ground
+    // plane is Z = 0, so the world-space Y stays at the grid's default).
+    const [gridX, , gridZ] = gtaToWorld(center);
+    grid.position.set(gridX, 0, gridZ);
     scene.add(grid);
 
     // The selection outline, shown and placed by the selection effect.
@@ -1013,12 +1170,23 @@ function Canvas({
     }
     gizmoOriginWorld.current = null;
 
-    // Frame the camera over everything that was placed.
-    const { center, radius } = boundsOf(entries.flatMap((entry) => entry.placements));
+    // Frame the camera over everything that was placed. A full-map world
+    // (thousands of units across) starts mid-air over its centre so the
+    // streamer has real geometry in view immediately; small worlds keep the
+    // overview framing.
     const [fx, fy, fz] = gtaToWorld(center);
     const framed = new THREE.Vector3(fx, fy, fz);
-    const offset = new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(radius * 1.6);
-    camera.position.copy(framed).add(offset);
+    if (radius > 1500) {
+      const startHeight = Math.min(radius * 0.15, 600);
+      camera.position.set(
+        framed.x + startHeight * 0.3,
+        framed.y + startHeight,
+        framed.z + startHeight * 0.3,
+      );
+    } else {
+      const offset = new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(radius * 1.6);
+      camera.position.copy(framed).add(offset);
+    }
     camera.lookAt(framed);
 
     const raycaster = new THREE.Raycaster();
@@ -1304,7 +1472,8 @@ function Canvas({
       state.lastY = event.clientY;
       state.moved += Math.abs(dx) + Math.abs(dy);
       state.yaw -= dx * 0.005;
-      state.pitch = THREE.MathUtils.clamp(state.pitch + dy * 0.005, -1.55, 1.55);
+      // Dragging down looks down: a screen-y increase lowers the pitch.
+      state.pitch = THREE.MathUtils.clamp(state.pitch - dy * 0.005, -1.55, 1.55);
     };
 
     const onPointerUp = (): void => {
@@ -1345,7 +1514,13 @@ function Canvas({
     const onWheel = (event: WheelEvent): void => {
       event.preventDefault();
       const look = camera.getWorldDirection(new THREE.Vector3());
-      state.position.addScaledVector(look, event.deltaY * 0.05);
+      // Dolly faster when far from the world, slower up close.
+      const zoomScale = THREE.MathUtils.clamp(
+        state.position.distanceTo(framed) / 500,
+        1,
+        20,
+      );
+      state.position.addScaledVector(look, event.deltaY * 0.05 * zoomScale);
     };
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("pointermove", onPointerMove);
@@ -1413,7 +1588,15 @@ function Canvas({
       frame = requestAnimationFrame(tick);
       const dt = Math.min(clock.getDelta(), 0.05);
       const baseSpeed = 60;
-      const speed = baseSpeed * (state.pressed.has("sprint") ? 4 : 1) * dt;
+      // Far from the world, fly fast — a full-map overview is reachable in
+      // seconds, not minutes — and taper to walking pace as the camera gets
+      // close, so fine positioning still works.
+      const speedScale = THREE.MathUtils.clamp(
+        state.position.distanceTo(framed) / 300,
+        1,
+        25,
+      );
+      const speed = baseSpeed * speedScale * (state.pressed.has("sprint") ? 4 : 1) * dt;
       const forward = new THREE.Vector3(-Math.sin(state.yaw), 0, -Math.cos(state.yaw));
       const right = new THREE.Vector3(Math.cos(state.yaw), 0, -Math.sin(state.yaw));
       if (state.pressed.has("forward")) state.position.addScaledVector(forward, speed);
@@ -1533,27 +1716,37 @@ function Canvas({
     // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [entries, shadowed, onSelect]);
 
-  // Streamed geometry: rebuild only the geometry group when the loaded set
-  // changes, hiding and restoring the matching box instances so a marker does
-  // not sit on top of its model.
+  // Streamed geometry: sync only the loads that changed into the geometry
+  // group. Building every loaded model's meshes from scratch on each pass made
+  // streaming quadratically slower as the loaded set grew — a streamed model
+  // must add its meshes, not rebuild the ones already there.
   useEffect(() => {
-    const world = worldGroup.current;
     const group = geometryGroup.current;
-    if (!world || !group) return;
+    if (!group) return;
 
-    disposeObject3D(group);
-    geometryMeshes.current = [];
-    const state = new Map<string, LoadedGeometry>();
     const cameraWorld = new THREE.Vector3();
     const matrix = new THREE.Matrix4();
     const position = new THREE.Vector3();
     const quaternion = new THREE.Quaternion();
     const scale = new THREE.Vector3();
 
-    const geometryKeys = new Set(geometry.map((g) => keyFor(g.mapKey, g.entity.index)));
+    const wanted = new Map(geometry.map((g) => [keyFor(g.mapKey, g.entity.index), g]));
+    const next = new Map<string, LoadedGeometry>();
 
+    // Keep what is still loaded, drop what unloaded.
+    for (const [key, loaded] of loadedState.current) {
+      if (wanted.has(key)) {
+        next.set(key, loaded);
+      } else {
+        disposeObject3D(loaded.holder);
+        group.remove(loaded.holder);
+      }
+    }
+
+    // Build only the models that just loaded.
     for (const load of geometry) {
       const key = keyFor(load.mapKey, load.entity.index);
+      if (loadedState.current.has(key)) continue;
       const holder = new THREE.Group();
       position.set(load.entity.position[0], load.entity.position[1], load.entity.position[2]);
       quaternion.set(
@@ -1574,11 +1767,10 @@ function Canvas({
           mesh.userData.mapKey = load.mapKey;
           mesh.userData.entityIndex = load.entity.index;
           holder.add(mesh);
-          geometryMeshes.current.push({ mesh, mapKey: load.mapKey, entityIndex: load.entity.index });
         }
       }
       group.add(holder);
-      state.set(key, {
+      next.set(key, {
         holder,
         lodGroups,
         lodDist: load.entity.lodDist,
@@ -1593,13 +1785,27 @@ function Canvas({
       }
     }
 
+    // Refresh the flat raycast list from the holders kept this pass.
+    geometryMeshes.current = [];
+    for (const { holder } of next.values()) {
+      holder.traverse((object) => {
+        const mesh = object as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        geometryMeshes.current.push({
+          mesh,
+          mapKey: mesh.userData.mapKey as string,
+          entityIndex: mesh.userData.entityIndex as number,
+        });
+      });
+    }
+
     // Any box whose entity is no longer loaded comes back.
     for (const entry of entriesRef.current) {
       const box = boxByMap.current.get(entry.key);
       if (!box) continue;
       for (const placement of entry.placements) {
         const key = keyFor(entry.key, placement.index);
-        if (geometryKeys.has(key)) continue;
+        if (wanted.has(key)) continue;
         setInstanceTransform(
           box.mesh,
           box.instances,
@@ -1609,11 +1815,11 @@ function Canvas({
       }
     }
 
-    loadedState.current = state;
+    loadedState.current = next;
     lodUpdate.current = (cameraPosition) => {
       cameraWorld.copy(cameraPosition);
       const [cx, cy, cz] = worldToGta([cameraWorld.x, cameraWorld.y, cameraWorld.z]);
-      for (const { lodGroups, lodDist, positionGta } of state.values()) {
+      for (const { lodGroups, lodDist, positionGta } of next.values()) {
         const dist = Math.hypot(
           positionGta[0] - cx,
           positionGta[1] - cy,
@@ -1665,7 +1871,7 @@ function Canvas({
   return (
     <div className="relative min-h-0 flex-1">
       <div ref={host} className="min-h-0 h-full bg-surface-0" />
-      {totalCount(entries) === 0 && (
+      {totalCount(entries) === 0 && !busy && (
         <p className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-ink-dim">
           The world is empty. Place a map to fill it.
         </p>
