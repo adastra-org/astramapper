@@ -17,9 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
-| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope with GPU texture blocks |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer |
 
-Branch: work happens on `dev`. Current tests: **225 unit + 46 gate + 83 frontend**.
+Branch: work happens on `dev`. Current tests: **251 unit + 46 gate + 83 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -960,12 +960,67 @@ maps; and textures wrap rather than clamp. `CompressedTexture` also forces
 Direct3D UVs — the world view's PNG path had it on and was mirroring every
 texture vertically.
 
+### 4.4 Geometry in the envelope — **DONE**
+
+Vertex and index buffers are envelope sections rather than base64 strings, and
+indices narrow to `u16` when a part indexes fewer than 65,536 vertices. Every one
+of 361 parts across 58 placed city models did, which halves the index payload.
+
+Measuring first changed what this commit was for. Over 400 model files and 3,382
+parts, base64 encoding costs **0.2ms per file** — so the Rust-side CPU argument
+was weak, and the wire alone is only 1.33x smaller. The real cost was the
+frontend, which copied every buffer three times on the main thread before three.js
+saw it. It now takes typed-array views straight over the IPC response.
+
+Like for like over those 58 models, geometry and textures together: **12.97s to
+2.90s, 108.3 MB to 54.1 MB**. Exactly 2x the wire.
+
+`cw_core::mesh::Buffer` is what lets both transports share one flattening: it
+serializes as base64 for the Explorer's JSON commands and hands out its bytes for
+the envelope.
+
+### 4.5 The cache's storage layer — **partial**
+
+`crates/cw-cache` holds keys, pack files and the index journal, with 26 tests.
+**The `Cache` facade over them is not written yet**, nor is any wiring into the
+app. Three decisions, each argued in its module header:
+
+- **Keyed by source, not content.** Content-addressing means extracting to find
+  out whether extraction was needed, which is the work being avoided. The cost is
+  that every input which could change the output must be in the key, and the
+  rule is: when in doubt, put it in.
+- **Pack files with a sidecar index.** One file per asset is 400,000 files on
+  NTFS for Defender to scan. A key-value store is a large dependency and a second
+  failure mode for regenerable data. One flat file cannot evict.
+- **Whole-pack eviction.** Append-only packs cannot reclaim a hole without a
+  compactor, and a compactor is a background rewrite of gigabytes that can
+  corrupt the store, to recover space that costs nothing to leave alone.
+
+The crate depends on neither `tauri` nor `cw-core`: it stores opaque bytes under
+an opaque key, which is what makes the round trip testable with no app and no
+install. `src-tauri` will resolve `app_cache_dir()` and pass it in.
+
+Surviving a kill mid-bake is treated as the normal case. Nothing fsyncs, journal
+replay stops at the first torn record, and any record whose bytes do not fit the
+pack it names is dropped on open. Both halves have tests.
+
+Archive stamping landed with it (`cw_core::rpf::stamp_file`,
+`RpfManager::archive_stamps`): length and mtime, mixed, with a nested archive
+inheriting its top-level ancestor's stamp. That inheritance is the point of
+stamping per archive rather than per install — **patching `update.rpf` must
+invalidate what came out of it and not the other 178.**
+
 ### Still to come
 
-Geometry in the same envelope (`u16` indices where the vertex count allows),
-the `crates/cw-cache` pack-file disk cache and its background bake pass, the
-`World.tsx` decomposition and spatial streaming index, GLSL shader profiles,
-layers/search/multi-select, and the collision and AI path layers.
+The `Cache` facade and the background bake pass; the shader parameter values and
+extended vertex decode that phase 4 skipped and that the shader work now needs;
+the `World.tsx` decomposition and spatial streaming index; GLSL shader profiles;
+layers, search and multi-select; and the collision and AI path layers.
+
+Two gaps are visible in the app today and are expected rather than regressions.
+**Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is
+driven by `COLOUR0` and `TEXCOORD1`, which `MeshPart` does not decode yet.
+**Trees read as solid canopies** because there is no alpha test yet.
 
 ## Anti-goals
 
