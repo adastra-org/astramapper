@@ -266,21 +266,29 @@ pub async fn world_asset(
     blocking(move || Ok(find_model_for(&loaded.manager, &name))).await
 }
 
-/// Read a model file's geometry, every LOD, for the world view to draw.
+/// One model file read into drawables, with the texture hashes its parts want.
+///
+/// The half of a model read that does not depend on what the pixels become —
+/// shared by the world view's block path and the gate's PNG path so the two
+/// cannot drift on which drawables or which hashes they saw.
+struct ReadModel {
+    drawables: Vec<ModelDrawable>,
+    empty_drawables: usize,
+    wanted: std::collections::BTreeSet<u32>,
+    /// Keeps the parsed drawables alive, because `embedded` borrows from them.
+    _named: Vec<cw_core::resources::NamedDrawable>,
+}
+
+/// Extract, parse and flatten a model file. See [`ReadModel`].
 ///
 /// Like `world_map`, this reads past the viewer's one-open-file state: several
 /// entities stream their models at once, so the Explorer's single open file
 /// must not be disturbed.
-///
-/// `archetypes` is what makes the texture chain cheap; see
-/// [`resolve_world_textures`]. Passing `None` still works and still resolves,
-/// it just falls back to scanning the model's folder.
-pub fn read_world_model(
+fn read_model_file(
     path: &str,
     keys: &GtaKeys,
     manager: &RpfManager,
-    archetypes: Option<&ArchetypeIndexes>,
-) -> Result<ModelPreview, String> {
+) -> Result<ReadModel, String> {
     let entry_ref = manager
         .find(path)
         .ok_or_else(|| format!("{path} is not in the index"))?;
@@ -306,17 +314,9 @@ pub fn read_world_model(
         _ => read_named_drawables(kind, &data, system_size).map_err(|e| format!("{e}"))?,
     };
 
-    // The embedded texture dictionaries, borrowed rather than cloned: a
-    // drawable's dictionary holds every mip of every texture it carries, and
-    // `named` outlives the resolution below.
-    let embedded: Vec<&TextureDictionary> = named
-        .iter()
-        .filter_map(|entry| entry.drawable.texture_dictionary.as_ref())
-        .collect();
-
     let mut wanted = std::collections::BTreeSet::new();
     let mut empty_drawables = 0;
-    let drawables = named
+    let drawables: Vec<ModelDrawable> = named
         .iter()
         .map(|entry| {
             let lods = MeshBundle::all(&entry.drawable);
@@ -342,32 +342,182 @@ pub fn read_world_model(
         })
         .collect();
 
-    let textures =
-        crate::viewer::resolve_textures(path, &wanted, &embedded, keys, manager, archetypes);
+    Ok(ReadModel {
+        drawables,
+        empty_drawables,
+        wanted,
+        _named: named,
+    })
+}
+
+impl ReadModel {
+    /// The embedded texture dictionaries, borrowed rather than cloned: a
+    /// drawable's dictionary holds every mip of every texture it carries.
+    fn embedded(&self) -> Vec<&TextureDictionary> {
+        self._named
+            .iter()
+            .filter_map(|entry| entry.drawable.texture_dictionary.as_ref())
+            .collect()
+    }
+}
+
+/// Read a model with its textures as base64 PNGs.
+///
+/// The shape the world view used before the binary envelope, kept because the
+/// gate compares the two paths against each other; see
+/// `the_block_path_resolves_the_same_textures_as_the_png_path` in
+/// `tests/world_gate.rs`. Nothing in the app calls it.
+///
+/// `archetypes` is what makes the texture chain cheap; see
+/// [`crate::viewer::resolve_textures`]. Passing `None` still works and still
+/// resolves, it just falls back to scanning the model's folder.
+pub fn read_world_model(
+    path: &str,
+    keys: &GtaKeys,
+    manager: &RpfManager,
+    archetypes: Option<&ArchetypeIndexes>,
+) -> Result<ModelPreview, String> {
+    let read = read_model_file(path, keys, manager)?;
+    let textures = crate::viewer::resolve_textures(
+        path,
+        &read.wanted,
+        &read.embedded(),
+        keys,
+        manager,
+        archetypes,
+    );
 
     Ok(ModelPreview {
         path: path.to_string(),
-        drawables,
-        empty_drawables,
+        drawables: read.drawables,
+        empty_drawables: read.empty_drawables,
         textures,
     })
+}
+
+/// A compiled model's metadata: everything but the pixels, which ride in the
+/// envelope's sections.
+///
+/// Geometry is still base64 inside `drawables` — the vertex half of the binary
+/// envelope is its own change. Textures were the measured 660x (see
+/// [`crate::textures`]) and move first.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorldModelMeta {
+    pub path: String,
+    pub drawables: Vec<ModelDrawable>,
+    pub empty_drawables: usize,
+    pub textures: Vec<crate::textures::WireTexture>,
+}
+
+/// Read a model and pack it into a wire envelope, textures as GPU blocks.
+///
+/// Pure of Tauri state so the gate can drive it against a real scan; see
+/// `tests/world_gate.rs`.
+pub fn compile_world_model(
+    path: &str,
+    keys: &GtaKeys,
+    manager: &RpfManager,
+    archetypes: Option<&ArchetypeIndexes>,
+    caps: crate::textures::GpuCaps,
+) -> Result<Vec<u8>, String> {
+    let read = read_model_file(path, keys, manager)?;
+
+    // The section index is assigned as each texture resolves, which is why the
+    // encoder takes it: resolution order decides section order, and the chain
+    // may skip a dictionary that answers nothing.
+    let next_section = std::sync::atomic::AtomicUsize::new(0);
+    let encoded = crate::viewer::resolve_textures_with(
+        path,
+        &read.wanted,
+        &read.embedded(),
+        keys,
+        manager,
+        archetypes,
+        |hash, texture, source| {
+            let section = next_section.load(std::sync::atomic::Ordering::Relaxed);
+            let out = crate::textures::encode(hash, texture, source, caps, section)?;
+            next_section.store(section + 1, std::sync::atomic::Ordering::Relaxed);
+            Some(out)
+        },
+    );
+
+    // `resolve_textures_with` collects out of a `HashMap`, so the order it hands
+    // back is not the order sections were assigned. Sort by the index each
+    // texture recorded and the envelope's push order matches its metadata again.
+    let mut encoded = encoded;
+    encoded.sort_by_key(|texture| texture.meta.section);
+
+    let mut envelope = cw_core::wire::Envelope::new();
+    let mut textures = Vec::with_capacity(encoded.len());
+    for texture in encoded {
+        let section = envelope.push(texture.bytes);
+        debug_assert_eq!(section, texture.meta.section);
+        textures.push(texture.meta);
+    }
+
+    let meta = WorldModelMeta {
+        path: path.to_string(),
+        drawables: read.drawables,
+        empty_drawables: read.empty_drawables,
+        textures,
+    };
+    let json = serde_json::to_string(&meta).map_err(|e| format!("could not encode {path}: {e}"))?;
+    Ok(envelope.finish(cw_core::wire::Kind::Model, &json))
 }
 
 #[tauri::command]
 pub async fn world_model(
     path: String,
     game: State<'_, GameState>,
-) -> Result<ModelPreview, String> {
+    gpu: State<'_, GpuState>,
+) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
+    let caps = gpu.get();
     blocking(move || {
-        read_world_model(
+        compile_world_model(
             &path,
             &loaded.keys,
             &loaded.manager,
             Some(loaded.archetypes()),
+            caps,
         )
     })
     .await
+    .map(tauri::ipc::Response::new)
+}
+
+/// What the WebView's GL context accepts, as it reported at world-mode start.
+///
+/// Read on every model compile and written once, so `RwLock` rather than a
+/// channel: a reader never blocks another reader, and the one write happens
+/// before any streaming does.
+#[derive(Debug, Default)]
+pub struct GpuState(pub std::sync::RwLock<crate::textures::GpuCaps>);
+
+impl GpuState {
+    /// The reported capabilities, or none at all if the lock is poisoned —
+    /// which costs fidelity (RGBA instead of blocks) and never correctness.
+    pub fn get(&self) -> crate::textures::GpuCaps {
+        self.0
+            .read()
+            .map(|caps| *caps)
+            .unwrap_or_default()
+    }
+}
+
+/// Tell the backend which compressed texture formats this GL context takes.
+///
+/// Must be called before the first model streams. Until it is, every texture
+/// falls back to RGBA: correct, four times the VRAM, and the frontend's job to
+/// avoid by making this its first call in world mode.
+#[tauri::command]
+pub fn set_gpu_capabilities(
+    caps: crate::textures::GpuCaps,
+    gpu: State<'_, GpuState>,
+) -> Result<(), String> {
+    *gpu.0.write().map_err(|_| "gpu state is poisoned")? = caps;
+    Ok(())
 }
 
 /// Save a world project payload to disk, as the frontend serialized it.

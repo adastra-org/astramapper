@@ -652,14 +652,39 @@ pub(crate) fn resolve_textures(
     manager: &RpfManager,
     archetypes: Option<&ArchetypeIndexes>,
 ) -> Vec<ModelTexture> {
+    resolve_textures_with(path, wanted, embedded, keys, manager, archetypes, png_of)
+}
+
+/// The chain above, with the caller deciding what a resolved texture becomes.
+///
+/// Two consumers want the same walk and different pixels out the other end: the
+/// Explorer's inspector wants a PNG it can put in an `<img>`, and the world view
+/// wants the blocks the GPU takes (see `crate::textures`). Sharing the walk
+/// rather than the encoder is what keeps the *resolution order* single-sourced,
+/// which is the part that was wrong twice before.
+///
+/// `encode` is handed the wanted hash, the texture, and the `.ytd` it came from;
+/// returning `None` leaves the hash unfilled so a later dictionary in the chain
+/// can still answer it.
+pub(crate) fn resolve_textures_with<T, F>(
+    path: &str,
+    wanted: &std::collections::BTreeSet<u32>,
+    embedded: &[&TextureDictionary],
+    keys: &GtaKeys,
+    manager: &RpfManager,
+    archetypes: Option<&ArchetypeIndexes>,
+    encode: F,
+) -> Vec<T>
+where
+    F: Fn(u32, &cw_core::resources::Texture, Option<&str>) -> Option<T>,
+{
     if wanted.is_empty() {
         return Vec::new();
     }
 
-    let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
-        std::collections::HashMap::new();
+    let mut by_hash: std::collections::HashMap<u32, T> = std::collections::HashMap::new();
     for dictionary in embedded.iter().copied() {
-        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None);
+        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None, &encode);
         if by_hash.len() == wanted.len() {
             break;
         }
@@ -721,6 +746,7 @@ pub(crate) fn resolve_textures(
                         wanted,
                         &mut by_hash,
                         Some(ytd_path),
+                        &encode,
                     );
                 }
             }
@@ -733,13 +759,16 @@ pub(crate) fn resolve_textures(
     by_hash.into_values().collect()
 }
 
-/// Decode every wanted hash a dictionary holds into the response.
-fn resolve_from_dictionary(
+/// Encode every wanted hash a dictionary holds into the response.
+fn resolve_from_dictionary<T, F>(
     dictionary: &TextureDictionary,
     wanted: &std::collections::BTreeSet<u32>,
-    by_hash: &mut std::collections::HashMap<u32, ModelTexture>,
+    by_hash: &mut std::collections::HashMap<u32, T>,
     source: Option<&str>,
-) {
+    encode: &F,
+) where
+    F: Fn(u32, &cw_core::resources::Texture, Option<&str>) -> Option<T>,
+{
     for hash in wanted {
         if by_hash.contains_key(hash) {
             continue;
@@ -747,27 +776,32 @@ fn resolve_from_dictionary(
         let Some(texture) = dictionary.lookup(*hash) else {
             continue;
         };
-        let Ok(decoded) = image::decode_mip(texture, 0) else {
-            continue;
-        };
-        let Ok(png) = image::to_png(&decoded) else {
-            continue;
-        };
-        by_hash.insert(
-            *hash,
-            ModelTexture {
-                hash: *hash,
-                name: texture
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
-                width: decoded.width,
-                height: decoded.height,
-                png: STANDARD.encode(png),
-                source: source.map(str::to_string),
-            },
-        );
+        if let Some(encoded) = encode(*hash, texture, source) {
+            by_hash.insert(*hash, encoded);
+        }
     }
+}
+
+/// The Explorer's encoder: mip 0 as a base64 PNG, for an `<img>` in the
+/// inspector. The world view does not use this; see `crate::textures`.
+fn png_of(
+    hash: u32,
+    texture: &cw_core::resources::Texture,
+    source: Option<&str>,
+) -> Option<ModelTexture> {
+    let decoded = image::decode_mip(texture, 0).ok()?;
+    let png = image::to_png(&decoded).ok()?;
+    Some(ModelTexture {
+        hash,
+        name: texture
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("{:08x}", texture.name_hash)),
+        width: decoded.width,
+        height: decoded.height,
+        png: STANDARD.encode(png),
+        source: source.map(str::to_string),
+    })
 }
 
 /// The embedded dictionaries alone, for a file opened with no install behind
@@ -779,7 +813,7 @@ fn resolve_embedded_only(
     let mut by_hash: std::collections::HashMap<u32, ModelTexture> =
         std::collections::HashMap::new();
     for dictionary in embedded.iter().copied() {
-        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None);
+        resolve_from_dictionary(dictionary, wanted, &mut by_hash, None, &png_of);
         if by_hash.len() == wanted.len() {
             break;
         }

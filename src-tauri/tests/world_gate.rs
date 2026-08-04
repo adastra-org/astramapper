@@ -7,7 +7,8 @@
 //! ```
 
 use astramapper_lib::world::{
-    content_groups, find_model_for, read_world_map, read_world_model, ymaps_in_group, WorldMap,
+    compile_world_model, content_groups, find_model_for, read_world_map, read_world_model,
+    ymaps_in_group, WorldMap,
 };
 use cw_core::rpf::RpfManager;
 use cw_core::utils::GtaKeys;
@@ -332,24 +333,7 @@ fn the_archetype_resolves_the_same_textures_as_the_folder_scan() {
     let names = manager.index_names();
     let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
 
-    // Real placed models, as the streamer would pull them.
-    let mut models: Vec<String> = Vec::new();
-    for path in city_maps(&manager) {
-        let Ok(map) = read_world_map(path, &keys, &manager, None, Some(&names)) else {
-            continue;
-        };
-        for entity in map.entities.iter().filter(|e| e.lod_level == "HD") {
-            if let Some(model) = find_model_for(&manager, &entity.name) {
-                if !models.contains(&model) {
-                    models.push(model);
-                }
-            }
-        }
-        if models.len() >= 40 {
-            break;
-        }
-    }
-    assert!(!models.is_empty(), "no placed models to compare");
+    let models = placed_models(&manager, &keys, &names, 40);
 
     let mut scanned_time = std::time::Duration::ZERO;
     let mut named_time = std::time::Duration::ZERO;
@@ -401,6 +385,185 @@ fn the_archetype_resolves_the_same_textures_as_the_folder_scan() {
     println!(
         "{compared} placed models: folder scan {scanned_time:.2?}, archetype {named_time:.2?} ({:.1}x), {tiers} textures resolved to a different HD tier",
         scanned_time.as_secs_f64() / named_time.as_secs_f64().max(f64::EPSILON)
+    );
+}
+
+/// The first `limit` distinct HD models the city maps actually place.
+///
+/// Real placements, in real placement order, which is what the streamer would
+/// pull. Generated rather than hand-listed so the gates never drift onto a
+/// model the game stopped shipping.
+fn placed_models(
+    manager: &RpfManager,
+    keys: &GtaKeys,
+    names: &HashMap<u32, String>,
+    limit: usize,
+) -> Vec<String> {
+    let mut models: Vec<String> = Vec::new();
+    for path in city_maps(manager) {
+        let Ok(map) = read_world_map(path, keys, manager, None, Some(names)) else {
+            continue;
+        };
+        for entity in map.entities.iter().filter(|e| e.lod_level == "HD") {
+            if let Some(model) = find_model_for(manager, &entity.name) {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
+        }
+        if models.len() >= limit {
+            break;
+        }
+    }
+    assert!(!models.is_empty(), "no placed models found");
+    models
+}
+
+/// The block path and the PNG path must resolve the same textures, and the
+/// blocks must be laid out the way the frontend is about to assume they are.
+///
+/// This is the assertion that makes shipping raw blocks safe. The frontend
+/// calls `compressedTexImage2D` with the byte length the metadata declares and
+/// no way to check it: a length that disagrees with the level's dimensions is
+/// either a GL error or, worse, a silently wrong upload. So every mip is
+/// checked against `TextureFormat::compute_pitch`, which is the same arithmetic
+/// the driver does.
+///
+/// Coverage is pinned as a hash set rather than as bytes, for the same reason
+/// as `the_archetype_resolves_the_same_textures_as_the_folder_scan`: the two
+/// paths agree on *which* textures, and the PNG path only ever carried mip 0.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn the_block_path_resolves_the_same_textures_as_the_png_path() {
+    use astramapper_lib::textures::GpuCaps;
+    use cw_core::resources::TextureFormat;
+    use cw_core::wire::{EnvelopeView, Kind};
+    use std::time::{Duration, Instant};
+
+    let (manager, keys) = scan();
+    let names = manager.index_names();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let caps = GpuCaps {
+        s3tc: true,
+        rgtc: true,
+        bptc: true,
+    };
+
+    let models = placed_models(&manager, &keys, &names, 40);
+
+    let mut png_time = Duration::ZERO;
+    let mut block_time = Duration::ZERO;
+    let mut png_bytes = 0usize;
+    let mut block_bytes = 0usize;
+    let mut compared = 0usize;
+    let mut mips = 0usize;
+    let mut fallbacks = 0usize;
+
+    for model in &models {
+        let started = Instant::now();
+        let Ok(png) = read_world_model(model, &keys, &manager, Some(&archetypes)) else {
+            continue;
+        };
+        png_time += started.elapsed();
+        png_bytes += png.textures.iter().map(|t| t.png.len()).sum::<usize>();
+
+        let started = Instant::now();
+        let Ok(blob) = compile_world_model(model, &keys, &manager, Some(&archetypes), caps) else {
+            continue;
+        };
+        block_time += started.elapsed();
+        block_bytes += blob.len();
+
+        let view = EnvelopeView::read(&blob).expect("the envelope reads back");
+        assert_eq!(view.kind, Kind::Model);
+        let meta: serde_json::Value = serde_json::from_str(view.meta).expect("the metadata is JSON");
+        let textures = meta["textures"].as_array().expect("textures");
+
+        let mut a: Vec<u64> = png.textures.iter().map(|t| t.hash as u64).collect();
+        let mut b: Vec<u64> = textures.iter().map(|t| t["hash"].as_u64().unwrap()).collect();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b, "{model} resolved a different texture set");
+
+        for texture in textures {
+            let name = texture["name"].as_str().unwrap_or("?");
+            let section = texture["section"].as_u64().unwrap() as usize;
+            let bytes = view
+                .section(section)
+                .unwrap_or_else(|| panic!("{model}: {name} names a section that is not there"));
+            let levels = texture["mips"].as_array().expect("mips");
+            assert!(!levels.is_empty(), "{model}: {name} has no mip levels");
+
+            // Every declared byte accounted for, and no byte left over: the
+            // frontend walks these lengths to slice the chain.
+            let declared: usize = levels
+                .iter()
+                .map(|m| m["byteLength"].as_u64().unwrap() as usize)
+                .sum();
+            assert_eq!(
+                declared,
+                bytes.len(),
+                "{model}: {name}'s mip lengths do not add up to its section"
+            );
+
+            let compressed = texture["compressed"].as_bool().unwrap();
+            if !compressed {
+                fallbacks += 1;
+            }
+            let format = match texture["format"].as_str().unwrap() {
+                "bc1" => Some(TextureFormat::Dxt1),
+                "bc2" => Some(TextureFormat::Dxt3),
+                "bc3" => Some(TextureFormat::Dxt5),
+                "bc4" => Some(TextureFormat::Ati1),
+                "bc5" => Some(TextureFormat::Ati2),
+                "bc7" => Some(TextureFormat::Bc7),
+                "rgba8" => None,
+                other => panic!("{model}: {name} names an unknown format {other}"),
+            };
+
+            let mut expected_width = texture["width"].as_u64().unwrap() as usize;
+            let mut expected_height = texture["height"].as_u64().unwrap() as usize;
+            for (level, mip) in levels.iter().enumerate() {
+                let width = mip["width"].as_u64().unwrap() as usize;
+                let height = mip["height"].as_u64().unwrap() as usize;
+                let length = mip["byteLength"].as_u64().unwrap() as usize;
+                assert_eq!(
+                    (width, height),
+                    (expected_width, expected_height),
+                    "{model}: {name} mip {level} is not the halving of the one before it"
+                );
+                // The arithmetic the GL driver will do. `compute_pitch` keeps
+                // the `max(1)` a 2x2 or 1x1 block-compressed mip needs, which is
+                // exactly where a naive `width * height / 16` goes wrong.
+                let expected = match format {
+                    Some(format) => format.compute_pitch(width, height).1,
+                    None => width * height * 4,
+                };
+                assert_eq!(
+                    length, expected,
+                    "{model}: {name} mip {level} is {length} bytes for {width}x{height}"
+                );
+                expected_width = (expected_width / 2).max(1);
+                expected_height = (expected_height / 2).max(1);
+                mips += 1;
+            }
+        }
+        compared += 1;
+    }
+
+    assert!(compared > 0, "nothing was compared");
+    let mb = |b: usize| b as f64 / (1024.0 * 1024.0);
+    println!(
+        "{compared} placed models, {mips} mip levels ({fallbacks} textures fell back to rgba8)"
+    );
+    println!(
+        "  png    {png_time:.2?}  {:.1} MB of base64",
+        mb(png_bytes)
+    );
+    println!(
+        "  blocks {block_time:.2?}  {:.1} MB of envelope ({:.0}x cpu)",
+        mb(block_bytes),
+        png_time.as_secs_f64() / block_time.as_secs_f64().max(f64::EPSILON)
     );
 }
 

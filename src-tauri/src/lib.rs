@@ -9,6 +9,7 @@
 // scan without a Tauri runtime.
 pub mod explorer;
 pub mod viewer;
+pub mod textures;
 pub mod world;
 
 use serde::Serialize;
@@ -37,6 +38,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(explorer::GameState::default())
         .manage(viewer::ViewerState::default())
+        .manage(world::GpuState::default())
         .plugin(tauri_plugin_opener::init())
         // Picking the GTA V install folder.
         .plugin(tauri_plugin_dialog::init())
@@ -57,6 +59,7 @@ pub fn run() {
             world::world_map_file,
             world::world_asset,
             world::world_model,
+            world::set_gpu_capabilities,
             world::project_save,
             world::project_load,
             viewer::open_entry,
