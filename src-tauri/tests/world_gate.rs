@@ -259,7 +259,8 @@ fn streams_an_entitys_archetype_to_real_geometry() {
         "resolved a non-model path: {model_path}"
     );
 
-    let preview = read_world_model(&model_path, &keys, &manager).expect("read the model");
+    let preview =
+        read_world_model(&model_path, &keys, &manager, None).expect("read the model");
     assert!(
         !preview.drawables.is_empty(),
         "{model_path} read no drawables"
@@ -299,6 +300,107 @@ fn streams_an_entitys_archetype_to_real_geometry() {
         drawable.lods.len(),
         drawable.lods[0].triangle_count,
         preview.textures.len()
+    );
+}
+
+/// Going to the archetype's own `textureDictionary` instead of scanning the
+/// model's folder has to resolve every texture the scan did, or it is not an
+/// optimization but a bug.
+///
+/// The folder scan visits 28.8 dictionaries for the average model and 332 for
+/// the worst in a sample of 400, each an extract plus an inflate plus a full
+/// parse.
+///
+/// **The two may legitimately disagree about a texture's size, and this is not
+/// a failure.** GTA ships a base dictionary and an HD one, `foo.ytd` beside
+/// `foo+hi.ytd` or `foo+hidr.ytd`, holding the same texture names at different
+/// resolutions; the engine swaps the HD tier in inside `hdTextureDist`. The
+/// archetype names the base dictionary, so the archetype chain gets the base
+/// tier deterministically, where the folder scan got whichever tier its
+/// arbitrary ordering reached first. `dt1_00_3` is the worked example:
+/// `im_freeway_barrier001_n` is 256x256 in the archetype's `dt1_00_grnd.ytd`
+/// and 512x512 in a `+hidr` sibling.
+///
+/// So what is pinned here is coverage — the set of hashes that got pixels —
+/// not the bytes.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn the_archetype_resolves_the_same_textures_as_the_folder_scan() {
+    use std::time::Instant;
+
+    let (manager, keys) = scan();
+    let names = manager.index_names();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+
+    // Real placed models, as the streamer would pull them.
+    let mut models: Vec<String> = Vec::new();
+    for path in city_maps(&manager) {
+        let Ok(map) = read_world_map(path, &keys, &manager, None, Some(&names)) else {
+            continue;
+        };
+        for entity in map.entities.iter().filter(|e| e.lod_level == "HD") {
+            if let Some(model) = find_model_for(&manager, &entity.name) {
+                if !models.contains(&model) {
+                    models.push(model);
+                }
+            }
+        }
+        if models.len() >= 40 {
+            break;
+        }
+    }
+    assert!(!models.is_empty(), "no placed models to compare");
+
+    let mut scanned_time = std::time::Duration::ZERO;
+    let mut named_time = std::time::Duration::ZERO;
+    let mut compared = 0;
+    let mut tiers = 0;
+
+    for model in &models {
+        // The archetype chain runs first, so it pays for any archive mapping
+        // and page cache the folder scan then gets for free. Whatever speedup
+        // this reports is therefore a lower bound.
+        let started = Instant::now();
+        let Ok(named) = read_world_model(model, &keys, &manager, Some(&archetypes)) else {
+            continue;
+        };
+        named_time += started.elapsed();
+
+        let started = Instant::now();
+        let Ok(scanned) = read_world_model(model, &keys, &manager, None) else {
+            continue;
+        };
+        scanned_time += started.elapsed();
+
+        // The set of hashes that got pixels is what the renderer sees.
+        let mut a: Vec<u32> = scanned.textures.iter().map(|t| t.hash).collect();
+        let mut b: Vec<u32> = named.textures.iter().map(|t| t.hash).collect();
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b, "{model} resolved a different texture set");
+
+        for texture in &named.textures {
+            assert!(
+                texture.width > 0 && texture.height > 0 && !texture.png.is_empty(),
+                "{model}: {} resolved to nothing",
+                texture.name
+            );
+            let other = scanned
+                .textures
+                .iter()
+                .find(|t| t.hash == texture.hash)
+                .expect("hash sets already matched");
+            if (texture.width, texture.height) != (other.width, other.height) {
+                tiers += 1;
+            }
+        }
+        compared += 1;
+    }
+
+    assert!(compared > 0, "nothing was compared");
+    println!(
+        "{compared} placed models: folder scan {scanned_time:.2?}, archetype {named_time:.2?} ({:.1}x), {tiers} textures resolved to a different HD tier",
+        scanned_time.as_secs_f64() / named_time.as_secs_f64().max(f64::EPSILON)
     );
 }
 

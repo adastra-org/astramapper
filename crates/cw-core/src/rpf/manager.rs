@@ -69,6 +69,9 @@ pub struct RpfManager {
     /// the lock across a long read and serialize every other streaming request
     /// behind itself.
     asset_index: OnceLock<HashMap<String, (u8, u8, String)>>,
+    /// Every `.ytd` keyed by the Jenkins hash of its stem, built once. This is
+    /// the form an archetype's `textureDictionary` names one in.
+    ytd_by_hash: OnceLock<HashMap<u32, String>>,
     /// The `.rpf` files currently mapped into memory. See
     /// [`crate::rpf::mapped`] for why extraction reads through a mapping.
     maps: ArchiveMaps,
@@ -307,6 +310,38 @@ impl RpfManager {
         })
     }
 
+    /// Every `.ytd` keyed by the Jenkins hash of its stem, built once.
+    ///
+    /// An archetype names its texture dictionary by hash, not by path, so this
+    /// is what turns `BaseArchetype::texture_dictionary` into a file. An
+    /// `update\` copy wins, matching [`Self::assets`]; otherwise the first
+    /// seen keeps the slot, because a later duplicate is a different pack's
+    /// copy of the same dictionary rather than a better one.
+    pub fn ytd_by_hash(&self) -> &HashMap<u32, String> {
+        self.ytd_by_hash.get_or_init(|| {
+            let mut index: HashMap<u32, String> = HashMap::new();
+            for archive in &self.archives {
+                for entry in &archive.entries {
+                    let Some(stem) = entry.name_lower.strip_suffix(".ytd") else {
+                        continue;
+                    };
+                    if stem.is_empty() {
+                        continue;
+                    }
+                    let hash = crate::utils::gen_hash(stem);
+                    let from_update = entry.path.starts_with("update\\");
+                    match index.get(&hash) {
+                        Some(existing) if !from_update || existing.starts_with("update\\") => {}
+                        _ => {
+                            index.insert(hash, entry.path.clone());
+                        }
+                    }
+                }
+            }
+            index
+        })
+    }
+
     /// The best model file per lowercase basename stem, built once.
     ///
     /// The value's first two tuple elements mirror `find_model_for`'s
@@ -482,6 +517,7 @@ mod tests {
             archive_index: HashMap::new(),
             ytds_by_folder: OnceLock::new(),
             asset_index: OnceLock::new(),
+            ytd_by_hash: OnceLock::new(),
             maps: ArchiveMaps::default(),
         };
 
@@ -538,6 +574,7 @@ mod tests {
             archive_index: HashMap::new(),
             ytds_by_folder: OnceLock::new(),
             asset_index: OnceLock::new(),
+            ytd_by_hash: OnceLock::new(),
             maps: ArchiveMaps::default(),
         };
 
@@ -605,6 +642,7 @@ mod tests {
             archive_index: HashMap::new(),
             ytds_by_folder: OnceLock::new(),
             asset_index: OnceLock::new(),
+            ytd_by_hash: OnceLock::new(),
             maps: ArchiveMaps::default(),
         };
 
