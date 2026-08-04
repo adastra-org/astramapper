@@ -243,3 +243,19 @@ pub fn game_is_open(state: State<'_, GameState>) -> Result<bool, String> {
         .map_err(|_| "game state is poisoned")?
         .is_some())
 }
+
+/// Let go of every mapped archive.
+///
+/// Extraction reads through a mapping of the `.rpf` on disk, and Windows holds
+/// a file lock for a mapping's lifetime. A user who wants to patch the game,
+/// or run OpenIV, while AstraMapper is open needs a way to release them. The
+/// index survives; the next extraction maps what it needs again.
+#[tauri::command]
+pub fn release_archives(state: State<'_, GameState>) -> Result<usize, String> {
+    let Some(loaded) = state.try_loaded() else {
+        return Ok(0);
+    };
+    let released = loaded.manager.mapped_archives();
+    loaded.manager.release_archives();
+    Ok(released)
+}

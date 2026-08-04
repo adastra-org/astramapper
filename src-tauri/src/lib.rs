@@ -49,6 +49,7 @@ pub fn run() {
             explorer::open_game_folder,
             explorer::list_dir,
             explorer::game_is_open,
+            explorer::release_archives,
             world::world_status,
             world::world_dlc_ymaps,
             world::world_maps_in_group,

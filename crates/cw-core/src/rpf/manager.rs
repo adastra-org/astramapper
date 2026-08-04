@@ -17,6 +17,7 @@ use serde::Serialize;
 
 use super::entry::{EntryKind, RpfEntry};
 use super::file::RpfFile;
+use super::mapped::ArchiveMaps;
 use crate::utils::GtaKeys;
 use crate::Result;
 
@@ -68,6 +69,9 @@ pub struct RpfManager {
     /// the lock across a long read and serialize every other streaming request
     /// behind itself.
     asset_index: OnceLock<HashMap<String, (u8, u8, String)>>,
+    /// The `.rpf` files currently mapped into memory. See
+    /// [`crate::rpf::mapped`] for why extraction reads through a mapping.
+    maps: ArchiveMaps,
 }
 
 impl RpfManager {
@@ -221,9 +225,35 @@ impl RpfManager {
     }
 
     /// Read an entry's payload.
+    ///
+    /// Reads through a mapping of the `.rpf` on disk when there is one, so a
+    /// streamed model costs a seek and a memcpy inside an already-resident
+    /// file rather than an `open` plus a syscall read. A physical file that
+    /// cannot be mapped falls back to [`RpfFile::extract`], which opens it;
+    /// the decrypt and inflate path below is the same either way.
     pub fn extract(&self, r: EntryRef, keys: &GtaKeys) -> Result<Vec<u8>> {
         let archive = &self.archives[r.archive];
-        archive.extract(&archive.entries[r.entry], keys)
+        let entry = &archive.entries[r.entry];
+        match self.maps.get(&archive.physical_path) {
+            Some(map) => {
+                archive.extract_from(&mut std::io::Cursor::new(&map[..]), entry, keys)
+            }
+            None => archive.extract(entry, keys),
+        }
+    }
+
+    /// Drop every archive mapping, releasing the file locks they hold.
+    ///
+    /// A mapped archive cannot be replaced on Windows, so a user who wants to
+    /// patch the game while the tool is open needs a way to let go. Mappings
+    /// are recreated on the next extraction.
+    pub fn release_archives(&self) {
+        self.maps.release();
+    }
+
+    /// How many archives are mapped right now.
+    pub fn mapped_archives(&self) -> usize {
+        self.maps.live()
     }
 
     /// Every entry's basename keyed by its Jenkins hash.
@@ -452,6 +482,7 @@ mod tests {
             archive_index: HashMap::new(),
             ytds_by_folder: OnceLock::new(),
             asset_index: OnceLock::new(),
+            maps: ArchiveMaps::default(),
         };
 
         let names = manager.index_names();
@@ -507,6 +538,7 @@ mod tests {
             archive_index: HashMap::new(),
             ytds_by_folder: OnceLock::new(),
             asset_index: OnceLock::new(),
+            maps: ArchiveMaps::default(),
         };
 
         let by_folder = manager.ytds();
@@ -573,6 +605,7 @@ mod tests {
             archive_index: HashMap::new(),
             ytds_by_folder: OnceLock::new(),
             asset_index: OnceLock::new(),
+            maps: ArchiveMaps::default(),
         };
 
         let index = manager.assets();
