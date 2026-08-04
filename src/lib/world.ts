@@ -8,6 +8,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 import type { ModelPreview } from "./viewer";
+import { Kind, readEnvelope, splitMips } from "./wire";
 
 /** One content group: the archives that make up a slice of the install. */
 export type ContentGroup = {
@@ -118,9 +119,91 @@ export function worldAsset(name: string): Promise<string | null> {
   return invoke<string | null>("world_asset", { name });
 }
 
-/** Read a model file's geometry, every LOD, for the world view to draw. */
-export function worldModel(path: string): Promise<ModelPreview> {
-  return invoke<ModelPreview>("world_model", { path });
+/** What the GL context can upload without the backend decoding first. */
+export type GpuCaps = {
+  /** `WEBGL_compressed_texture_s3tc` — BC1/2/3. */
+  readonly s3tc: boolean;
+  /** `EXT_texture_compression_rgtc` — BC4/BC5, GTA's normal maps. */
+  readonly rgtc: boolean;
+  /** `EXT_texture_compression_bptc` — BC7. */
+  readonly bptc: boolean;
+};
+
+/**
+ * Tell the backend which compressed formats this context takes.
+ *
+ * Must resolve before the first `worldModel` call. Until it does the backend
+ * decodes every texture to RGBA: correct, four times the VRAM, and avoidable by
+ * making this the first thing world mode does.
+ */
+export function setGpuCapabilities(caps: GpuCaps): Promise<void> {
+  return invoke<void>("set_gpu_capabilities", { caps });
+}
+
+/** One mip level's dimensions and byte length inside a texture's section. */
+export type WireMip = {
+  readonly width: number;
+  readonly height: number;
+  readonly byteLength: number;
+};
+
+/** One texture as the world view receives it: metadata, pixels in a section. */
+export type WireTexture = {
+  readonly hash: number;
+  readonly name: string;
+  readonly width: number;
+  readonly height: number;
+  /** `bc1`..`bc7` for blocks, `rgba8` for the decoded fallback. */
+  readonly format: string;
+  readonly compressed: boolean;
+  /** The chain, largest first. Never empty. */
+  readonly mips: readonly WireMip[];
+  readonly section: number;
+  readonly source: string | null;
+};
+
+/**
+ * A streamed model: the same drawables as before, with textures as GPU blocks.
+ *
+ * `textures[].levels` are views over the response buffer, so this object owns
+ * the only reference keeping those bytes alive. Upload them and let it go.
+ */
+export type WorldModel = {
+  readonly path: string;
+  readonly drawables: ModelPreview["drawables"];
+  readonly emptyDrawables: number;
+  readonly textures: readonly (WireTexture & { readonly levels: readonly Uint8Array[] })[];
+};
+
+/**
+ * Read a model file's geometry, every LOD, for the world view to draw.
+ *
+ * Comes back as a wire envelope rather than JSON: the pixels used to be decoded
+ * out of their block format, re-encoded as PNG and base64'd, which measured
+ * 11.60s against 2.57s over 58 real city models, for a *larger* payload. See
+ * `src-tauri/src/textures.rs`.
+ */
+export async function worldModel(path: string): Promise<WorldModel> {
+  const buffer = await invoke<ArrayBuffer>("world_model", { path });
+  const envelope = readEnvelope(buffer);
+  if (envelope.kind !== Kind.Model) {
+    throw new Error(`${path} came back as envelope kind ${envelope.kind}, not a model`);
+  }
+  const meta = envelope.meta as Omit<WorldModel, "textures"> & {
+    readonly textures: readonly WireTexture[];
+  };
+  return {
+    path: meta.path,
+    drawables: meta.drawables,
+    emptyDrawables: meta.emptyDrawables,
+    textures: meta.textures.map((texture) => {
+      const section = envelope.section(texture.section);
+      return {
+        ...texture,
+        levels: section ? splitMips(section, texture.mips.map((mip) => mip.byteLength)) : [],
+      };
+    }),
+  };
 }
 
 /** Save a world project payload to disk. Returns the byte count written. */
@@ -215,7 +298,7 @@ export type GeometryLoad = {
   readonly mapKey: string;
   readonly entity: Placed;
   readonly modelPath: string;
-  readonly model: ModelPreview;
+  readonly model: WorldModel;
 };
 
 /** An edited transform, overriding a placement's stored one. */

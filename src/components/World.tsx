@@ -11,7 +11,8 @@ import {
   X,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
-import { decodeBase64, decodeFloats, decodeUints, type ModelPreview } from "../lib/viewer";
+import { decodeFloats, decodeUints } from "../lib/viewer";
+import { reportGpuCaps } from "../lib/gpu";
 import {
   applyEdit,
   axisRotate,
@@ -43,6 +44,7 @@ import {
   type HistoryEntry,
   type Placed,
   type RegionEntry,
+  type WorldModel,
   type TransformEdit,
   type WorldMap,
   type WorldStatus,
@@ -66,7 +68,7 @@ const STREAM_INTERVAL_MS = 250;
  * re-decoding model geometry.
  */
 const assetCache = new Map<string, string | null>();
-const modelCache = new Map<string, ModelPreview>();
+const modelCache = new Map<string, WorldModel>();
 /** The mounted game folder, so the session caches drop when it changes. */
 let lastFolder: string | null = null;
 
@@ -279,6 +281,11 @@ export function World(): React.JSX.Element {
         if (!modelPath) return;
         let model = modelCache.get(modelPath);
         if (!model) {
+          // Awaited here rather than in an effect so the ordering holds by
+          // construction: no model is ever asked for before the backend knows
+          // which block formats this context can take. Memoized, so every call
+          // after the first is one already-resolved promise.
+          await reportGpuCaps();
           model = await worldModel(modelPath);
           modelCache.set(modelPath, model);
         }
@@ -1937,6 +1944,14 @@ function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
       }
       if (resolved.normal) {
         material.normalMap = resolved.normal;
+        // RAGE bump maps are left-handed (DirectX) tangent space: the reference
+        // shader pushes green along the bitangent, and three.js expects the
+        // OpenGL convention where it points the other way. A negative y on
+        // `normalScale` inverts the green channel in the shader, which is the
+        // same correction the Explorer's viewer makes on the CPU and the only
+        // one available when the pixels are never decoded. Without it bumps
+        // read as dents.
+        material.normalScale = new THREE.Vector2(1, -1);
         material.needsUpdate = true;
       }
       const mesh = new THREE.Mesh(geometry, material);
@@ -1948,39 +1963,114 @@ function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
   });
 }
 
-/** The texture map for one part, resolved against the model's decoded PNGs. */
+/** The texture map for one part, resolved against the model's uploaded blocks. */
 function resolvePartTextures(
   part: { readonly diffuse: number | null; readonly normal: number | null },
-  textures: readonly { readonly hash: number; readonly png: string }[],
+  textures: WorldModel["textures"],
 ): { diffuse: THREE.Texture | null; normal: THREE.Texture | null } {
   const byHash = new Map(textures.map((texture) => [texture.hash, texture]));
   const diffuse = part.diffuse === null ? null : byHash.get(part.diffuse);
   const normal = part.normal === null ? null : byHash.get(part.normal);
   return {
-    diffuse: diffuse ? textureFromPng(diffuse.png) : null,
-    normal: normal ? textureFromPng(normal.png) : null,
+    // Diffuse carries colour and is authored in sRGB; a normal map carries
+    // vectors and must stay linear. Getting this backwards washes the whole
+    // scene out, and it is set per slot because the texture does not know
+    // which it is.
+    diffuse: diffuse ? uploadTexture(diffuse, THREE.SRGBColorSpace) : null,
+    normal: normal ? uploadTexture(normal, THREE.NoColorSpace) : null,
   };
 }
 
+/** The WebGL internal format each wire format name uploads as. */
+const BLOCK_FORMATS: Readonly<Record<string, THREE.CompressedPixelFormat>> = {
+  // The RGBA variant of DXT1 rather than the RGB one: same blocks, and it
+  // honours the 1-bit alpha GTA uses for cutouts.
+  bc1: THREE.RGBA_S3TC_DXT1_Format,
+  bc2: THREE.RGBA_S3TC_DXT3_Format,
+  bc3: THREE.RGBA_S3TC_DXT5_Format,
+  bc4: THREE.RED_RGTC1_Format,
+  bc5: THREE.RED_GREEN_RGTC2_Format,
+  bc7: THREE.RGBA_BPTC_Format,
+};
+
+/**
+ * Textures uploaded this session, keyed by the hash the parts reference plus
+ * the colour space they were uploaded in.
+ *
+ * The key used to be the entire base64 PNG string, which meant every cache
+ * probe hashed a megabyte. The hash is what the parts actually reference, and
+ * the colour space is in the key because the same texture can legitimately be
+ * bound as both a diffuse and a normal map by two different parts.
+ */
 const textureCache = new Map<string, THREE.Texture>();
 
-/** Decode one resolved texture once and keep it for the session. */
-function textureFromPng(png: string): THREE.Texture {
-  let cached = textureCache.get(png);
+/**
+ * Upload one texture's blocks straight to the GPU.
+ *
+ * `CompressedTexture` hands the mip chain to `compressedTexImage2D` level by
+ * level, so nothing here decodes anything — the `Uint8Array`s are views over
+ * the IPC response and go to the driver as they arrived.
+ *
+ * The one subtlety is an incomplete chain. WebGL renders a texture as black if
+ * it declares mips that do not run all the way down to 1x1, and a GTA
+ * dictionary may store a truncated chain. When the last level is not 1x1 this
+ * uploads mip 0 alone with a non-mipmapped filter, which is worse-looking at
+ * distance and correct, rather than the alternative.
+ */
+function uploadTexture(
+  texture: WorldModel["textures"][number],
+  colorSpace: THREE.ColorSpace,
+): THREE.Texture {
+  const key = `${texture.hash}|${texture.format}|${colorSpace}`;
+  const cached = textureCache.get(key);
   if (cached) return cached;
-  const bytes = decodeBase64(png);
-  const blob = new Blob([bytes as BlobPart], { type: "image/png" });
-  const url = URL.createObjectURL(blob);
-  const image = new Image();
-  const texture = new THREE.Texture();
-  textureCache.set(png, texture);
-  image.addEventListener("load", () => {
-    texture.image = image;
-    texture.needsUpdate = true;
-    URL.revokeObjectURL(url);
-  });
-  image.src = url;
-  return texture;
+
+  const last = texture.mips[texture.levels.length - 1];
+  const complete =
+    texture.levels.length > 1 && last !== undefined && last.width <= 1 && last.height <= 1;
+  const levels = complete ? texture.levels : texture.levels.slice(0, 1);
+  const mipmaps = levels.map((data, level) => ({
+    data,
+    width: texture.mips[level]!.width,
+    height: texture.mips[level]!.height,
+  }));
+
+  let built: THREE.Texture;
+  if (texture.compressed) {
+    const format = BLOCK_FORMATS[texture.format];
+    if (!format) throw new Error(`${texture.name} is in an unknown block format`);
+    built = new THREE.CompressedTexture(
+      mipmaps,
+      texture.width,
+      texture.height,
+      format,
+      THREE.UnsignedByteType,
+    );
+  } else {
+    // The backend's fallback for a format this context has no extension for.
+    // Still no PNG in the path: these are raw RGBA bytes.
+    built = new THREE.DataTexture(
+      mipmaps[0]!.data,
+      mipmaps[0]!.width,
+      mipmaps[0]!.height,
+      THREE.RGBAFormat,
+      THREE.UnsignedByteType,
+    );
+    built.mipmaps = mipmaps as THREE.Texture["mipmaps"];
+  }
+
+  built.colorSpace = colorSpace;
+  // GTA authors its textures to tile; clamping them stretches the edge texel
+  // across every repeat of a building facade.
+  built.wrapS = THREE.RepeatWrapping;
+  built.wrapT = THREE.RepeatWrapping;
+  built.minFilter = complete ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
+  built.magFilter = THREE.LinearFilter;
+  built.generateMipmaps = false;
+  built.needsUpdate = true;
+
+  textureCache.set(key, built);
+  return built;
 }
 
 /** Set one instance's matrix to a uniform scale (0 hides a marker). */

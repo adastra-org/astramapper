@@ -458,6 +458,9 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
     let mut compared = 0usize;
     let mut mips = 0usize;
     let mut fallbacks = 0usize;
+    // Which block formats real placed geometry actually uses, printed below.
+    // The shader work needs this to know what it has to handle.
+    let mut by_format: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
 
     for model in &models {
         let started = Instant::now();
@@ -510,7 +513,9 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
             if !compressed {
                 fallbacks += 1;
             }
-            let format = match texture["format"].as_str().unwrap() {
+            let format_name = texture["format"].as_str().unwrap();
+            *by_format.entry(format_name.to_string()).or_default() += 1;
+            let format = match format_name {
                 "bc1" => Some(TextureFormat::Dxt1),
                 "bc2" => Some(TextureFormat::Dxt3),
                 "bc3" => Some(TextureFormat::Dxt5),
@@ -565,6 +570,10 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
         mb(block_bytes),
         png_time.as_secs_f64() / block_time.as_secs_f64().max(f64::EPSILON)
     );
+    let total: usize = by_format.values().sum();
+    for (format, count) in &by_format {
+        println!("  {format:6} {count:5}  {:.1}%", 100.0 * *count as f64 / total as f64);
+    }
 }
 
 /// The `.ytd` that should sit beside a model file.
