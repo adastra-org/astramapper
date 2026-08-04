@@ -75,6 +75,44 @@ pub struct RpfManager {
     /// The `.rpf` files currently mapped into memory. See
     /// [`crate::rpf::mapped`] for why extraction reads through a mapping.
     maps: ArchiveMaps,
+    /// What each archive's bytes on disk looked like at scan time, parallel to
+    /// `archives`. See [`Self::archive_stamps`].
+    stamps: OnceLock<Vec<u64>>,
+}
+
+/// A cheap identity for one `.rpf` file on disk: its length and its modified
+/// time, mixed together.
+///
+/// Not a content hash. Hashing 120 GB to find out whether anything changed
+/// costs more than every read it could save, and length-plus-mtime is what
+/// every build system on the planet settles for. A patch that rewrites an
+/// archive changes both.
+///
+/// Zero when the file cannot be stat'd, which reads as "unknown" — a caller
+/// keying on this must treat zero as never matching, because an unreadable
+/// file is not evidence that nothing changed.
+pub fn stamp_file(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    // A 64-bit mix so a one-second mtime change moves every bit, rather than
+    // only the low ones. Splitmix64's finalizer.
+    let mut x = meta.len() ^ modified.rotate_left(32);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let mixed = x ^ (x >> 31);
+    // Zero means "unknown", so never produce it by accident.
+    if mixed == 0 {
+        1
+    } else {
+        mixed
+    }
 }
 
 impl RpfManager {
@@ -310,6 +348,39 @@ impl RpfManager {
         })
     }
 
+    /// What each archive's bytes on disk looked like, parallel to `archives`.
+    ///
+    /// A **nested archive inherits its top-level ancestor's stamp**, because a
+    /// nested `.rpf` has no separate existence on disk: patching
+    /// `update\update.rpf` rewrites every archive inside it at once, and there
+    /// is nothing else to stat. That inheritance is the whole value of stamping
+    /// per archive rather than per install — a patch to one `.rpf` invalidates
+    /// only what came out of it, not the other 178.
+    ///
+    /// Built once and kept. Stat'ing 179 files is cheap; doing it per cache
+    /// lookup would not be.
+    pub fn archive_stamps(&self) -> &[u64] {
+        self.stamps.get_or_init(|| {
+            let mut stamps: Vec<u64> = Vec::with_capacity(self.archives.len());
+            for (index, parent) in self.archive_parent.iter().enumerate() {
+                let stamp = match parent {
+                    Some(parent) => stamps[*parent],
+                    None => stamp_file(&self.archives[index].physical_path),
+                };
+                stamps.push(stamp);
+            }
+            stamps
+        })
+    }
+
+    /// The stamp of the archive an entry came out of.
+    pub fn stamp_of(&self, reference: EntryRef) -> u64 {
+        self.archive_stamps()
+            .get(reference.archive)
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Every `.ytd` keyed by the Jenkins hash of its stem, built once.
     ///
     /// An archetype names its texture dictionary by hash, not by path, so this
@@ -445,6 +516,81 @@ fn collect_rpf_paths(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// An unreadable file has to stamp as zero, because a caller keying a cache
+    /// on this must be able to tell "unchanged" from "no idea".
+    #[test]
+    fn an_unreadable_file_stamps_as_unknown() {
+        assert_eq!(stamp_file(Path::new("nowhere-at-all.rpf")), 0);
+    }
+
+    #[test]
+    fn a_files_stamp_is_stable_and_moves_with_its_contents() {
+        let dir = std::env::temp_dir().join(format!("astramapper-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.rpf");
+
+        std::fs::write(&path, b"one").unwrap();
+        let first = stamp_file(&path);
+        assert_ne!(first, 0);
+        assert_eq!(first, stamp_file(&path), "the same file stamps the same");
+
+        // A different length is enough on its own; mtime resolution varies by
+        // filesystem and this must not depend on it.
+        std::fs::write(&path, b"a longer payload").unwrap();
+        assert_ne!(stamp_file(&path), first, "rewriting it moves the stamp");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The point of stamping per archive rather than per install: patching one
+    /// `.rpf` must invalidate what came out of it and nothing else. A nested
+    /// archive has no separate existence on disk, so it inherits.
+    #[test]
+    fn a_nested_archive_inherits_its_top_level_stamp() {
+        let archive = |physical: &str| RpfFile {
+            name: "a.rpf".into(),
+            name_lower: "a.rpf".into(),
+            path: "a.rpf".into(),
+            physical_path: PathBuf::from(physical),
+            file_size: 0,
+            start_pos: 0,
+            version: 7,
+            entry_count: 0,
+            names_length: 0,
+            encryption: crate::rpf::RpfEncryption::None,
+            entries: Vec::new(),
+            children: Vec::new(),
+        };
+
+        let mut manager = RpfManager::default();
+        // The top-level archive's path is real, so it stamps non-zero; the
+        // nested ones have no path of their own, which is the point.
+        let real = std::env::temp_dir().join(format!("astramapper-nest-{}.rpf", std::process::id()));
+        std::fs::write(&real, b"payload").unwrap();
+        manager.archives = vec![
+            archive(&real.to_string_lossy()),
+            archive(""),
+            archive(""),
+        ];
+        // Archive 1 is nested in 0; archive 2 is nested in 1.
+        manager.archive_parent = vec![None, Some(0), Some(1)];
+
+        let stamps = manager.archive_stamps();
+        assert_eq!(stamps.len(), 3);
+        assert_ne!(stamps[0], 0, "a real file stamps");
+        assert_eq!(stamps[1], stamps[0], "a nested archive inherits");
+        assert_eq!(stamps[2], stamps[0], "and so does one nested two deep");
+        assert_eq!(
+            manager.stamp_of(EntryRef {
+                archive: 2,
+                entry: 0
+            }),
+            stamps[0]
+        );
+
+        let _ = std::fs::remove_file(&real);
+    }
+
     #[test]
     fn normalizes_separators_and_case() {
         assert_eq!(
@@ -519,6 +665,7 @@ mod tests {
             asset_index: OnceLock::new(),
             ytd_by_hash: OnceLock::new(),
             maps: ArchiveMaps::default(),
+            stamps: OnceLock::new(),
         };
 
         let names = manager.index_names();
@@ -576,6 +723,7 @@ mod tests {
             asset_index: OnceLock::new(),
             ytd_by_hash: OnceLock::new(),
             maps: ArchiveMaps::default(),
+            stamps: OnceLock::new(),
         };
 
         let by_folder = manager.ytds();
@@ -644,6 +792,7 @@ mod tests {
             asset_index: OnceLock::new(),
             ytd_by_hash: OnceLock::new(),
             maps: ArchiveMaps::default(),
+            stamps: OnceLock::new(),
         };
 
         let index = manager.assets();
