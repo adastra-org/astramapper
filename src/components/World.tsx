@@ -13,6 +13,7 @@ import {
 import { formatHash } from "../lib/format";
 
 import { reportGpuCaps } from "../lib/gpu";
+import { BakePanel } from "./world/BakePanel";
 import {
   applyEdit,
   axisRotate,
@@ -642,6 +643,10 @@ export function World(): React.JSX.Element {
                       Loads the nearest placed entities' models as you fly, swapping
                       LOD by distance.
                     </p>
+                  </Section>
+
+                  <Section title="Asset cache">
+                    <BakePanel groups={[...checkedGroups]} />
                   </Section>
                 </>
               )}

@@ -131,7 +131,13 @@ pub async fn open_game_folder(
     app: tauri::AppHandle,
     folder: String,
     state: State<'_, GameState>,
+    bake: State<'_, Arc<crate::bake::BakeState>>,
 ) -> Result<GameSummary, String> {
+    // Stop the bake before scanning, not after: it is about to be working
+    // against an install nobody can see any more. It is not joined, and does not
+    // need to be — it holds an `Arc<Loaded>`, so the install and the cache it
+    // writes to stay alive until it winds down on its own.
+    bake.cancel();
     let path = PathBuf::from(&folder);
     // Resolved here rather than inside the scan, so `scan` stays free of Tauri
     // and the gate can drive it.

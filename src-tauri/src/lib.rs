@@ -7,6 +7,7 @@
 
 // Public so `tests/explorer_gate.rs` can drive the listing logic against a real
 // scan without a Tauri runtime.
+pub mod bake;
 pub mod cache;
 pub mod explorer;
 pub mod viewer;
@@ -40,6 +41,9 @@ pub fn run() {
         .manage(explorer::GameState::default())
         .manage(viewer::ViewerState::default())
         .manage(world::GpuState::default())
+        // An `Arc` because `open_game_folder` cancels the running bake, and the
+        // pass itself holds the same flag from a blocking thread.
+        .manage(std::sync::Arc::new(bake::BakeState::default()))
         .plugin(tauri_plugin_opener::init())
         // Picking the GTA V install folder.
         .plugin(tauri_plugin_dialog::init())
@@ -55,6 +59,9 @@ pub fn run() {
             explorer::release_archives,
             cache::cache_stats,
             cache::cache_clear,
+            bake::bake_start,
+            bake::bake_cancel,
+            bake::bake_running,
             world::world_status,
             world::world_dlc_ymaps,
             world::world_maps_in_group,

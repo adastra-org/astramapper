@@ -53,7 +53,7 @@ const MAX_YMAPS_PER_GROUP: usize = 200;
 /// which hands back an owned `Arc<Loaded>` and drops the read guard before
 /// returning, then move that `Arc` into the closure. A `RwLockReadGuard` is
 /// neither `Send` nor `'static` and will not compile here, which is the point.
-async fn blocking<T, F>(work: F) -> Result<T, String>
+pub(crate) async fn blocking<T, F>(work: F) -> Result<T, String>
 where
     F: FnOnce() -> Result<T, String> + Send + 'static,
     T: Send + 'static,

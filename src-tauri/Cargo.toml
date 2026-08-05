@@ -30,6 +30,9 @@ tauri-plugin-store = "2"
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
+# The bake pass compiles thousands of models. Its pool is sized to leave a core
+# for whatever the user is waiting on.
+rayon.workspace = true
 
 [dev-dependencies]
 # The explorer gate drives cw-core directly to build a manager to list.

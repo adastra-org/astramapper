@@ -71,6 +71,7 @@ dependencies = [
  "base64 0.22.1",
  "cw-cache",
  "cw-core",
+ "rayon",
  "serde",
  "serde_json",
  "tauri",
