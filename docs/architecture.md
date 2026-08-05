@@ -9,6 +9,7 @@ in the system WebView.
 ```
 Cargo.toml            workspace root, shared dependency versions
 crates/cw-core/       parsers, crypto, RPF reader, meta, world models, wire format
+crates/cw-cache/      pack-file disk cache for compiled assets
 src-tauri/            Tauri app: commands, state, IPC, windows
 src/                  React frontend
 ```
@@ -21,6 +22,13 @@ wgpu renderer; the phase 3 spike decided against a native surface (see
 `cargo test` and reusable from a CLI or another frontend. `src-tauri` is the
 only crate that knows an app exists; it owns state and IPC and delegates every
 parse downward.
+
+`cw-cache` depends on **neither** `tauri` nor `cw-core`. It stores opaque bytes
+under an opaque key; what the bytes mean is the caller's business. That is what
+makes its round trip testable with no app and no game install, and it is why
+`src-tauri` resolves the cache directory from `app_cache_dir()` and hands it in
+rather than the crate reaching for one. See [phase 4.5-4.7](phases.md) for the
+three decisions behind it.
 
 The layout maps onto the original like this:
 

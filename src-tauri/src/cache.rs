@@ -12,8 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
-use cw_cache::{Cache, CacheKey, CacheStats, KeyInputs, Kind, DEFAULT_BUDGET};
+use cw_cache::{Cache, CacheKey, KeyInputs, Kind, DEFAULT_BUDGET};
 use cw_core::rpf::{stamp_file, RpfManager};
+use serde::Serialize;
 use tauri::{Manager, State};
 
 use crate::explorer::GameState;
@@ -71,15 +72,46 @@ fn entry_key(manager: &RpfManager, path: &str, kind: Kind, params: u64) -> Optio
     })
 }
 
+/// [`cw_cache::CacheStats`] in the shape the WebView reads.
+///
+/// A mirror rather than a serde attribute on the original, because camelCase is
+/// this app's IPC convention and `cw-cache` is not supposed to know an app
+/// exists.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireCacheStats {
+    pub bytes: u64,
+    pub budget_bytes: u64,
+    pub records: usize,
+    pub packs: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub write_errors: u64,
+}
+
+impl From<cw_cache::CacheStats> for WireCacheStats {
+    fn from(stats: cw_cache::CacheStats) -> Self {
+        Self {
+            bytes: stats.bytes,
+            budget_bytes: stats.budget_bytes,
+            records: stats.records,
+            packs: stats.packs,
+            hits: stats.hits,
+            misses: stats.misses,
+            write_errors: stats.write_errors,
+        }
+    }
+}
+
 /// What the cache holds right now, for the settings panel.
 ///
 /// `None` when no folder is open or the cache could not be opened, which the UI
 /// shows as "off" rather than as a failure.
 #[tauri::command]
-pub fn cache_stats(game: State<'_, GameState>) -> Result<Option<CacheStats>, String> {
+pub fn cache_stats(game: State<'_, GameState>) -> Result<Option<WireCacheStats>, String> {
     Ok(game
         .try_loaded()
-        .and_then(|loaded| loaded.cache.as_ref().map(|cache| cache.stats())))
+        .and_then(|loaded| loaded.cache.as_ref().map(|cache| cache.stats().into())))
 }
 
 /// Throw the cache away. The visible escape hatch for a cache gone wrong.

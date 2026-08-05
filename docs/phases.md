@@ -979,11 +979,10 @@ Like for like over those 58 models, geometry and textures together: **12.97s to
 serializes as base64 for the Explorer's JSON commands and hands out its bytes for
 the envelope.
 
-### 4.5 The cache's storage layer — **partial**
+### 4.5 The cache's storage layer — **DONE**
 
-`crates/cw-cache` holds keys, pack files and the index journal, with 26 tests.
-**The `Cache` facade over them is not written yet**, nor is any wiring into the
-app. Three decisions, each argued in its module header:
+`crates/cw-cache` holds keys, pack files and the index journal. Three decisions,
+each argued in its module header:
 
 - **Keyed by source, not content.** Content-addressing means extracting to find
   out whether extraction was needed, which is the work being avoided. The cost is
@@ -998,7 +997,7 @@ app. Three decisions, each argued in its module header:
 
 The crate depends on neither `tauri` nor `cw-core`: it stores opaque bytes under
 an opaque key, which is what makes the round trip testable with no app and no
-install. `src-tauri` will resolve `app_cache_dir()` and pass it in.
+install. `src-tauri` resolves `app_cache_dir()` and passes it in.
 
 Surviving a kill mid-bake is treated as the normal case. Nothing fsyncs, journal
 replay stops at the first torn record, and any record whose bytes do not fit the
@@ -1010,12 +1009,89 @@ inheriting its top-level ancestor's stamp. That inheritance is the point of
 stamping per archive rather than per install — **patching `update.rpf` must
 invalidate what came out of it and not the other 178.**
 
+### 4.6 The `Cache` facade, and models served from it — **DONE**
+
+`Cache::open` checks a manifest and **wipes on a format or install mismatch**.
+There is no migration path and there should not be one: a migration is a bug
+surface with a silent failure mode, guarding data that costs one bake to rebuild.
+
+`world_model` goes through `get_or_insert_with`, so the on-demand and the
+background paths are one line and cannot drift. **Measured over 58 placed city
+models: 4.26s cold, 55ms warm, 90.6 MB stored.**
+
+The rule the facade is built around: **a cache failure may never fail the
+operation that asked for it.** `get` returns `Option`, write failures land in a
+counter, and a poisoned lock is taken anyway rather than propagated — a panic in
+one thread must not disable caching for the session.
+
+Two things worth knowing about the implementation:
+
+- **Every pack is mapped at open**, not on first read. A pack that is not mapped
+  cannot be an eviction candidate, so lazy mapping would leave the budget
+  enforced against the one pack being written.
+- Reads and appends use separate handles, so a record written after a mapping was
+  taken falls outside it. `get` notices, remaps once and retries. That is also
+  exactly what a torn append looks like, and it resolves the same way: a miss.
+
+**GPU capabilities are in the key.** The same texture compiles to different bytes
+on a machine without BPTC, and two GPUs must not read each other's artifacts.
+
+The cache is owned by `explorer::Loaded` rather than held in its own Tauri state,
+because its contents are scoped to one install. That removes the state where an
+open cache and an open game folder disagree about which folder that is.
+
+`cache_gate.rs` pins the assertion that matters: **byte identity between what the
+compiler produced and what a reopened cache serves.** A cache that serves nearly
+the right bytes is worse than no cache, because the failure is silent and looks
+like a parser bug. Invalidation is not gated there on purpose — proving it means
+writing to the game folder, and the three unit tests it decomposes into already
+pin it.
+
+### 4.7 The background bake — **DONE**
+
+**By reachability, never by enumeration.** A naive full bake is tens of gigabytes
+of peds, vehicles, weapons and cutscenes; this one considers only models a
+`.ymap` entity's archetype names, which falls out of walking the maps.
+
+**Ordered by placement frequency, descending**, which is what makes a bake
+cancelled or budget-stopped halfway still worth having. Measured over the base
+game by `bake_gate.rs`:
+
+| | |
+| --- | --- |
+| Distinct reachable models | 56,166 |
+| Placements of them | 692,953 |
+| Share of the install's 403,642 entries | 13.9% |
+| Walk time | 2.1s |
+
+| Models baked | Share of all placements covered |
+| --- | --- |
+| top 100 | 55.5% |
+| top 500 | 75.9% |
+| top 1,000 | 83.6% |
+| top 5,000 | 92.5% |
+
+At the budget the pass **stops enqueueing rather than evicting**: a bake that
+evicted its own earlier work would run forever and finish holding whatever it did
+last.
+
+Its rayon pool is sized `(cpus - 1).max(1)`, so it cannot starve the model the
+user is waiting on, and progress is coalesced to 4 Hz because one event per item
+at this scale would cost more than the bake. `open_game_folder` cancels it but
+does not join it — the pass holds an `Arc<Loaded>`, so the install and the cache
+it writes to outlive the folder change.
+
+The pass itself is not gated: driving it needs a `tauri::ipc::Channel`, which
+needs a running app. Its state machine is unit tested and its reachability walk
+is gated.
+
 ### Still to come
 
-The `Cache` facade and the background bake pass; the shader parameter values and
-extended vertex decode that phase 4 skipped and that the shader work now needs;
-the `World.tsx` decomposition and spatial streaming index; GLSL shader profiles;
-layers, search and multi-select; and the collision and AI path layers.
+The shader parameter values and extended vertex decode that phase 4 skipped and
+that the shader work now needs; serializing the install-scoped indexes into the
+pinned pack, which is what would make a *warm launch* instant rather than a warm
+model; the `World.tsx` decomposition and spatial streaming index; GLSL shader
+profiles; layers, search and multi-select; and the collision and AI path layers.
 
 Two gaps are visible in the app today and are expected rather than regressions.
 **Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is
