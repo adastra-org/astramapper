@@ -139,7 +139,10 @@ pub fn append(dir: &Path, record: &Record) -> Result<u64> {
 /// **Atomic by rename.** Writing `index.bin` in place would leave the cache
 /// unreadable if the process died halfway, and unreadable is worse than stale:
 /// the whole point of the table is that it can be trusted on open.
-pub fn compact(dir: &Path, index: &Index) -> Result<()> {
+///
+/// Takes `&mut` only to zero [`Index::journal_len`]: leaving that to the caller
+/// makes forgetting it a silent bug that compacts on every write from then on.
+pub fn compact(dir: &Path, index: &mut Index) -> Result<()> {
     let mut bytes = Vec::with_capacity(index.records.len() * RECORD_BYTES);
     // Sorted, so the file is deterministic and diffable, and so a future
     // version can binary-search it without loading the map.
@@ -160,6 +163,7 @@ pub fn compact(dir: &Path, index: &Index) -> Result<()> {
     })?;
     // Only now is the journal redundant.
     let _ = std::fs::remove_file(dir.join("index.log"));
+    index.journal_len = 0;
     Ok(())
 }
 
@@ -286,10 +290,11 @@ mod tests {
         let scratch = Scratch::new("compact");
         append(&scratch.0, &record(1, 0, 0, 10)).expect("append");
         append(&scratch.0, &record(2, 0, 10, 20)).expect("append");
-        let index = Index::load(&scratch.0).expect("load");
-        compact(&scratch.0, &index).expect("compact");
+        let mut index = Index::load(&scratch.0).expect("load");
+        compact(&scratch.0, &mut index).expect("compact");
 
         assert!(!scratch.0.join("index.log").exists(), "journal is gone");
+        assert_eq!(index.journal_len, 0, "and so is the reason to compact again");
         let reloaded = Index::load(&scratch.0).expect("load");
         assert_eq!(reloaded.records.len(), 2);
         assert_eq!(reloaded.journal_len, 0);
@@ -299,8 +304,8 @@ mod tests {
     fn compaction_then_more_writes_keeps_both() {
         let scratch = Scratch::new("compact-then-write");
         append(&scratch.0, &record(1, 0, 0, 10)).expect("append");
-        let index = Index::load(&scratch.0).expect("load");
-        compact(&scratch.0, &index).expect("compact");
+        let mut index = Index::load(&scratch.0).expect("load");
+        compact(&scratch.0, &mut index).expect("compact");
         append(&scratch.0, &record(2, 0, 10, 20)).expect("append");
 
         let reloaded = Index::load(&scratch.0).expect("load");

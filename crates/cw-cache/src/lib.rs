@@ -1,8 +1,8 @@
 //! `cw-cache` — a pack-file disk cache for compiled assets.
 //!
-//! **Status: the storage layer is here and tested; the `Cache` facade over it
-//! is not written yet.** See `docs/phases.md` under phase 4 for where this sits
-//! and what is meant to come next.
+//! Start at [`Cache`]. The three modules under it are the storage layer: what
+//! identifies an artifact ([`key`]), where its bytes live ([`pack`]), and which
+//! key is where ([`index`]).
 //!
 //! # Why this crate exists at all
 //!
@@ -34,10 +34,12 @@
 //!
 //! Each module's header carries the reasoning for its own half.
 
+pub mod cache;
 pub mod index;
 pub mod key;
 pub mod pack;
 
+pub use cache::{Cache, CacheStats, DEFAULT_BUDGET, MIN_BUDGET};
 pub use key::{CacheKey, KeyInputs, Kind, FORMAT_VERSION};
 
 /// What can go wrong reaching the cache.

@@ -105,6 +105,15 @@ impl Pack {
     pub fn last_hit(&self) -> u64 {
         self.last_hit.load(Ordering::Relaxed)
     }
+
+    /// Mark the pack as used without reading from it.
+    ///
+    /// A pack that has just been filled and closed has never been *read*, so its
+    /// clock is zero and eviction would pick it first — throwing away the newest
+    /// work in the cache. Mapping it counts as use.
+    pub fn touch(&self, clock: u64) {
+        self.last_hit.store(clock, Ordering::Relaxed);
+    }
 }
 
 /// The single writer: appends to the newest pack and rolls over when it fills.
@@ -171,15 +180,6 @@ impl PackWriter {
     fn roll_over(&mut self) -> Result<()> {
         let next = self.id.wrapping_add(1);
         *self = Self::open(&self.dir, next)?;
-        Ok(())
-    }
-
-    /// Switch to writing a specific pack — used to send pinned records to the
-    /// pinned pack without disturbing the rolling one.
-    pub fn reopen(&mut self, id: u32) -> Result<()> {
-        if self.id != id {
-            *self = Self::open(&self.dir.clone(), id)?;
-        }
         Ok(())
     }
 }
@@ -313,5 +313,19 @@ mod tests {
         // A miss must not count as use, or an evicted pack could look live.
         pack.read(0, 999, 88);
         assert_eq!(pack.last_hit(), 77);
+    }
+
+    /// Mapping a pack that was just filled counts as use, or the newest work in
+    /// the cache would be the first thing eviction takes.
+    #[test]
+    fn touching_a_pack_records_the_clock() {
+        let scratch = Scratch::new("touch");
+        let mut writer = PackWriter::open(&scratch.0, 0).expect("writer");
+        writer.append(b"abcd").expect("append");
+        drop(writer);
+
+        let pack = Pack::open(&scratch.0, 0).expect("open").expect("mapped");
+        pack.touch(12);
+        assert_eq!(pack.last_hit(), 12);
     }
 }
