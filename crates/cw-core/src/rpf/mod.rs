@@ -19,5 +19,5 @@ pub use entry::{
     size_from_flags, BinaryEntry, DirectoryEntry, EntryKind, ResourceEntry, RpfEncryption, RpfEntry,
 };
 pub use file::{RpfFile, RPF7, SECTOR};
-pub use manager::{EntryRef, RpfManager, ScanError};
+pub use manager::{stamp_file, EntryRef, RpfManager, ScanError};
 pub use mapped::{ArchiveMaps, MAX_LIVE_MAPPINGS};

@@ -24,6 +24,11 @@ pub struct Loaded {
     /// extraction.
     pub keys: GtaKeys,
     pub manager: RpfManager,
+    /// The compiled-asset cache for this install, or `None` when it could not be
+    /// opened. Owned here because its contents are scoped to this folder: when
+    /// the install goes, so does the handle to its cache. See
+    /// [`crate::cache`].
+    pub cache: Option<cw_cache::Cache>,
     /// The archetype indexes, built once when the first map is placed. Reading
     /// every `.ytyp` is expensive, so they are kept, not rebuilt per map, and
     /// both halves come out of the same pass.
@@ -123,11 +128,15 @@ pub struct Listing {
 /// thread.
 #[tauri::command]
 pub async fn open_game_folder(
+    app: tauri::AppHandle,
     folder: String,
     state: State<'_, GameState>,
 ) -> Result<GameSummary, String> {
     let path = PathBuf::from(&folder);
-    let (loaded, summary) = tauri::async_runtime::spawn_blocking(move || scan(&path))
+    // Resolved here rather than inside the scan, so `scan` stays free of Tauri
+    // and the gate can drive it.
+    let assets = crate::cache::assets_dir(&app);
+    let (loaded, summary) = tauri::async_runtime::spawn_blocking(move || scan(&path, assets))
         .await
         .map_err(|e| format!("the scan task failed: {e}"))??;
 
@@ -135,7 +144,7 @@ pub async fn open_game_folder(
     Ok(summary)
 }
 
-fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
+fn scan(folder: &Path, assets: Option<PathBuf>) -> Result<(Loaded, GameSummary), String> {
     let started = std::time::Instant::now();
 
     let exe = folder.join("GTA5.exe");
@@ -169,6 +178,7 @@ fn scan(folder: &Path) -> Result<(Loaded, GameSummary), String> {
             folder: folder.display().to_string(),
             keys,
             manager,
+            cache: crate::cache::open(assets, folder),
             archetypes: OnceLock::new(),
             names: OnceLock::new(),
         },

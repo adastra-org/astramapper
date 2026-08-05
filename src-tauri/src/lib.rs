@@ -7,6 +7,7 @@
 
 // Public so `tests/explorer_gate.rs` can drive the listing logic against a real
 // scan without a Tauri runtime.
+pub mod cache;
 pub mod explorer;
 pub mod viewer;
 pub mod textures;
@@ -52,6 +53,8 @@ pub fn run() {
             explorer::list_dir,
             explorer::game_is_open,
             explorer::release_archives,
+            cache::cache_stats,
+            cache::cache_clear,
             world::world_status,
             world::world_dlc_ymaps,
             world::world_maps_in_group,

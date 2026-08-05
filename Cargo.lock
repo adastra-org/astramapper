@@ -69,6 +69,7 @@ name = "astramapper"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "cw-cache",
  "cw-core",
  "serde",
  "serde_json",

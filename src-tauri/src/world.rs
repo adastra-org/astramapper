@@ -574,6 +574,12 @@ pub fn compile_world_model(
     Ok(envelope.finish(Kind::Model, &json))
 }
 
+/// The world view's hot path: one compiled model, from the cache when it can be.
+///
+/// The cached and the interactive path are the same line, which is what makes
+/// "compile on demand" and "bake in the background" the same code. A model the
+/// cache has never seen is compiled here and stored on the way out; one it has
+/// is a mapped read and a memcpy.
 #[tauri::command]
 pub async fn world_model(
     path: String,
@@ -583,13 +589,22 @@ pub async fn world_model(
     let loaded = game.loaded()?;
     let caps = gpu.get();
     blocking(move || {
-        compile_world_model(
-            &path,
-            &loaded.keys,
-            &loaded.manager,
-            Some(loaded.archetypes()),
-            caps,
-        )
+        let compile = || {
+            compile_world_model(
+                &path,
+                &loaded.keys,
+                &loaded.manager,
+                Some(loaded.archetypes()),
+                caps,
+            )
+        };
+        match &loaded.cache {
+            Some(cache) => {
+                let key = crate::cache::model_key(&loaded.manager, &path, caps);
+                cache.get_or_insert_with(key, cw_cache::Kind::Model, compile)
+            }
+            None => compile(),
+        }
     })
     .await
     .map(tauri::ipc::Response::new)
