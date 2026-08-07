@@ -1085,6 +1085,37 @@ The pass itself is not gated: driving it needs a `tauri::ipc::Channel`, which
 needs a running app. Its state machine is unit tested and its reachability walk
 is gated.
 
+### 4.8 Preloading a placed map — **DONE**
+
+The streamer answers "what should be resident given where the camera is". The
+Preload panel answers "what would it take for all of it to be resident", which
+is a different question with a different failure mode: the streamer is bounded
+by a radius, and **a preload is bounded only by its cap**.
+
+So the cap is the safety mechanism, and the order decides what survives it —
+nearest to the camera first, so a cap that bites keeps what is in front of you.
+It defaults to 5,000 and is shown against the real placed count, because with
+the base game placed that count is about 693,000 and the renderer still builds
+one `THREE.Group` of meshes per entity. Nothing near that will render until
+archetypes are instanced.
+
+Starting a preload **turns streaming off**, deliberately: the streamer unloads
+anything past its radius, so leaving it on would tear out what the preload just
+loaded as soon as the camera moved.
+
+This forced stage 5.2 forward. Loaded geometry now lives in
+`src/lib/world/geometryStore.ts` rather than a `useState` array, because
+`loadEntity` used to scan the array to deduplicate, copy it to append, and list
+it in its dependencies, and the streaming interval listed it too and was torn
+down and rebuilt on every single load. **Loading n entities was O(n squared) in
+three separate places.** Streaming hid it by never loading more than a couple of
+hundred at once.
+
+Store notifications are **coalesced to one per frame**, which is the point rather
+than an optimisation: without it a preload rebuilds the renderer's scene
+bookkeeping once per model, and the quadratic cost moves out of React into
+three.js instead of going away.
+
 ### Still to come
 
 The shader parameter values and extended vertex decode that phase 4 skipped and
