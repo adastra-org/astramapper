@@ -1170,13 +1170,61 @@ reason 4.8 gave: one `THREE.Group` of meshes per entity. What changed is that
 the cost of a preload is now the models it builds, not the bookkeeping around
 them.
 
+### 4.10 Where launching actually goes — **MEASURED**
+
+The phase opened by naming the cold launch as a headline cost: *"every launch
+re-scans 179 archives and 403,642 entries"*. Measured against the real install,
+in release, that whole path is **570ms**:
+
+| Step | |
+| --- | --- |
+| Read `GTA5.exe` (45 MB) | 11ms |
+| Recover the keys | 138ms |
+| `RpfManager::scan` — 5,378 archives, 403,642 entries | 242ms |
+| `archive_stamps` | 5ms |
+| Archetype index — 159,375 archetypes | 136ms |
+
+**So serializing the install-scoped indexes into the pinned pack is not worth
+building.** It was carried as the next perf item on the assumption the scan
+dominated; it does not, and the ceiling on the whole idea is under half a second
+against a format, an invalidation rule and a new silent-corruption surface. It
+comes off the list rather than staying on it as something to get to. (Caveat
+that belongs with the number: this is a warm OS file cache. A first launch after
+a reboot pays real disk reads for 179 archive headers on top.)
+
+What entering World Mode costs is a different thing entirely, and it is much
+larger:
+
+| Step | |
+| --- | --- |
+| List the base group | 2.8ms for 4,601 maps |
+| Read and flatten every one | **2.0s** for 763,716 placements |
+| Serialize those placements to JSON | **2.3s for 201.5 MB** |
+
+`world_map` is a plain `#[tauri::command]`, so **every placement crosses the IPC
+boundary as JSON text and is parsed by the WebView** — 201.5 MB of it, before
+the frontend has allocated the two-and-a-third million JavaScript objects that
+text decodes into. That is the same shape of problem 4.3 and 4.4 found for
+textures and geometry, on the one payload that was never moved into the
+envelope, and it is the largest measured cost left in the phase.
+
+The frontend's own dedup of that list was quadratic and is fixed here:
+`loadBaseMaps` checked `next.some(m => m.path === ...)` per map, ten million
+path comparisons to merge a list that is already distinct.
+
 ### Still to come
 
+The placement envelope — `world_map` over `cw_core::wire` with a string table
+for the repeated archetype names, which is what the measurement above points at.
+
 Archetype instancing, which is what `PRELOAD_CAP` is really waiting on: entities
-sharing an archetype should share one draw call instead of a group each. The
-`Canvas` setup effect is the next structural cost — it tears down and rebuilds
-every instanced mesh whenever the placed maps change, which during the base-game
-auto-load happens once per 16-map chunk.
+sharing an archetype should share one draw call instead of a group each.
+
+The `Canvas` setup effect, which rebuilds the renderer, the scene and every
+instanced mesh whenever the placed maps change — and **re-frames the camera
+while doing it**, so placing one more map after flying across the city throws
+the view back to the overview. The base load batches into one `setPlaced` so it
+pays this once, but every later placement pays it again.
 
 Then the shader parameter values and extended vertex decode that phase 4 skipped
 and that the shader work now needs; serializing the install-scoped indexes into

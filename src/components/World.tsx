@@ -252,10 +252,16 @@ export function World(): React.JSX.Element {
           current ? { ...current, done: current.done + done } : current,
         );
       }
+      // Deduplicated through a set, not `next.some(...)`: the base group is
+      // 4,601 maps, and a linear scan per map is ten million path comparisons
+      // to add a list that is already distinct.
       setPlaced((current) => {
+        const seen = new Set(current.map((m) => m.path));
         const next = [...current];
         for (const map of all) {
-          if (!next.some((m) => m.path === map.path)) next.push(map);
+          if (seen.has(map.path)) continue;
+          seen.add(map.path);
+          next.push(map);
         }
         return next;
       });
