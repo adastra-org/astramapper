@@ -1,0 +1,85 @@
+name: Bug report
+description: Something in AstraMapper is broken or doesn't match CodeWalker's behavior
+title: ""
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What's wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro-steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Archive browsing (.rpf)
+        - 3D viewer (.ydr / .ydd)
+        - Fragments (.yft)
+        - Collision (.ybn)
+        - Map / World view (.ymap / .ytyp)
+        - Archive decryption
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: AstraMapper commit/version
+      placeholder: e.g. b6f050b or a release tag
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: e.g. Windows 11 24H2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-type
+    attributes:
+      label: GTA V install source (if relevant)
+      options:
+        - Not applicable
+        - Steam
+        - Rockstar Games Launcher
+        - Epic Games Store
+        - Other / retail disc
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste any relevant Rust panic output, console errors, or screenshots
+      render: shell
+    validations:
+      required: false

@@ -1,0 +1,56 @@
+name: Feature request
+description: Propose new functionality or a port of a CodeWalker feature
+title: ""
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What's missing or painful right now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: parity
+    attributes:
+      label: Does CodeWalker already do this?
+      options:
+        - "Yes — porting existing behavior"
+        - "Partially — needs adaptation"
+        - "No — new behavior"
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: parity-ref
+    attributes:
+      label: CodeWalker source reference
+      description: Link or path to the relevant CodeWalker source, if known
+      placeholder: e.g. CodeWalker/Rendering/YmapDrawable.cs
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mockups, related issues, format docs, etc.
+    validations:
+      required: false
