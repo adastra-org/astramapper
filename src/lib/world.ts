@@ -472,6 +472,28 @@ export function keyFor(mapKey: string, entityIndex: number): string {
 }
 
 /**
+ * The inverse of `keyFor`, or `null` for anything that is not one of its keys.
+ *
+ * Split on the **last** separator, not the first: a map key is an archive path
+ * and carries colons of its own (`x64a.rpf\levels\...`, and a Windows drive
+ * letter for a map placed from disk). The entity index is a plain integer, so
+ * the tail after the last colon is unambiguous.
+ *
+ * This exists so a key can be resolved without keeping a reverse map of every
+ * placement — with the base game placed that map held around 693,000 keys, all
+ * to serve the handful of entities that actually have an edit.
+ */
+export function parseKey(key: string): { mapKey: string; entityIndex: number } | null {
+  const at = key.lastIndexOf(":");
+  if (at <= 0 || at === key.length - 1) return null;
+  const tail = key.slice(at + 1);
+  // `Number` would take " 12", "0x0" and "1e3"; an entity index is decimal
+  // digits and nothing else, because that is all `keyFor` can ever produce.
+  if (!/^\d+$/.test(tail)) return null;
+  return { mapKey: key.slice(0, at), entityIndex: Number(tail) };
+}
+
+/**
  * A world-space point back into the game's Z-up space.
  *
  * The inverse of `gtaToWorld`: the renderer's `-PI / 2` X rotation maps GTA

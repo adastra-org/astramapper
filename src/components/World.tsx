@@ -22,6 +22,10 @@ import { formatHash } from "../lib/format";
 
 import { reportGpuCaps } from "../lib/gpu";
 import { createGeometryStore } from "../lib/world/geometryStore";
+import {
+  createPlacementIndex,
+  type PlacementIndex,
+} from "../lib/world/placementIndex";
 import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
 import {
@@ -36,6 +40,7 @@ import {
   gtaToWorld,
   keyFor,
   lodBandForDistance,
+  parseKey,
   parseProject,
   placementScale,
   projectLoad,
@@ -473,18 +478,26 @@ export function World(): React.JSX.Element {
     [entries],
   );
 
+  /**
+   * Constant-time `(mapKey, entityIndex)` → placement, built once per placement
+   * change and shared by everything that resolves a selection, a raycast hit or
+   * a streaming candidate. See `placementIndex.ts` for why the scans it
+   * replaces could not stay: the ones below run per frame while a gizmo drags.
+   */
+  const index = useMemo(() => createPlacementIndex(entries), [entries]);
+
   const selectedPlacement: { entry: (typeof entries)[number]; placement: Placed } | null =
     useMemo(() => {
       if (!selected) return null;
-      const entry = entries.find((e) => e.key === selected.mapKey);
+      const entry = index.entry(selected.mapKey);
       if (!entry) return null;
-      const placement = findPlacement(entry.placements, selected.entityIndex);
+      const placement = index.placement(selected.mapKey, selected.entityIndex);
       if (!placement) return null;
       return {
         entry,
         placement: applyEdit(placement, edits.get(keyFor(selected.mapKey, selected.entityIndex))),
       };
-    }, [entries, selected, edits]);
+    }, [index, selected, edits]);
 
   // The scheduler's view of the placed maps: each one's declared streaming box
   // and its entities. The demo has no assets to stream, so it stays out.
@@ -522,14 +535,13 @@ export function World(): React.JSX.Element {
         STREAM_BATCH,
       );
       for (const candidate of load) {
-        const entry = regionEntries.find((e) => e.key === candidate.mapKey);
-        const entity = entry?.placements.find((p) => p.index === candidate.entityIndex);
-        if (entry && entity) void loadEntity(candidate.mapKey, entity);
+        const entity = index.placement(candidate.mapKey, candidate.entityIndex);
+        if (entity) void loadEntity(candidate.mapKey, entity);
       }
       geometryStore.removeMany(unload);
     }, STREAM_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [streaming, status?.gameOpen, regionEntries, loadEntity]);
+  }, [streaming, status?.gameOpen, regionEntries, index, loadEntity]);
 
   /** Every entity a preload could reach. Memoized because it walks every
    *  placement of every placed map, which is six figures with the base game. */
@@ -900,6 +912,7 @@ export function World(): React.JSX.Element {
 
         <Canvas
           entries={entries}
+          index={index}
           geometry={geometry}
           cameraRef={cameraRef}
           edits={edits}
@@ -1068,6 +1081,9 @@ type CanvasEntry = {
 
 type CanvasProps = {
   entries: readonly CanvasEntry[];
+  /** `entries`, keyed for constant-time lookup. Built by the parent so the
+   *  canvas, the selection panel and the streamer all read one index. */
+  index: PlacementIndex<CanvasEntry>;
   geometry: readonly GeometryLoad[];
   cameraRef: { readonly current: { position: [number, number, number] | null } };
   edits: ReadonlyMap<string, TransformEdit>;
@@ -1088,10 +1104,19 @@ type Hit = {
   readonly distance: number;
 };
 
-/** One box instanced mesh, with the placement index each instance carries. */
-type BoxMesh = {
+/**
+ * Where one entity's marker box lives: which instanced mesh, and which slot.
+ *
+ * Boxes are bucketed by LOD colour, so a map's placements are spread across
+ * several `InstancedMesh` objects. Resolving an entity used to be
+ * `instances.indexOf(entityIndex)` against **the first bucket only**, which was
+ * both a linear scan per call and wrong for every entity in a later bucket —
+ * their markers never stepped aside for a loaded model and never followed an
+ * edit. Keying every bucket by entity index fixes both at once.
+ */
+type BoxSlot = {
   readonly mesh: THREE.InstancedMesh;
-  readonly instances: readonly number[];
+  readonly slot: number;
 };
 
 /** The LOD-swap state for one loaded entity. */
@@ -1100,6 +1125,20 @@ type LoadedGeometry = {
   readonly lodGroups: readonly THREE.Mesh[][];
   readonly lodDist: number;
   readonly positionGta: readonly [number, number, number];
+  /** Which entity this is, so a raycast hit and an unload can name it without
+   *  taking the key apart — a map key is a path and may contain the separator. */
+  readonly mapKey: string;
+  readonly entityIndex: number;
+  /**
+   * The LOD bundle currently visible, or -1 before the first pass.
+   *
+   * Kept so the per-frame swap only touches meshes when the band actually
+   * changes. Writing `visible` on every mesh of every bundle of every loaded
+   * entity, every frame, is hundreds of thousands of property writes a second
+   * once a preload has filled the world — for a value that is almost always
+   * the one already there.
+   */
+  band: number;
 };
 
 /** One move-gizmo axis, in the game's Z-up space. */
@@ -1117,6 +1156,7 @@ type GizmoAxis = {
  */
 function Canvas({
   entries,
+  index,
   geometry,
   cameraRef,
   edits,
@@ -1129,8 +1169,8 @@ function Canvas({
   busy,
 }: CanvasProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
-  const entriesRef = useRef(entries);
-  entriesRef.current = entries;
+  const indexRef = useRef(index);
+  indexRef.current = index;
   const editsRef = useRef(edits);
   editsRef.current = edits;
   const selectedRef = useRef(selected);
@@ -1141,12 +1181,10 @@ function Canvas({
   const worldGroup = useRef<THREE.Group | null>(null);
   const geometryGroup = useRef<THREE.Group | null>(null);
   const highlight = useRef<THREE.LineSegments | null>(null);
-  const boxByMap = useRef(new Map<string, BoxMesh>());
-  const geometryMeshes = useRef<{ mesh: THREE.Mesh; mapKey: string; entityIndex: number }[]>([]);
+  /** Map key → entity index → the instanced mesh and slot holding its marker. */
+  const boxByMap = useRef(new Map<string, Map<number, BoxSlot>>());
   const loadedState = useRef(new Map<string, LoadedGeometry>());
   const lodUpdate = useRef<((cameraWorld: THREE.Vector3) => void) | null>(null);
-  /** Selected entity key → its map and entity index, for the gizmo and edits. */
-  const keyLookup = useRef(new Map<string, { mapKey: string; entityIndex: number }>());
   /** The gizmo's world-space origin, kept for screen-space axis picking. */
   const gizmoOriginWorld = useRef<THREE.Vector3 | null>(null);
 
@@ -1217,11 +1255,12 @@ function Canvas({
 
     const unitGeometry = new THREE.BoxGeometry(1, 1, 1);
     const boxMeshes: { mesh: THREE.InstancedMesh; mapKey: string; indexes: number[] }[] = [];
-    const boxes = new Map<string, BoxMesh>();
+    const boxes = new Map<string, Map<number, BoxSlot>>();
 
     // One InstancedMesh per map-and-colour bucket. Three.js gives instanced
     // meshes a single material, so buckets are how the LOD colours show; the
-    // parallel `indexes` list maps each instance back to its entity.
+    // parallel `indexes` list maps each instance back to its entity for the
+    // raycast, and `boxes` maps it the other way for the marker updates.
     for (const entry of entries) {
       const byColour = new Map<number, Placed[]>();
       for (const placement of entry.placements) {
@@ -1230,6 +1269,8 @@ function Canvas({
         bucket.push(placement);
         byColour.set(colour, bucket);
       }
+      const slots = new Map<number, BoxSlot>();
+      boxes.set(entry.key, slots);
       for (const [colour, placements] of byColour) {
         const material = new THREE.MeshStandardMaterial({
           color: colour,
@@ -1252,6 +1293,7 @@ function Canvas({
           matrix.compose(position, quaternion, scale);
           mesh.setMatrixAt(i, matrix);
           indexes.push(p.index);
+          slots.set(p.index, { mesh, slot: i });
         }
         mesh.instanceMatrix.needsUpdate = true;
         mesh.castShadow = shadowed;
@@ -1260,25 +1302,8 @@ function Canvas({
         world.add(mesh);
         boxMeshes.push({ mesh, mapKey: entry.key, indexes });
       }
-      // One box entry per map: the first instanced mesh for that map.
-      const first = boxMeshes.find((b) => b.mapKey === entry.key);
-      if (first) {
-        boxes.set(entry.key, { mesh: first.mesh, instances: first.indexes });
-      }
     }
     boxByMap.current = boxes;
-
-    // Every placement's identity, so edits can be applied by key each frame.
-    const lookup = new Map<string, { mapKey: string; entityIndex: number }>();
-    for (const entry of entries) {
-      for (const placement of entry.placements) {
-        lookup.set(keyFor(entry.key, placement.index), {
-          mapKey: entry.key,
-          entityIndex: placement.index,
-        });
-      }
-    }
-    keyLookup.current = lookup;
 
     // The move gizmo: three coloured axis lines in the game's Z-up space,
     // hidden until an entity is selected. Picking is done in screen space, so
@@ -1423,10 +1448,9 @@ function Canvas({
 
     /** The current effective edit for an entity, or the base transform. */
     const effectiveEdit = (key: string): TransformEdit | null => {
-      const target = keyLookup.current.get(key);
+      const target = parseKey(key);
       if (!target) return null;
-      const entry = entriesRef.current.find((e) => e.key === target.mapKey);
-      const placement = entry && findPlacement(entry.placements, target.entityIndex);
+      const placement = indexRef.current.placement(target.mapKey, target.entityIndex);
       if (!placement) return null;
       return editsRef.current.get(key) ?? editOf(placement);
     };
@@ -1726,12 +1750,25 @@ function Canvas({
           best = { mapKey, entityIndex: indexes[first.instanceId], distance: first.distance };
         }
       }
-      for (const { mesh, mapKey, entityIndex } of geometryMeshes.current) {
-        const hits = raycaster.intersectObject(mesh, false);
-        const first = hits[0];
-        if (!first) continue;
-        if (!best || first.distance < best.distance) {
-          best = { mapKey, entityIndex, distance: first.distance };
+      // Straight off the loaded set, and only the LOD bundle on screen. The
+      // flat list this replaces had to be rebuilt from a full traverse every
+      // time anything loaded; a click is rare enough to pay for itself here.
+      // Testing only the visible band is also the correct behaviour — a hidden
+      // LOD used to be selectable through the one being drawn.
+      for (const loaded of loadedState.current.values()) {
+        const meshes = loaded.lodGroups[loaded.band];
+        if (!meshes) continue;
+        for (const mesh of meshes) {
+          const hits = raycaster.intersectObject(mesh, false);
+          const first = hits[0];
+          if (!first) continue;
+          if (!best || first.distance < best.distance) {
+            best = {
+              mapKey: loaded.mapKey,
+              entityIndex: loaded.entityIndex,
+              distance: first.distance,
+            };
+          }
         }
       }
       return best;
@@ -1747,8 +1784,7 @@ function Canvas({
     const onDoubleClick = (event: MouseEvent): void => {
       const hit = pick(event.clientX, event.clientY);
       if (!hit) return;
-      const entry = entriesRef.current.find((e) => e.key === hit.mapKey);
-      const placement = findPlacement(entry?.placements, hit.entityIndex);
+      const placement = indexRef.current.placement(hit.mapKey, hit.entityIndex);
       if (!placement) return;
       frameAt(placement.position, 40);
     };
@@ -1797,8 +1833,6 @@ function Canvas({
     /** Lay every live edit onto its box instance or geometry holder. */
     const applyEdits = (): void => {
       for (const [key, edit] of editsRef.current) {
-        const target = keyLookup.current.get(key);
-        if (!target) continue;
         const loaded = loadedState.current.get(key);
         if (loaded) {
           loaded.holder.position.set(edit.position[0], edit.position[1], edit.position[2]);
@@ -1811,8 +1845,11 @@ function Canvas({
           const [sx, sy, sz] = placementScale(edit.scaleXy, edit.scaleZ);
           loaded.holder.scale.set(sx, sy, sz);
         } else {
-          const box = boxByMap.current.get(target.mapKey);
-          if (box) setInstanceEdit(box.mesh, box.instances, target.entityIndex, edit);
+          // Not loaded, so the edit rides on the marker box instead. Only this
+          // branch needs the key taken apart, and only for entities under edit.
+          const target = parseKey(key);
+          if (!target) continue;
+          setInstanceTransform(boxByMap.current.get(target.mapKey)?.get(target.entityIndex), edit);
         }
       }
     };
@@ -1871,7 +1908,6 @@ function Canvas({
       geometryGroup.current = null;
       highlight.current = null;
       boxByMap.current = new Map();
-      geometryMeshes.current = [];
       loadedState.current = new Map();
       lodUpdate.current = null;
       unitGeometry.dispose();
@@ -1893,6 +1929,19 @@ function Canvas({
   // group. Building every loaded model's meshes from scratch on each pass made
   // streaming quadratically slower as the loaded set grew — a streamed model
   // must add its meshes, not rebuild the ones already there.
+  //
+  // The same rule now governs everything this pass touches. A preload notifies
+  // once per frame while it fills the world, so any sweep here that is
+  // proportional to *all* loaded geometry, or worse to all placements, is
+  // quadratic over the preload. Two of them were:
+  //
+  //   - the flat raycast list, rebuilt by traversing every holder. It is gone;
+  //     `pick` walks `loadedState` directly, which it can do because a click is
+  //     a user event and not a per-frame cost.
+  //   - restoring the marker boxes, which swept every placement of every placed
+  //     map — around 693,000 with the base game — and resolved each one with a
+  //     linear `indexOf`. Only the entities that unloaded this pass need
+  //     restoring, and those are known exactly.
   useEffect(() => {
     const group = geometryGroup.current;
     if (!group) return;
@@ -1903,23 +1952,24 @@ function Canvas({
     const quaternion = new THREE.Quaternion();
     const scale = new THREE.Vector3();
 
-    const wanted = new Map(geometry.map((g) => [keyFor(g.mapKey, g.entity.index), g]));
+    const previous = loadedState.current;
     const next = new Map<string, LoadedGeometry>();
+    /** How many of `previous` survived, which is how the drop pass is skipped. */
+    let carried = 0;
 
-    // Keep what is still loaded, drop what unloaded.
-    for (const [key, loaded] of loadedState.current) {
-      if (wanted.has(key)) {
-        next.set(key, loaded);
-      } else {
-        disposeObject3D(loaded.holder);
-        group.remove(loaded.holder);
-      }
-    }
-
-    // Build only the models that just loaded.
+    // One pass over what should be resident, carrying the already-built models
+    // through untouched and building only the ones that just arrived. Keying
+    // each load once is the point: the two-collection diff this replaces built
+    // a key string per model twice per pass, and a pass runs every frame while
+    // a preload fills the world.
     for (const load of geometry) {
       const key = keyFor(load.mapKey, load.entity.index);
-      if (loadedState.current.has(key)) continue;
+      const already = previous.get(key);
+      if (already) {
+        next.set(key, already);
+        carried += 1;
+        continue;
+      }
       const holder = new THREE.Group();
       position.set(load.entity.position[0], load.entity.position[1], load.entity.position[2]);
       quaternion.set(
@@ -1936,11 +1986,7 @@ function Canvas({
 
       const lodGroups = buildLodMeshes(load, shadowed);
       for (const meshes of lodGroups) {
-        for (const mesh of meshes) {
-          mesh.userData.mapKey = load.mapKey;
-          mesh.userData.entityIndex = load.entity.index;
-          holder.add(mesh);
-        }
+        for (const mesh of meshes) holder.add(mesh);
       }
       group.add(holder);
       next.set(key, {
@@ -1948,43 +1994,37 @@ function Canvas({
         lodGroups,
         lodDist: load.entity.lodDist,
         positionGta: load.entity.position,
+        mapKey: load.mapKey,
+        entityIndex: load.entity.index,
+        band: -1,
       });
 
       // The entity now has real geometry; its box marker must step aside. A
       // model that produced no geometry keeps its marker rather than vanishing.
       if (lodGroups.length > 0) {
-        const box = boxByMap.current.get(load.mapKey);
-        if (box) setInstanceScale(box.mesh, box.instances, load.entity.index, 0);
+        setInstanceScale(boxByMap.current.get(load.mapKey)?.get(load.entity.index), 0);
       }
     }
 
-    // Refresh the flat raycast list from the holders kept this pass.
-    geometryMeshes.current = [];
-    for (const { holder } of next.values()) {
-      holder.traverse((object) => {
-        const mesh = object as THREE.Mesh;
-        if (!mesh.isMesh) return;
-        geometryMeshes.current.push({
-          mesh,
-          mapKey: mesh.userData.mapKey as string,
-          entityIndex: mesh.userData.entityIndex as number,
-        });
-      });
-    }
-
-    // Any box whose entity is no longer loaded comes back.
-    for (const entry of entriesRef.current) {
-      const box = boxByMap.current.get(entry.key);
-      if (!box) continue;
-      for (const placement of entry.placements) {
-        const key = keyFor(entry.key, placement.index);
-        if (wanted.has(key)) continue;
-        setInstanceTransform(
-          box.mesh,
-          box.instances,
-          placement.index,
-          placement,
-        );
+    // Whatever was resident and is not any more: tear it down and give the
+    // entity its marker box back. An unload is the only moment a box needs
+    // restoring, which is what lets this be proportional to the drops rather
+    // than to every placement in the world.
+    //
+    // Everything carried through means nothing dropped, and a preload — which
+    // only ever adds — takes that shortcut on every one of its passes.
+    if (carried !== previous.size) {
+      for (const [key, loaded] of previous) {
+        if (next.has(key)) continue;
+        disposeObject3D(loaded.holder);
+        group.remove(loaded.holder);
+        const placement = indexRef.current.placement(loaded.mapKey, loaded.entityIndex);
+        if (placement) {
+          setInstanceTransform(
+            boxByMap.current.get(loaded.mapKey)?.get(loaded.entityIndex),
+            placement,
+          );
+        }
       }
     }
 
@@ -1992,17 +2032,23 @@ function Canvas({
     lodUpdate.current = (cameraPosition) => {
       cameraWorld.copy(cameraPosition);
       const [cx, cy, cz] = worldToGta([cameraWorld.x, cameraWorld.y, cameraWorld.z]);
-      for (const { lodGroups, lodDist, positionGta } of next.values()) {
+      for (const loaded of next.values()) {
+        const { lodGroups, lodDist, positionGta } = loaded;
         const dist = Math.hypot(
           positionGta[0] - cx,
           positionGta[1] - cy,
           positionGta[2] - cz,
         );
         const band = lodBandForDistance(dist, lodDist, lodGroups.length);
+        // A distance check per entity per frame is cheap; writing `visible` on
+        // every mesh of every bundle is not, and the band a model is in almost
+        // never changes between two frames.
+        if (band === loaded.band) continue;
         for (let i = 0; i < lodGroups.length; i += 1) {
           const visible = i === band;
           for (const mesh of lodGroups[i]) mesh.visible = visible;
         }
+        loaded.band = band;
       }
     };
     // `entries` is in the deps because the setup effect tears the geometry
@@ -2018,8 +2064,9 @@ function Canvas({
       outline.visible = false;
       return;
     }
-    const entry = entriesRef.current.find((e) => e.key === selected.mapKey);
-    const base = findPlacement(entry?.placements, selected.entityIndex);
+    // This effect re-runs on every `edits` change, which during a gizmo drag is
+    // once per frame — so the lookup has to be constant-time.
+    const base = index.placement(selected.mapKey, selected.entityIndex);
     if (!base) {
       outline.visible = false;
       return;
@@ -2039,7 +2086,7 @@ function Canvas({
     outline.matrixAutoUpdate = false;
     outline.matrix.copy(matrix);
     outline.visible = true;
-  }, [selected, edits]);
+  }, [selected, edits, index]);
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -2055,18 +2102,6 @@ function Canvas({
 
 function totalCount(entries: readonly CanvasEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.placements.length, 0);
-}
-
-/**
- * A placement by its file index. Raycasting returns the instance's original
- * entity index, which is the identity — not an array position, so a filtered
- * or reordered list would silently select the wrong thing.
- */
-function findPlacement(
-  placements: readonly Placed[] | undefined,
-  index: number,
-): Placed | undefined {
-  return placements?.find((placement) => placement.index === index);
 }
 
 /**
@@ -2243,63 +2278,46 @@ function uploadTexture(
   return built;
 }
 
+/**
+ * Scratch objects for the instance-matrix writers.
+ *
+ * These run per marker per streaming pass, and three.js's own instancing
+ * examples compose through one reused matrix for the same reason: allocating a
+ * `Matrix4`, a `Vector3` and a `Quaternion` per call hands the collector four
+ * objects for every box that moves. Nothing here is re-entrant or async, so one
+ * set is safe.
+ */
+const scratchMatrix = new THREE.Matrix4();
+const scratchPosition = new THREE.Vector3();
+const scratchQuaternion = new THREE.Quaternion();
+const scratchScale = new THREE.Vector3();
+
 /** Set one instance's matrix to a uniform scale (0 hides a marker). */
-function setInstanceScale(
-  mesh: THREE.InstancedMesh,
-  instances: readonly number[],
-  entityIndex: number,
-  scaleValue: number,
-): void {
-  const i = instances.indexOf(entityIndex);
-  if (i < 0) return;
-  mesh.setMatrixAt(i, new THREE.Matrix4().makeScale(scaleValue, scaleValue, scaleValue));
-  mesh.instanceMatrix.needsUpdate = true;
+function setInstanceScale(box: BoxSlot | undefined, scaleValue: number): void {
+  if (!box) return;
+  box.mesh.setMatrixAt(box.slot, scratchMatrix.makeScale(scaleValue, scaleValue, scaleValue));
+  box.mesh.instanceMatrix.needsUpdate = true;
 }
 
-/** Restore one instance's matrix from its placement. */
-function setInstanceTransform(
-  mesh: THREE.InstancedMesh,
-  instances: readonly number[],
-  entityIndex: number,
-  placement: Placed,
-): void {
-  const i = instances.indexOf(entityIndex);
-  if (i < 0) return;
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3(placement.position[0], placement.position[1], placement.position[2]);
-  const quaternion = new THREE.Quaternion(
-    placement.rotation[0],
-    placement.rotation[1],
-    placement.rotation[2],
-    placement.rotation[3],
+/**
+ * Write one instance's matrix from a transform — a placement, or the edit
+ * overlaying it. Both carry the same four fields, which is why one writer
+ * serves the restore path and the live-edit path.
+ */
+function setInstanceTransform(box: BoxSlot | undefined, transform: TransformEdit): void {
+  if (!box) return;
+  scratchPosition.set(transform.position[0], transform.position[1], transform.position[2]);
+  scratchQuaternion.set(
+    transform.rotation[0],
+    transform.rotation[1],
+    transform.rotation[2],
+    transform.rotation[3],
   );
-  const [sx, sy, sz] = placementScale(placement.scaleXy, placement.scaleZ);
-  matrix.compose(position, quaternion, new THREE.Vector3(sx, sy, sz));
-  mesh.setMatrixAt(i, matrix);
-  mesh.instanceMatrix.needsUpdate = true;
-}
-
-/** Lay a live edit onto one instance's matrix. */
-function setInstanceEdit(
-  mesh: THREE.InstancedMesh,
-  instances: readonly number[],
-  entityIndex: number,
-  edit: TransformEdit,
-): void {
-  const i = instances.indexOf(entityIndex);
-  if (i < 0) return;
-  const matrix = new THREE.Matrix4();
-  const position = new THREE.Vector3(edit.position[0], edit.position[1], edit.position[2]);
-  const quaternion = new THREE.Quaternion(
-    edit.rotation[0],
-    edit.rotation[1],
-    edit.rotation[2],
-    edit.rotation[3],
-  );
-  const [sx, sy, sz] = placementScale(edit.scaleXy, edit.scaleZ);
-  matrix.compose(position, quaternion, new THREE.Vector3(sx, sy, sz));
-  mesh.setMatrixAt(i, matrix);
-  mesh.instanceMatrix.needsUpdate = true;
+  const [sx, sy, sz] = placementScale(transform.scaleXy, transform.scaleZ);
+  scratchScale.set(sx, sy, sz);
+  scratchMatrix.compose(scratchPosition, scratchQuaternion, scratchScale);
+  box.mesh.setMatrixAt(box.slot, scratchMatrix);
+  box.mesh.instanceMatrix.needsUpdate = true;
 }
 
 /** Dispose every geometry and material under an object. */

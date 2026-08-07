@@ -10,6 +10,7 @@ import {
   entityStreamRadius,
   gtaToWorld,
   keyFor,
+  parseKey,
   lodBandForDistance,
   nearestCandidates,
   parseProject,
@@ -86,6 +87,41 @@ describe("keyFor", () => {
   test("joins a map and an entity into a stable identity", () => {
     expect(keyFor("m", 0)).toBe("m:0");
     expect(keyFor("m", 12)).toBe("m:12");
+  });
+});
+
+describe("parseKey", () => {
+  test("round-trips every key keyFor produces", () => {
+    for (const mapKey of [
+      "demo",
+      "x64a.rpf\\levels\\gta5\\_citye\\downtown\\dt1_02.ymap",
+      // A map placed from disk keeps its absolute path, drive colon and all.
+      "E:\\Ad Astra Tools\\maps\\custom.ymap",
+      // And a nested archive path has a colon in the middle of it.
+      "update.rpf\\x64:dlc\\interior.ymap",
+    ]) {
+      for (const entityIndex of [0, 7, 1_234_567]) {
+        expect(parseKey(keyFor(mapKey, entityIndex))).toEqual({ mapKey, entityIndex });
+      }
+    }
+  });
+
+  test("splits on the last separator, not the first", () => {
+    expect(parseKey("E:\\maps\\a.ymap:9")).toEqual({
+      mapKey: "E:\\maps\\a.ymap",
+      entityIndex: 9,
+    });
+  });
+
+  test("refuses anything that is not one of its keys", () => {
+    expect(parseKey("nocolon")).toBeNull();
+    expect(parseKey("m:")).toBeNull();
+    expect(parseKey(":12")).toBeNull();
+    expect(parseKey("m:abc")).toBeNull();
+    expect(parseKey("m:-1")).toBeNull();
+    expect(parseKey("m: 12")).toBeNull();
+    expect(parseKey("m:1e3")).toBeNull();
+    expect(parseKey("m:0x10")).toBeNull();
   });
 });
 

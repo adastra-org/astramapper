@@ -17,9 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
-| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed |
 
-Branch: work happens on `dev`. Current tests: **251 unit + 46 gate + 83 frontend**.
+Branch: work happens on `dev`. Current tests: **277 unit + 51 gate + 121 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -1116,13 +1116,74 @@ than an optimisation: without it a preload rebuilds the renderer's scene
 bookkeeping once per model, and the quadratic cost moves out of React into
 three.js instead of going away.
 
+### 4.9 The renderer side of the same quadratics — **DONE**
+
+4.8 moved the loaded set out of React and coalesced its notifications to one per
+frame. That fixed the React half and left the three.js half, because **one
+notification per frame is only cheap if what the renderer does per notification
+is proportional to what changed.** Three things were not, and a preload runs
+hundreds of passes, so each of them was quadratic over the preload:
+
+| Per pass, 5,000 loaded | Before | After |
+| --- | --- | --- |
+| Marker-box restore | 203ms | 0.12ms |
+| Raycast list rebuild | 5.9ms | removed |
+| LOD swap (per frame) | 0.38ms | 0.11ms |
+
+Over a 5,000-entity preload at 12 per batch — about 417 passes — the box restore
+alone was **84 seconds of pure bookkeeping**, and the raycast rebuild another
+2.4. Measured on the shapes these passes actually walk, at the base game's
+693,000 placements.
+
+**The box restore swept every placement in the world to find the few that
+changed.** It ran over every entity of every placed map, asking whether it was
+loaded, and resolved each one with `instances.indexOf` — a linear scan inside a
+linear scan. An entity's marker only needs restoring at the moment its geometry
+unloads, and the sync pass already knows exactly which those are.
+
+Two bugs fell out of rewriting it. The marker index was built from **the first
+colour bucket only**, and boxes are bucketed by LOD colour, so every entity in a
+later bucket kept its marker box when its model loaded and ignored its own
+edits — `indexOf` returned -1 and the write was silently skipped. Keying every
+bucket by entity index fixes both. And the raycast tested **every LOD bundle,
+including the hidden ones**, so a click could select through a model to a LOD
+that was not on screen; picking now walks the loaded set directly and tests only
+the visible band, which is what let the flat list go entirely.
+
+**`lodBandForDistance` is cheap and writing `visible` is not.** The swap
+recomputed the band for every loaded entity every frame — correct, and worth
+keeping — and then wrote `visible` on every mesh of every bundle whether or not
+the band had moved. 14.4 million property writes over 120 frames became 129,000,
+because a model almost never changes band between two frames.
+
+Underneath all three is one lookup. `(mapKey, entityIndex)` → placement was
+`entries.find(...)` then `placements.find(...)` at seven call sites, three of
+which run per frame while a gizmo drags. `src/lib/world/placementIndex.ts`
+builds it once per placement change: **17.8us to 0.058us, 309x**, for 55ms of
+build. It is nested rather than keyed by `keyFor` on purpose — a flat map would
+hold 693,000 concatenated strings. For the same reason the reverse map from key
+to identity is gone; `parseKey` splits on the **last** separator, because a map
+key is an archive path and carries colons of its own.
+
+None of this raises `PRELOAD_CAP`. The cap stands where 4.8 put it, and for the
+reason 4.8 gave: one `THREE.Group` of meshes per entity. What changed is that
+the cost of a preload is now the models it builds, not the bookkeeping around
+them.
+
 ### Still to come
 
-The shader parameter values and extended vertex decode that phase 4 skipped and
-that the shader work now needs; serializing the install-scoped indexes into the
-pinned pack, which is what would make a *warm launch* instant rather than a warm
-model; the `World.tsx` decomposition and spatial streaming index; GLSL shader
-profiles; layers, search and multi-select; and the collision and AI path layers.
+Archetype instancing, which is what `PRELOAD_CAP` is really waiting on: entities
+sharing an archetype should share one draw call instead of a group each. The
+`Canvas` setup effect is the next structural cost — it tears down and rebuilds
+every instanced mesh whenever the placed maps change, which during the base-game
+auto-load happens once per 16-map chunk.
+
+Then the shader parameter values and extended vertex decode that phase 4 skipped
+and that the shader work now needs; serializing the install-scoped indexes into
+the pinned pack, which is what would make a *warm launch* instant rather than a
+warm model; the `World.tsx` decomposition and spatial streaming index; GLSL
+shader profiles; layers, search and multi-select; and the collision and AI path
+layers.
 
 Two gaps are visible in the app today and are expected rather than regressions.
 **Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is
