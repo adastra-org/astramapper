@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import * as THREE from "three";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -6,6 +13,7 @@ import {
   Crosshair,
   FilePlus,
   Globe2,
+  Layers,
   Loader2,
   MapPin,
   X,
@@ -13,6 +21,8 @@ import {
 import { formatHash } from "../lib/format";
 
 import { reportGpuCaps } from "../lib/gpu";
+import { createGeometryStore } from "../lib/world/geometryStore";
+import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
 import {
   applyEdit,
@@ -62,6 +72,18 @@ const STREAM_BATCH = 24;
 const LOAD_BATCH = 16;
 /** How often the streaming pass re-decides what is loaded. */
 const STREAM_INTERVAL_MS = 250;
+/** How many entities a preload starts at once. */
+const PRELOAD_BATCH = 12;
+/**
+ * How many entities a preload will load before it stops.
+ *
+ * The whole base game is around 693,000 placements, and one `THREE.Group` of
+ * meshes per entity does not survive anything near that. Until archetypes are
+ * instanced, this cap is what stands between "load the map" and a locked-up
+ * renderer, so it is deliberately low enough to be safe on a modest GPU and
+ * raisable by anyone who knows what their machine can take.
+ */
+const PRELOAD_CAP = 5_000;
 
 /**
  * Session-wide caches, outside the component so they survive tab switches:
@@ -70,6 +92,12 @@ const STREAM_INTERVAL_MS = 250;
  */
 const assetCache = new Map<string, string | null>();
 const modelCache = new Map<string, WorldModel>();
+/**
+ * Loaded geometry, outside React for the reasons in `geometryStore.ts`: keeping
+ * it in `useState` made every load O(n) three times over, which streaming hid
+ * and preloading does not.
+ */
+const geometryStore = createGeometryStore();
 /** The mounted game folder, so the session caches drop when it changes. */
 let lastFolder: string | null = null;
 
@@ -110,9 +138,15 @@ export function World(): React.JSX.Element {
     label: string;
   } | null>(null);
   const [selected, setSelected] = useState<Selection | null>(null);
-  /** Entities whose real geometry is loaded, streamed or asked for by hand. */
-  const [geometry, setGeometry] = useState<readonly GeometryLoad[]>([]);
+  // Entities whose real geometry is loaded, streamed or preloaded. The version
+  // this returns is only a change signal — the array itself comes from the
+  // store's own cache, so its identity holds until something actually loads.
+  useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
+  const geometry = geometryStore.all();
   const [streaming, setStreaming] = useState(false);
+  /** Set while a preload runs, so the button can offer to stop it. */
+  const [preloading, setPreloading] = useState(false);
+  const preloadCancel = useRef(false);
   /** In-progress transform edits, applied live by the canvas, per entity key. */
   const [edits, setEdits] = useState<ReadonlyMap<string, TransformEdit>>(new Map());
   const [undo, setUndo] = useState<readonly HistoryEntry[]>([]);
@@ -138,6 +172,7 @@ export function World(): React.JSX.Element {
           lastFolder = loaded.folder;
           assetCache.clear();
           modelCache.clear();
+          geometryStore.clear();
           clearWorldCaches();
         }
         setStatus(loaded);
@@ -259,55 +294,48 @@ export function World(): React.JSX.Element {
 
   const remove = useCallback((path: string) => {
     setPlaced((current) => current.filter((m) => m.path !== path));
-    setGeometry((current) => current.filter((g) => g.mapKey !== path));
+    geometryStore.removeMap(path);
     setSelected((current) => (current && current.mapKey === path ? null : current));
   }, []);
 
   /** Load one entity's real geometry, resolving its archetype to a model. */
-  const loadEntity = useCallback(
-    async (mapKey: string, entity: Placed) => {
-      const key = keyFor(mapKey, entity.index);
-      if (geometry.some((g) => keyFor(g.mapKey, g.entity.index) === key)) return;
-      if (pending.current.has(key)) return;
-      // A name the table could not resolve has no file to load.
-      if (entity.name.startsWith("hash_")) return;
+  // Deps are empty and must stay that way: the loaded set is read from the
+  // store rather than closed over, so this callback is stable and the streaming
+  // interval that depends on it is not torn down every time a model arrives.
+  const loadEntity = useCallback(async (mapKey: string, entity: Placed) => {
+    const key = keyFor(mapKey, entity.index);
+    if (geometryStore.has(key) || pending.current.has(key)) return;
+    // A name the table could not resolve has no file to load.
+    if (entity.name.startsWith("hash_")) return;
 
-      pending.current.add(key);
-      try {
-        let modelPath = assetCache.get(entity.name);
-        if (modelPath === undefined) {
-          modelPath = await worldAsset(entity.name);
-          assetCache.set(entity.name, modelPath);
-        }
-        if (!modelPath) return;
-        let model = modelCache.get(modelPath);
-        if (!model) {
-          // Awaited here rather than in an effect so the ordering holds by
-          // construction: no model is ever asked for before the backend knows
-          // which block formats this context can take. Memoized, so every call
-          // after the first is one already-resolved promise.
-          await reportGpuCaps();
-          model = await worldModel(modelPath);
-          modelCache.set(modelPath, model);
-        }
-        setGeometry((current) =>
-          current.some((g) => keyFor(g.mapKey, g.entity.index) === key)
-            ? current
-            : [...current, { mapKey, entity, modelPath, model }],
-        );
-      } catch (cause) {
-        setError(String(cause));
-      } finally {
-        pending.current.delete(key);
+    pending.current.add(key);
+    try {
+      let modelPath = assetCache.get(entity.name);
+      if (modelPath === undefined) {
+        modelPath = await worldAsset(entity.name);
+        assetCache.set(entity.name, modelPath);
       }
-    },
-    [geometry],
-  );
+      if (!modelPath) return;
+      let model = modelCache.get(modelPath);
+      if (!model) {
+        // Awaited here rather than in an effect so the ordering holds by
+        // construction: no model is ever asked for before the backend knows
+        // which block formats this context can take. Memoized, so every call
+        // after the first is one already-resolved promise.
+        await reportGpuCaps();
+        model = await worldModel(modelPath);
+        modelCache.set(modelPath, model);
+      }
+      geometryStore.add({ mapKey, entity, modelPath, model });
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      pending.current.delete(key);
+    }
+  }, []);
 
   const unloadEntity = useCallback((mapKey: string, entityIndex: number) => {
-    setGeometry((current) =>
-      current.filter((g) => !(g.mapKey === mapKey && g.entity.index === entityIndex)),
-    );
+    geometryStore.remove(keyFor(mapKey, entityIndex));
   }, []);
 
   // Live transform edits from the gizmo. Stable callbacks so the canvas can
@@ -397,7 +425,7 @@ export function World(): React.JSX.Element {
       const failed = parsed.maps.length - loaded.length;
       setPlaced(loaded);
       setEdits(new Map(parsed.edits.map((e) => [e.key, e.edit])));
-      setGeometry([]);
+      geometryStore.clear();
       setUndo([]);
       setRedo([]);
       setSelected(null);
@@ -415,7 +443,7 @@ export function World(): React.JSX.Element {
   const newProject = useCallback(() => {
     setPlaced([]);
     setEdits(new Map());
-    setGeometry([]);
+    geometryStore.clear();
     setUndo([]);
     setRedo([]);
     setSelected(null);
@@ -474,6 +502,9 @@ export function World(): React.JSX.Element {
   // The streaming pass: every interval, decide what to load and unload from the
   // camera's position. The decision is pure (`streamingDecision`); the effect
   // just carries it out against the load caches and geometry state.
+  // The loaded set is read from the store inside the pass, so `geometry` is not
+  // a dependency and this interval survives every load rather than being torn
+  // down and recreated by each one.
   useEffect(() => {
     if (!streaming || !status?.gameOpen) return;
     const interval = window.setInterval(async () => {
@@ -481,7 +512,7 @@ export function World(): React.JSX.Element {
       if (!cam || regionEntries.length === 0) return;
       const cameraGta = worldToGta(cam);
       const loadedKeys = new Set(
-        geometry.map((g) => keyFor(g.mapKey, g.entity.index)),
+        geometryStore.all().map((g) => keyFor(g.mapKey, g.entity.index)),
       );
       const { load, unload } = streamingDecision(
         cameraGta,
@@ -495,13 +526,65 @@ export function World(): React.JSX.Element {
         const entity = entry?.placements.find((p) => p.index === candidate.entityIndex);
         if (entry && entity) void loadEntity(candidate.mapKey, entity);
       }
-      if (unload.length > 0) {
-        const dropped = new Set(unload);
-        setGeometry((current) => current.filter((g) => !dropped.has(keyFor(g.mapKey, g.entity.index))));
-      }
+      geometryStore.removeMany(unload);
     }, STREAM_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [streaming, status?.gameOpen, regionEntries, geometry, loadEntity]);
+  }, [streaming, status?.gameOpen, regionEntries, loadEntity]);
+
+  /** Every entity a preload could reach. Memoized because it walks every
+   *  placement of every placed map, which is six figures with the base game. */
+  const preloadable = useMemo(() => preloadableCount(regionEntries), [regionEntries]);
+
+  const stopPreload = useCallback(() => {
+    preloadCancel.current = true;
+  }, []);
+
+  /**
+   * Load everything in the placed maps at once, instead of by distance.
+   *
+   * Streaming is switched off first, and deliberately: its unload rule drops
+   * anything past its radius, so leaving it on would have it tearing out what
+   * this just loaded as soon as the camera moved.
+   */
+  const preloadAll = useCallback(
+    async (cap: number) => {
+      setStreaming(false);
+      setPreloading(true);
+      preloadCancel.current = false;
+      try {
+        const cam = cameraRef.current.position;
+        const excluded = new Set<string>(pending.current);
+        for (const load of geometryStore.all()) {
+          excluded.add(keyFor(load.mapKey, load.entity.index));
+        }
+        const targets = preloadTargets(
+          regionEntries,
+          excluded,
+          cam ? worldToGta(cam) : null,
+          cap,
+        );
+        setProgress({ done: 0, total: targets.length, label: "Preloading placed maps" });
+
+        for (let at = 0; at < targets.length; at += PRELOAD_BATCH) {
+          if (preloadCancel.current) break;
+          const batch = targets.slice(at, at + PRELOAD_BATCH);
+          // oxlint-disable-next-line no-await-in-loop
+          await Promise.allSettled(batch.map((t) => loadEntity(t.mapKey, t.entity)));
+          setProgress((current) =>
+            current ? { ...current, done: current.done + batch.length } : current,
+          );
+        }
+        setError(null);
+      } catch (cause) {
+        setError(String(cause));
+      } finally {
+        setProgress(null);
+        setPreloading(false);
+        preloadCancel.current = false;
+      }
+    },
+    [regionEntries, loadEntity],
+  );
 
   const selectionLoaded =
     selected !== null &&
@@ -643,6 +726,17 @@ export function World(): React.JSX.Element {
                       Loads the nearest placed entities' models as you fly, swapping
                       LOD by distance.
                     </p>
+                  </Section>
+
+                  <Section title="Preload">
+                    <PreloadPanel
+                      placedEntities={preloadable}
+                      loaded={geometry.length}
+                      running={preloading}
+                      busy={busy}
+                      onStart={preloadAll}
+                      onStop={stopPreload}
+                    />
                   </Section>
 
                   <Section title="Asset cache">
@@ -836,6 +930,73 @@ function Section({
       </h2>
       {children}
     </section>
+  );
+}
+
+/**
+ * Load the placed maps in full, rather than by camera distance.
+ *
+ * The cap is exposed rather than hidden because it is the only thing bounding
+ * the load, and the right value depends on the GPU. It is shown against the
+ * real number of placed entities so raising it is an informed choice: with the
+ * base game placed that number is six figures, and nothing near it will render
+ * until archetypes are instanced.
+ */
+function PreloadPanel({
+  placedEntities,
+  loaded,
+  running,
+  busy,
+  onStart,
+  onStop,
+}: {
+  placedEntities: number;
+  loaded: number;
+  running: boolean;
+  busy: boolean;
+  onStart: (cap: number) => void;
+  onStop: () => void;
+}): React.JSX.Element {
+  const [cap, setCap] = useState(PRELOAD_CAP);
+  const reachable = Math.min(cap, placedEntities);
+
+  return (
+    <div className="px-4 pb-1 text-xs">
+      <p className="pb-2 text-[11px] text-ink-dim">
+        Loads everything in the placed maps at once instead of streaming it by
+        distance. Turns streaming off, because its unload rule would drop what
+        this loads as soon as you moved.
+      </p>
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={running ? onStop : () => onStart(cap)}
+          disabled={busy || placedEntities === 0}
+          className="flex items-center gap-1.5 rounded bg-surface-2 px-2 py-1 text-xs text-ink transition-colors hover:bg-surface-2/70 disabled:opacity-40"
+        >
+          {running ? <Loader2 size={12} className="animate-spin" /> : <Layers size={12} />}
+          {running ? "Stop" : "Preload"}
+        </button>
+        <label className="ml-auto flex items-center gap-1.5 text-[11px] text-ink-dim">
+          cap
+          <input
+            type="number"
+            min={1}
+            step={500}
+            value={cap}
+            disabled={running}
+            onChange={(event) => setCap(Math.max(1, Number(event.target.value) || 1))}
+            className="w-20 rounded bg-surface-2 px-1.5 py-0.5 text-right font-mono text-ink outline-none disabled:opacity-40"
+          />
+        </label>
+      </div>
+
+      <p className="pt-2 text-[11px] text-ink-dim">
+        {loaded.toLocaleString()} loaded of {placedEntities.toLocaleString()} placed
+        {placedEntities > cap && `, capped at ${reachable.toLocaleString()}`}
+      </p>
+    </div>
   );
 }
 
