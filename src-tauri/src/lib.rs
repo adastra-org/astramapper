@@ -10,6 +10,7 @@
 pub mod bake;
 pub mod cache;
 pub mod explorer;
+pub mod placements;
 pub mod viewer;
 pub mod textures;
 pub mod world;

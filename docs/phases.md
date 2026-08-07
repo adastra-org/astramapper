@@ -17,9 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
-| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope |
 
-Branch: work happens on `dev`. Current tests: **277 unit + 51 gate + 121 frontend**.
+Branch: work happens on `dev`. Current tests: **284 unit + 52 gate + 130 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -1199,23 +1199,63 @@ larger:
 | --- | --- |
 | List the base group | 2.8ms for 4,601 maps |
 | Read and flatten every one | **2.0s** for 763,716 placements |
-| Serialize those placements to JSON | **2.3s for 201.5 MB** |
+| Serialize those placements to JSON | 313ms for **204.1 MB** |
 
-`world_map` is a plain `#[tauri::command]`, so **every placement crosses the IPC
-boundary as JSON text and is parsed by the WebView** — 201.5 MB of it, before
-the frontend has allocated the two-and-a-third million JavaScript objects that
-text decodes into. That is the same shape of problem 4.3 and 4.4 found for
-textures and geometry, on the one payload that was never moved into the
-envelope, and it is the largest measured cost left in the phase.
+`world_map` was a plain `#[tauri::command]`, so **every placement crossed the
+IPC boundary as JSON text and was parsed by the WebView** — 204 MB of it. That
+is the same shape of problem 4.3 and 4.4 found for textures and geometry, on the
+one payload that was never moved into the envelope. Closed in 4.11 below.
 
 The frontend's own dedup of that list was quadratic and is fixed here:
 `loadBaseMaps` checked `next.some(m => m.path === ...)` per map, ten million
 path comparisons to merge a list that is already distinct.
 
+### 4.11 The placement envelope — **DONE**
+
+Placements move into `cw_core::wire` as columns, one section per field, with the
+two strings — the archetype name and the LOD label — deduplicated into tables in
+the JSON metadata and pointed at by an integer column.
+
+Over the base game's 4,597 readable maps and 763,716 placements:
+
+| | JSON | Envelope | |
+| --- | --- | --- | --- |
+| On the wire | 204.1 MB | 51.4 MB | 3.97x |
+| Rust-side write | 313ms | 82ms | 3.80x |
+| Frontend decode | 745ms `JSON.parse` | 88ms | 8.45x |
+
+**Most of the JSON was not data.** A placement is thirteen fields, and JSON
+repeats every field *name* per entity — roughly 120 bytes of keys against 60
+bytes of values. Columns delete the keys outright, which is where the 4x comes
+from; the two string tables are what stops the archetype names from coming back
+in through the side door.
+
+The frontend decode still **materializes one object per placement**, because
+`Placed` is an object with tuple fields and the whole renderer reads it that
+way. That is the remaining 88ms and it is deliberate: the win here is deleting
+204 MB of text and the parse over it, not the object graph, which only a
+columnar `Placed` would remove and which would touch every reader in
+`World.tsx`.
+
+**`nameHash` is not derived from `name`, even though it nearly could be.** The
+name table is keyed on the pair, so one name reached through two archetype
+hashes gets two rows. Deriving it would save four bytes an entity and would make
+an entity silently inherit a neighbour's archetype hash the day the assumption
+broke, which is not a failure anyone finds by looking at the screen.
+
+Both halves are written from the documented layout and each is unit-tested
+against a fixture it built itself — which proves each half self-consistent and
+nothing about the pair. `the_placement_envelope_round_trips_a_real_map` is what
+pins them together: real maps through the encoder, decoded at the same column
+offsets the frontend uses, asserted field for field.
+
 ### Still to come
 
-The placement envelope — `world_map` over `cw_core::wire` with a string table
-for the repeated archetype names, which is what the measurement above points at.
+Reading the maps themselves, which is now the whole cost of filling the world:
+2.0s of the 2.1s that remains. It is 4,597 separate `world_map` calls, each one
+extracting, inflating and walking a `.ymap` from scratch on every launch — and
+unlike the launch scan, this one is worth putting in the cache, because the
+measurement says so rather than the plan.
 
 Archetype instancing, which is what `PRELOAD_CAP` is really waiting on: entities
 sharing an archetype should share one draw call instead of a group each.
@@ -1227,11 +1267,9 @@ the view back to the overview. The base load batches into one `setPlaced` so it
 pays this once, but every later placement pays it again.
 
 Then the shader parameter values and extended vertex decode that phase 4 skipped
-and that the shader work now needs; serializing the install-scoped indexes into
-the pinned pack, which is what would make a *warm launch* instant rather than a
-warm model; the `World.tsx` decomposition and spatial streaming index; GLSL
-shader profiles; layers, search and multi-select; and the collision and AI path
-layers.
+and that the shader work now needs; the `World.tsx` decomposition and spatial
+streaming index; GLSL shader profiles; layers, search and multi-select; and the
+collision and AI path layers.
 
 Two gaps are visible in the app today and are expected rather than regressions.
 **Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is

@@ -8,6 +8,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import { decodePlacements } from "./world/placements";
 import { asFloat32, asUint16, asUint32, Kind, readEnvelope, splitMips } from "./wire";
 
 /** One content group: the archives that make up a slice of the install. */
@@ -100,10 +101,18 @@ export function clearWorldCaches(): void {
   mapCache.clear();
 }
 
+/**
+ * Read a `.ymap` into flattened world placements.
+ *
+ * Comes back as a wire envelope rather than JSON: the base game's 763,716
+ * placements weigh 201.5 MB as JSON, which is more to serialize than the maps
+ * cost to read. See `src/lib/world/placements.ts`.
+ */
 export function worldMap(path: string): Promise<WorldMap> {
   const cached = mapCache.get(path);
   if (cached) return Promise.resolve(cached);
-  return invoke<WorldMap>("world_map", { path }).then((map) => {
+  return invoke<ArrayBuffer>("world_map", { path }).then((buffer) => {
+    const map = decodePlacements(readEnvelope(buffer));
     mapCache.set(path, map);
     return map;
   });
@@ -111,7 +120,9 @@ export function worldMap(path: string): Promise<WorldMap> {
 
 /** Place a `.ymap` the user picked from disk, custom/mod maps included. */
 export function worldMapFile(path: string): Promise<WorldMap> {
-  return invoke<WorldMap>("world_map_file", { path });
+  return invoke<ArrayBuffer>("world_map_file", { path }).then((buffer) =>
+    decodePlacements(readEnvelope(buffer)),
+  );
 }
 
 /** Resolve an archetype name to a model file, or `null` when there is none. */

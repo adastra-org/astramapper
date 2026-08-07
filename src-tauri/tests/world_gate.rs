@@ -179,6 +179,149 @@ fn reads_a_ymap_into_world_placements() {
     );
 }
 
+/// The placement envelope has to carry a real map's placements back **exactly**,
+/// field for field.
+///
+/// This is the assertion the format lives or dies on. Both halves are written
+/// from the documented layout and each is unit-tested against a fixture it
+/// built itself, which proves each half self-consistent and nothing about the
+/// pair. Here the encoder runs over real maps and the decode is done against
+/// the same column offsets `src/lib/world/placements.ts` uses — so a column
+/// pushed in the wrong order, a width that drifted, or a string table that
+/// deduplicated two different things together shows up as a mismatched field
+/// rather than as a map that quietly renders somewhere else.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn the_placement_envelope_round_trips_a_real_map() {
+    use cw_core::wire::{EnvelopeView, Kind};
+
+    let (manager, keys) = scan();
+    let names = manager.index_names();
+    let mlo = cw_core::filetypes::index_mlo_archetypes(&manager, &keys);
+
+    let mut checked = 0usize;
+    let mut placements = 0usize;
+    let mut json_bytes = 0usize;
+    let mut wire_bytes = 0usize;
+
+    for path in city_maps(&manager).into_iter().take(40) {
+        let Ok(map) = read_world_map(path, &keys, &manager, Some(&mlo), Some(&names)) else {
+            continue;
+        };
+        if map.entities.is_empty() {
+            continue;
+        }
+
+        let bytes = astramapper_lib::placements::encode(&map).expect("encode");
+        let view = EnvelopeView::read(&bytes).expect("read the envelope back");
+        assert_eq!(view.kind, Kind::Placements);
+        let meta: serde_json::Value = serde_json::from_str(view.meta).expect("meta json");
+
+        let count = meta["count"].as_u64().expect("count") as usize;
+        assert_eq!(count, map.entities.len(), "{path} lost placements");
+
+        let table_names: Vec<&str> = meta["names"]
+            .as_array()
+            .expect("names")
+            .iter()
+            .map(|v| v.as_str().expect("name"))
+            .collect();
+        let table_hashes: Vec<u32> = meta["nameHashes"]
+            .as_array()
+            .expect("nameHashes")
+            .iter()
+            .map(|v| v.as_u64().expect("hash") as u32)
+            .collect();
+        let table_lods: Vec<&str> = meta["lodLevels"]
+            .as_array()
+            .expect("lodLevels")
+            .iter()
+            .map(|v| v.as_str().expect("lod"))
+            .collect();
+
+        let u32s = |index: usize| -> Vec<u32> {
+            view.section(index)
+                .expect("section")
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let f32s = |index: usize| -> Vec<f32> {
+            view.section(index)
+                .expect("section")
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+
+        let indexes = u32s(0);
+        let name_slots = u32s(1);
+        let flags = view.section(2).expect("flags");
+        let positions = f32s(3);
+        let rotations = f32s(4);
+        let scale_xy = f32s(5);
+        let scale_z = f32s(6);
+        let parents: Vec<i32> = view
+            .section(7)
+            .expect("parents")
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let lod_slots: Vec<u16> = view
+            .section(8)
+            .expect("lod levels")
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let lod_dist = f32s(9);
+        let children = u32s(10);
+
+        for (at, entity) in map.entities.iter().enumerate() {
+            let where_ = format!("{path} entity {at}");
+            assert_eq!(indexes[at] as usize, entity.index, "{where_}: index");
+            let slot = name_slots[at] as usize;
+            assert_eq!(table_names[slot], entity.name, "{where_}: name");
+            assert_eq!(table_hashes[slot], entity.name_hash, "{where_}: nameHash");
+            assert_eq!(flags[at] & 1 != 0, entity.is_mlo, "{where_}: isMlo");
+            assert_eq!(flags[at] & 2 != 0, entity.from_mlo, "{where_}: fromMlo");
+            assert_eq!(
+                &positions[at * 3..at * 3 + 3],
+                &entity.position[..],
+                "{where_}: position"
+            );
+            assert_eq!(
+                &rotations[at * 4..at * 4 + 4],
+                &entity.rotation[..],
+                "{where_}: rotation"
+            );
+            assert_eq!(scale_xy[at], entity.scale_xy, "{where_}: scaleXy");
+            assert_eq!(scale_z[at], entity.scale_z, "{where_}: scaleZ");
+            assert_eq!(parents[at], entity.parent_index, "{where_}: parentIndex");
+            assert_eq!(
+                table_lods[lod_slots[at] as usize],
+                entity.lod_level,
+                "{where_}: lodLevel"
+            );
+            assert_eq!(lod_dist[at], entity.lod_dist, "{where_}: lodDist");
+            assert_eq!(children[at] as usize, entity.children, "{where_}: children");
+        }
+
+        checked += 1;
+        placements += map.entities.len();
+        wire_bytes += bytes.len();
+        json_bytes += serde_json::to_string(&map).map(|s| s.len()).unwrap_or(0);
+    }
+
+    assert!(checked > 0, "no city map produced placements to check");
+    println!(
+        "{checked} maps, {placements} placements round-trip field for field\n\
+         wire {:.1} MB against JSON {:.1} MB ({:.2}x)",
+        wire_bytes as f64 / 1_048_576.0,
+        json_bytes as f64 / 1_048_576.0,
+        json_bytes as f64 / wire_bytes.max(1) as f64
+    );
+}
+
 /// An MLO instance's interior has to expand into world-space entities whose
 /// archetypes resolve to names, sitting at finite positions around the instance.
 #[test]

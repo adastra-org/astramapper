@@ -27,6 +27,7 @@ export const Kind = {
   Textures: 2,
   Collision: 3,
   Paths: 4,
+  Placements: 5,
 } as const;
 
 export type KindValue = (typeof Kind)[keyof typeof Kind];
@@ -132,6 +133,10 @@ export function asUint16(section: Uint8Array): Uint16Array {
 
 export function asUint32(section: Uint8Array): Uint32Array {
   return viewAs(section, 4, (b, o, n) => new Uint32Array(b, o, n));
+}
+
+export function asInt32(section: Uint8Array): Int32Array {
+  return viewAs(section, 4, (b, o, n) => new Int32Array(b, o, n));
 }
 
 /**

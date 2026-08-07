@@ -72,6 +72,15 @@ response rather than copies. The metadata stays JSON on purpose: it is the part
 that churns, and the bytes that matter are already zero-copy. The Explorer's
 commands still use base64 — one file at a time is not where the copies hurt.
 
+The envelope carries more than buffers. A `.ymap`'s placements go through it as
+one section per field — position, rotation, scale, LOD, and integer columns into
+two string tables for the archetype name and the LOD label. That payload is
+thirteen small fields per entity rather than one big buffer, so the saving is a
+different one: JSON repeats every field *name* per entity, about 120 bytes of
+keys against 60 bytes of values, and columns delete them. Over the base game's
+763,716 placements that is 204.1 MB down to 51.4 MB, and 745ms of `JSON.parse`
+down to an 88ms decode. See `src-tauri/src/placements.rs`.
+
 **Textures on the streaming path cross as GPU blocks, not as images.** This is a
 deliberate change to the rule above, so here is the defence. The rule exists
 because the WebView has no business *parsing* archive formats, and it still does

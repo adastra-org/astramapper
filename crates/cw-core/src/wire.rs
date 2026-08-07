@@ -75,6 +75,8 @@ pub enum Kind {
     Collision = 3,
     /// AI path nodes and links from a `.ynd`.
     Paths = 4,
+    /// A `.ymap`'s flattened placements, column by column.
+    Placements = 5,
 }
 
 impl Kind {
@@ -84,6 +86,7 @@ impl Kind {
             2 => Kind::Textures,
             3 => Kind::Collision,
             4 => Kind::Paths,
+            5 => Kind::Placements,
             _ => return None,
         })
     }

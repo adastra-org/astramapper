@@ -734,37 +734,46 @@ pub async fn world_maps_in_group(
 /// Reads past the viewer's one-open-file state on purpose — see the module
 /// note — so placing several maps does not fight the Explorer over what is
 /// open.
+///
+/// Comes back as a wire envelope rather than JSON. Over the base game that is
+/// 763,716 placements, and as JSON they weigh 201.5 MB — more to serialize than
+/// the maps cost to read. See `crate::placements`.
 #[tauri::command]
-pub async fn world_map(path: String, game: State<'_, GameState>) -> Result<WorldMap, String> {
+pub async fn world_map(
+    path: String,
+    game: State<'_, GameState>,
+) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
     blocking(move || {
         // Both indexes are built once and kept: scanning every `.ytyp` is the
         // expensive part, and only a map that places interiors needs it.
-        read_world_map(
+        let map = read_world_map(
             &path,
             &loaded.keys,
             &loaded.manager,
             Some(loaded.mlo_archetypes()),
             Some(loaded.names()),
-        )
+        )?;
+        Ok(tauri::ipc::Response::new(crate::placements::encode(&map)?))
     })
     .await
 }
 
 /// Place a `.ymap` the user picked from disk, whether or not the install's
 /// index knows it — a custom/mod map. Reads the payload off the filesystem and
-/// shares the flattening with `read_world_map`.
+/// shares the flattening with `read_world_map`, and the envelope with
+/// `world_map`.
 #[tauri::command]
 pub async fn world_map_file(
     path: String,
     game: State<'_, GameState>,
-) -> Result<WorldMap, String> {
+) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
     blocking(move || {
         let raw = std::fs::read(&path).map_err(|e| format!("could not read {path}: {e}"))?;
         let (payload, system_size) = loose_ymap_payload(&raw);
 
-        flatten_ymap(
+        let map = flatten_ymap(
             &path,
             &payload,
             system_size,
@@ -772,7 +781,8 @@ pub async fn world_map_file(
             &loaded.manager,
             Some(loaded.mlo_archetypes()),
             Some(loaded.names()),
-        )
+        )?;
+        Ok(tauri::ipc::Response::new(crate::placements::encode(&map)?))
     })
     .await
 }
