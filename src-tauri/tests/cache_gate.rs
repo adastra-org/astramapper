@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use astramapper_lib::cache::{install_stamp, model_key};
+use astramapper_lib::cache::{install_stamp, map_key, model_key};
 use astramapper_lib::textures::GpuCaps;
 use astramapper_lib::world::{compile_world_model, find_model_for, read_world_map};
 use cw_cache::{Cache, Kind, MIN_BUDGET};
@@ -176,6 +176,100 @@ fn a_warm_read_returns_exactly_what_was_compiled() {
         warm_bytes as f64 / 1_048_576.0,
         stats.packs,
     );
+}
+
+/// The same claim for flattened maps, which is where filling the world spends
+/// its time: 4,597 of these on every launch, 2.0s of extracting, inflating and
+/// walking files that had not changed.
+///
+/// Byte identity matters more here than for a model, not less. A stale model
+/// draws the wrong shape and someone notices; a stale map has the wrong
+/// *entities in it*, because flattening expands MLO interiors, and a world
+/// missing an interior looks exactly like a world that never had one.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn a_warm_map_read_returns_exactly_what_was_flattened() {
+    let (manager, keys) = scan();
+    let mlo = cw_core::filetypes::index_mlo_archetypes(&manager, &keys);
+    let names = manager.index_names();
+    let maps: Vec<String> = astramapper_lib::world::ymaps_in_group(&manager, "base")
+        .into_iter()
+        .map(|(path, _)| path)
+        .take(300)
+        .collect();
+    assert!(!maps.is_empty(), "the base group has no maps");
+    let scratch = Scratch::new("maps");
+
+    // The generation the app would pass. Any value works for the round trip;
+    // what matters is that both halves use the same one.
+    let generation = 0x1234_5678_9abc_def0u64;
+    let flatten = |path: &str| -> Result<Vec<u8>, String> {
+        let map = read_world_map(path, &keys, &manager, Some(&mlo), Some(&names))?;
+        astramapper_lib::placements::encode(&map)
+    };
+
+    let mut compiled: Vec<(String, Vec<u8>)> = Vec::new();
+    let cold_started = Instant::now();
+    {
+        let cache = scratch.open();
+        for path in &maps {
+            let key = map_key(&manager, path, generation);
+            assert!(key.is_some(), "{path} has no cache key");
+            let Ok(bytes) = cache.get_or_insert_with(key, Kind::Map, || flatten(path)) else {
+                continue; // A map that will not read is not the cache's problem.
+            };
+            compiled.push((path.clone(), bytes));
+        }
+        assert_eq!(cache.stats().hits, 0, "nothing can hit on an empty cache");
+        assert_eq!(cache.stats().write_errors, 0);
+    }
+    let cold = cold_started.elapsed();
+    assert!(!compiled.is_empty(), "no base map flattened");
+
+    let warm_started = Instant::now();
+    let cache = scratch.open();
+    let mut warm_bytes = 0u64;
+    let mut placements = 0usize;
+    for (path, expected) in &compiled {
+        let key = map_key(&manager, path, generation).expect("key");
+        let got = cache
+            .get(key)
+            .unwrap_or_else(|| panic!("{path} should be cached"));
+        assert_eq!(&got, expected, "{path} came back different");
+        let view = EnvelopeView::read(&got)
+            .unwrap_or_else(|e| panic!("{path} is not an envelope: {e}"));
+        let meta: serde_json::Value = serde_json::from_str(view.meta).expect("meta");
+        placements += meta["count"].as_u64().unwrap_or(0) as usize;
+        warm_bytes += got.len() as u64;
+    }
+    let warm = warm_started.elapsed();
+
+    assert_eq!(cache.stats().hits, compiled.len() as u64);
+    assert_eq!(cache.stats().misses, 0, "a warm read must not miss");
+
+    println!(
+        "{} maps, {placements} placements: cold {:.2}s, warm {:.0}ms ({:.0}x), {:.1} MB stored",
+        compiled.len(),
+        cold.as_secs_f64(),
+        warm.as_secs_f64() * 1000.0,
+        cold.as_secs_f64() / warm.as_secs_f64().max(f64::EPSILON),
+        warm_bytes as f64 / 1_048_576.0,
+    );
+}
+
+/// The `.ytyp` generation has to be part of the map key, or patching the
+/// archive that holds an interior leaves every map that places one serving its
+/// old contents. Same shape as the GPU-capabilities test below, and the same
+/// reason: an input that changes the output must change the key.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn the_ytyp_generation_is_part_of_the_map_key() {
+    let (manager, _) = scan();
+    let path = &astramapper_lib::world::ymaps_in_group(&manager, "base")[0].0;
+
+    let one = map_key(&manager, path, 1).expect("key");
+    let other = map_key(&manager, path, 2).expect("key");
+    assert_ne!(one, other, "the generation must reach the key");
 }
 
 /// A second pass over the same models must not compile anything, which is the

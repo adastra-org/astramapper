@@ -37,6 +37,9 @@ pub struct Loaded {
     /// turns a `.ymap` archetype hash back into a model name. See
     /// [`RpfManager::index_names`].
     names: OnceLock<HashMap<u32, String>>,
+    /// One value standing for the state of every archive that holds a `.ytyp`.
+    /// See [`Self::typ_generation`].
+    typ_generation: OnceLock<u64>,
 }
 
 impl Loaded {
@@ -60,6 +63,47 @@ impl Loaded {
     /// [`Self::archetypes`].
     pub fn names(&self) -> &HashMap<u32, String> {
         self.names.get_or_init(|| self.manager.index_names())
+    }
+
+    /// One value standing for the state of every archive that holds a `.ytyp`.
+    ///
+    /// The cache keys an artifact by the archive its *source entry* came from,
+    /// which is right for a model and not enough for a map: flattening a
+    /// `.ymap` expands its MLO instances through archetypes read out of `.ytyp`
+    /// files in other archives entirely, and an expansion adds entities to the
+    /// placement list. Patch the archive holding the interiors and a map keyed
+    /// on its own archive alone would keep serving the old contents — a
+    /// difference in *what is in the world*, not in how it looks.
+    ///
+    /// So the stamps of every archive that holds one are mixed into a single
+    /// value that rides in the map key. Patch any of them and every cached map
+    /// misses, which is the conservative direction: the cost of being wrong
+    /// here is a silently wrong world, and the cost of being over-eager is one
+    /// re-flatten at 0.44ms.
+    ///
+    /// Built once. The stamps themselves are already memoized by the manager,
+    /// so this is a scan of the entry names and nothing more.
+    ///
+    /// Known limit, shared with the model key: an archive holding a `.ytd` a
+    /// model draws is not in *that* key either. The install stamp on
+    /// `GTA5.exe` is the coarse gate over both, so an official update wipes
+    /// everything; a mod tool that rewrites one archive and nothing else is the
+    /// gap. Closing it for models is follow-up work.
+    pub fn typ_generation(&self) -> u64 {
+        *self.typ_generation.get_or_init(|| {
+            let stamps = self.manager.archive_stamps();
+            let mut mixed: u64 = 0xcbf2_9ce4_8422_2325;
+            for (index, archive) in self.manager.archives.iter().enumerate() {
+                if !archive.entries.iter().any(|e| e.name_lower.ends_with(".ytyp")) {
+                    continue;
+                }
+                let stamp = stamps.get(index).copied().unwrap_or(0);
+                // FNV-style mix, order-dependent on purpose: the archive order
+                // is the manager's scan order and is stable for one install.
+                mixed = (mixed ^ stamp).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            mixed
+        })
     }
 }
 
@@ -187,6 +231,7 @@ fn scan(folder: &Path, assets: Option<PathBuf>) -> Result<(Loaded, GameSummary),
             cache: crate::cache::open(assets, folder),
             archetypes: OnceLock::new(),
             names: OnceLock::new(),
+            typ_generation: OnceLock::new(),
         },
         summary,
     ))

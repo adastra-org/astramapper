@@ -736,8 +736,14 @@ pub async fn world_maps_in_group(
 /// open.
 ///
 /// Comes back as a wire envelope rather than JSON. Over the base game that is
-/// 763,716 placements, and as JSON they weigh 201.5 MB — more to serialize than
+/// 763,716 placements, and as JSON they weigh 204.1 MB — more to serialize than
 /// the maps cost to read. See `crate::placements`.
+///
+/// Cached, for the same reason and by the same line as [`world_model`]: filling
+/// the world means 4,597 of these on every launch, which measured at 2.0s of
+/// extracting, inflating and walking maps that had not changed since the last
+/// run. The envelope is already a finished byte blob, so it is exactly what the
+/// cache wants to hold.
 #[tauri::command]
 pub async fn world_map(
     path: String,
@@ -745,18 +751,29 @@ pub async fn world_map(
 ) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
     blocking(move || {
-        // Both indexes are built once and kept: scanning every `.ytyp` is the
-        // expensive part, and only a map that places interiors needs it.
-        let map = read_world_map(
-            &path,
-            &loaded.keys,
-            &loaded.manager,
-            Some(loaded.mlo_archetypes()),
-            Some(loaded.names()),
-        )?;
-        Ok(tauri::ipc::Response::new(crate::placements::encode(&map)?))
+        let compile = || {
+            // Both indexes are built once and kept: scanning every `.ytyp` is
+            // the expensive part, and only a map that places interiors needs it.
+            let map = read_world_map(
+                &path,
+                &loaded.keys,
+                &loaded.manager,
+                Some(loaded.mlo_archetypes()),
+                Some(loaded.names()),
+            )?;
+            crate::placements::encode(&map)
+        };
+        match &loaded.cache {
+            Some(cache) => {
+                let key =
+                    crate::cache::map_key(&loaded.manager, &path, loaded.typ_generation());
+                cache.get_or_insert_with(key, cw_cache::Kind::Map, compile)
+            }
+            None => compile(),
+        }
     })
     .await
+    .map(tauri::ipc::Response::new)
 }
 
 /// Place a `.ymap` the user picked from disk, whether or not the install's

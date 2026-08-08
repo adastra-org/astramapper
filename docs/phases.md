@@ -17,9 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
-| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope, a view-ordered streaming pass |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope, a view-ordered streaming pass, flattened maps in the cache |
 
-Branch: work happens on `dev`. Current tests: **284 unit + 52 gate + 137 frontend**.
+Branch: work happens on `dev`. Current tests: **284 unit + 54 gate + 137 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -1308,13 +1308,56 @@ function scanning what it did not need:
 **76.3ms to 0.8ms cold, 85.5ms to 2.4ms in the steady state.** The view cone
 rides along for free — 2.1ms against 2.4ms without it, which is noise.
 
-### Still to come
+### 4.13 Flattened maps in the cache — **DONE**
 
-Reading the maps themselves, which is now the whole cost of filling the world:
-2.0s of the 2.1s that remains. It is 4,597 separate `world_map` calls, each one
-extracting, inflating and walking a `.ymap` from scratch on every launch — and
-unlike the launch scan, this one is worth putting in the cache, because the
-measurement says so rather than the plan.
+The item 4.10 and 4.12 left standing. Filling the world is 4,597 `world_map`
+calls, each extracting, inflating and walking a `.ymap` that has not changed
+since the last run. `Kind::Map` was reserved for this in 4.5 and is now used.
+
+Measured over the whole base group, through the same reopen-and-remap path a
+second launch takes:
+
+| 4,597 maps, 763,716 placements | |
+| --- | --- |
+| Cold — flatten, encode and store | 3.44s |
+| Warm | **72ms** |
+| Stored | 51.4 MB |
+
+**48x.** It is one line in `world_map`, the same line `world_model` has had
+since 4.6, because the placement envelope from 4.11 is already a finished byte
+blob and a byte blob is exactly what the cache holds. Moving placements off JSON
+is what made this trivial rather than a serialization problem of its own.
+
+**The `.ytyp` generation is in the key, and it is not there out of caution.**
+The cache keys an artifact by the archive its *source entry* came from, which is
+right for a model and not enough for a map: flattening expands MLO instances
+through archetypes read out of `.ytyp` files in other archives entirely, and an
+expansion adds entities to the placement list. A map keyed on its own archive
+alone would keep serving its old contents after the archive holding the
+interiors was patched — and a world missing an interior looks exactly like a
+world that never had one, which is the silent-failure mode the whole key design
+exists to avoid. So `Loaded::typ_generation` mixes the stamp of every archive
+that holds a `.ytyp` into one value that rides in the key. Patch any of them and
+every map misses, which is the right direction to be wrong in: a false miss
+costs one re-flatten at 0.44ms.
+
+That leaves a known gap, and it is worth naming because it is *shared with the
+model key rather than introduced here*: an archive holding a `.ytd` a model
+draws is not in that model's key either. The install stamp on `GTA5.exe` is the
+coarse gate over both, so an official game update wipes everything; a mod tool
+that rewrites one archive and touches nothing else is the hole. Closing it for
+models is follow-up work.
+
+Maps are **not** pinned, unlike the install-scoped indexes. They are per-entry
+and grow with how much DLC gets placed, and 51.4 MB against the 8 GB budget does
+not need protecting from eviction to stay resident.
+
+`a_warm_map_read_returns_exactly_what_was_flattened` gates the assertion that
+matters — byte identity across a reopen — and checks what comes back is still a
+readable envelope. `the_ytyp_generation_is_part_of_the_map_key` pins the key
+input, the same way `gpu_capabilities_are_part_of_the_key` does for models.
+
+### Still to come
 
 Archetype instancing, which is what `PRELOAD_CAP` is really waiting on: entities
 sharing an archetype should share one draw call instead of a group each.
@@ -1325,10 +1368,12 @@ while doing it**, so placing one more map after flying across the city throws
 the view back to the overview. The base load batches into one `setPlaced` so it
 pays this once, but every later placement pays it again.
 
+Closing the cross-archive gap in the *model* key, which 4.13 names: a model's
+key covers its own archive and not the one holding the `.ytd` it draws.
+
 Then the shader parameter values and extended vertex decode that phase 4 skipped
-and that the shader work now needs; the `World.tsx` decomposition and spatial
-streaming index; GLSL shader profiles; layers, search and multi-select; and the
-collision and AI path layers.
+and that the shader work now needs; the `World.tsx` decomposition; GLSL shader
+profiles; layers, search and multi-select; and the collision and AI path layers.
 
 Two gaps are visible in the app today and are expected rather than regressions.
 **Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is

@@ -56,6 +56,18 @@ pub fn model_key(manager: &RpfManager, path: &str, caps: GpuCaps) -> Option<Cach
     entry_key(manager, path, Kind::Model, caps.bits() as u64)
 }
 
+/// The key for one flattened `.ymap`.
+///
+/// `typ_generation` is in the key because **a flattened map is not decided by
+/// the `.ymap` alone.** Its MLO instances expand through archetypes that live in
+/// `.ytyp` files in other archives, and an expansion *adds entities to the
+/// list* — so a stale one does not merely draw something wrong, it changes what
+/// exists in the world. The entry key covers the map's own archive; this covers
+/// the other input. See [`crate::explorer::Loaded::typ_generation`].
+pub fn map_key(manager: &RpfManager, path: &str, typ_generation: u64) -> Option<CacheKey> {
+    entry_key(manager, path, Kind::Map, typ_generation)
+}
+
 /// The key for any artifact compiled out of one archive entry.
 fn entry_key(manager: &RpfManager, path: &str, kind: Kind, params: u64) -> Option<CacheKey> {
     let reference = manager.find(path)?;
