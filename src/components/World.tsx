@@ -47,6 +47,7 @@ import {
   projectSave,
   serializeProject,
   streamingDecision,
+  STREAM_VIEW_COS_HALF_ANGLE,
   worldAsset,
   worldDlcYmaps,
   worldMap,
@@ -111,6 +112,13 @@ export type Selection = {
   readonly entityIndex: number;
 };
 
+/** The camera as the streamer sees it, in three.js's Y-up world space. */
+type CameraPose = {
+  position: [number, number, number] | null;
+  /** Unit forward. Null until the first frame has run. */
+  forward: [number, number, number] | null;
+};
+
 /** Which gizmo the selected entity gets. */
 export type GizmoMode = "move" | "rotate" | "scale";
 
@@ -164,7 +172,10 @@ export function World(): React.JSX.Element {
   // re-streams without re-resolving names or re-decoding geometry.
   const pending = useRef(new Set<string>());
   /** The camera's world position, written by the canvas every frame. */
-  const cameraRef = useRef<{ position: [number, number, number] | null }>({ position: null });
+  /** Where the camera is and which way it faces, written by the canvas each
+   *  frame. The streamer reads both: the position bounds what is a candidate,
+   *  the direction decides which candidates the batch takes first. */
+  const cameraRef = useRef<CameraPose>({ position: null, forward: null });
   /** Base maps are loaded once per mount, not every time status re-resolves. */
   const autoLoadedBase = useRef(false);
 
@@ -533,12 +544,19 @@ export function World(): React.JSX.Element {
       const loadedKeys = new Set(
         geometryStore.all().map((g) => keyFor(g.mapKey, g.entity.index)),
       );
+      // The look direction is a direction, and `worldToGta` is a rotation with
+      // no translation, so the same mapping that moves a point moves this.
+      const facing = cameraRef.current.forward;
+      const view = facing
+        ? { forward: worldToGta(facing), cosHalfAngle: STREAM_VIEW_COS_HALF_ANGLE }
+        : null;
       const { load, unload } = streamingDecision(
         cameraGta,
         regionEntries,
         loadedKeys,
         pending.current,
         STREAM_BATCH,
+        view,
       );
       for (const candidate of load) {
         const entity = index.placement(candidate.mapKey, candidate.entityIndex);
@@ -1091,7 +1109,7 @@ type CanvasProps = {
    *  canvas, the selection panel and the streamer all read one index. */
   index: PlacementIndex<CanvasEntry>;
   geometry: readonly GeometryLoad[];
-  cameraRef: { readonly current: { position: [number, number, number] | null } };
+  cameraRef: { readonly current: CameraPose };
   edits: ReadonlyMap<string, TransformEdit>;
   onEdit: (key: string, edit: TransformEdit) => void;
   onEditCommit: (key: string, before: TransformEdit, after: TransformEdit) => void;
@@ -1829,6 +1847,9 @@ function Canvas({
       );
       camera.lookAt(state.position.clone().add(look));
       cameraRef.current.position = [camera.position.x, camera.position.y, camera.position.z];
+      // `look` is built from yaw and pitch, so it is already unit length — the
+      // streamer's cone test divides by the distance and needs it to be.
+      cameraRef.current.forward = [look.x, look.y, look.z];
 
       lodUpdate.current?.(camera.position);
       applyEdits();

@@ -17,9 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
-| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope, a view-ordered streaming pass |
 
-Branch: work happens on `dev`. Current tests: **284 unit + 52 gate + 130 frontend**.
+Branch: work happens on `dev`. Current tests: **284 unit + 52 gate + 137 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -841,7 +841,9 @@ The ad-hoc nearest-entity loop becomes a real scheduler, still one pass every
   unit-tested: nearest-first batching, hysteresis unload, out-of-region drop,
   and never re-queuing a loaded or pending entity.
 
-Not yet: the MLO entity-set expansion.
+Not yet: the MLO entity-set expansion. The pass itself was rewritten in 4.12 —
+same rules, ordered by where the camera is looking, and no longer scanning every
+placement in the world to decide.
 
 ### 3.8 MLO entity-set expansion — **DONE**
 
@@ -1248,6 +1250,63 @@ against a fixture it built itself — which proves each half self-consistent and
 nothing about the pair. `the_placement_envelope_round_trips_a_real_map` is what
 pins them together: real maps through the encoder, decoded at the same column
 offsets the frontend uses, asserted field for field.
+
+### 4.12 The streaming pass, and what issue #1 actually asked for — **DONE**
+
+[Issue #1](https://github.com/adastra-org/astramapper/issues/1) asked for three
+things: sphere loading in an area around the camera, lower LOD quality with
+distance, and visual culling of the FOV. **Two of the three were already
+built.** The sphere is 3.7 (`entityStreamRadius` per LOD tier, nearest first,
+hysteresis unload) and the distance-driven LOD is 3.2 (`lodBandForDistance`
+swapping the drawable's own bundles per frame). Frustum *rendering* culling was
+already there too, from three.js, which culls every object by its bounding
+sphere without being asked.
+
+What was genuinely missing is the third thing pointed at streaming rather than
+rendering: **the streamer was direction-blind.** It filled its batch of 24 from
+the nearest unloaded entities in every direction, including behind the camera.
+Measured in the steady state — thousands resident, so the unloaded frontier is a
+shell rather than a puddle at the camera's feet:
+
+| Batch of 24 | On screen |
+| --- | --- |
+| Nearest-first | **5 of 24** |
+| View-ordered | **24 of 24** |
+
+Nineteen of every twenty-four slots were spent on geometry behind the camera.
+
+**It orders, it does not cull, and that is the whole design.** The candidate set
+stays the sphere and the unload rule is untouched. Culling the candidates to the
+frustum would mean turning around to find nothing there, followed by a reload
+storm as the same geometry streams back in — which is worse than the problem.
+Ordering cannot pop, costs nothing measurable, and with a batch of 24 against a
+sphere holding thousands, order *is* what a user experiences as load speed.
+
+The cone is 60 degrees off axis rather than the six real frustum planes. It
+decides order, not visibility, so being generous costs only that something just
+off screen loads slightly sooner than it had to, while being exact would couple
+a pure function to the projection matrix and the aspect ratio. Inside
+`STREAM_VIEW_NEAR` everything counts as on screen: a cone has nothing at its
+apex, and without that rule the models the camera is standing among score as
+behind it.
+
+**Measuring it first found something bigger.** With the base game placed, one
+pass was **76ms, four times a second, on the main thread — 30% of a core, in a
+`setInterval`, as 76ms of jank every 250ms.** Three causes, all of them the
+function scanning what it did not need:
+
+- it walked every placement of every *out-of-range* map, computing a distance
+  and a key, only to discard them. An out-of-range map's unload list is exactly
+  what it has loaded, so it never needs to look at a placement.
+- it built a `keyFor` string per placement per pass — 763,102 of them — to ask a
+  set membership question. The loaded and pending sets are now regrouped once
+  per pass into `mapKey → Set<entityIndex>`, so the inner loop compares integers.
+- it pushed every in-radius candidate into an array (about 46,000), sorted it,
+  and took the first 24. The top of the batch is now kept by insertion as the
+  scan runs, behind a squared-distance reject that avoids the square root too.
+
+**76.3ms to 0.8ms cold, 85.5ms to 2.4ms in the steady state.** The view cone
+rides along for free — 2.1ms against 2.4ms without it, which is noise.
 
 ### Still to come
 

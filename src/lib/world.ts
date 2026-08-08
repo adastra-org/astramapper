@@ -593,6 +593,52 @@ export function entityStreamRadius(entity: Placed): number {
 }
 
 /**
+ * Where the camera is looking, for ordering a streaming pass by what is on
+ * screen. Optional: without it the pass orders by distance alone.
+ */
+export type StreamView = {
+  /** The camera's forward direction in the game's Z-up space. Unit length. */
+  readonly forward: readonly [number, number, number];
+  /**
+   * Cosine of the half-angle of the cone standing in for the view frustum.
+   *
+   * A cone rather than the six real frustum planes, deliberately. This decides
+   * *order*, not visibility, so the cost of being generous is that something
+   * just off screen loads a little sooner than it had to — while the cost of
+   * being exact would be coupling a pure function to the projection matrix and
+   * the aspect ratio, and a set that churns every time the window is resized.
+   */
+  readonly cosHalfAngle: number;
+};
+
+/**
+ * The cone that stands in for the frustum: 60 degrees off the view axis.
+ *
+ * The camera is 60 degrees vertical, so at 16:9 its frustum corner sits about
+ * 50 degrees off axis. Sixty covers that with margin, which is what keeps a
+ * small turn of the head from reshuffling the queue.
+ */
+export const STREAM_VIEW_COS_HALF_ANGLE = Math.cos((60 * Math.PI) / 180);
+
+/**
+ * Inside this distance an entity counts as on screen whatever the angle says.
+ *
+ * A cone has nothing at its apex: without this, the models closest to the
+ * camera — the ones at its feet, the ones it is standing among — score as
+ * behind it and load last.
+ */
+export const STREAM_VIEW_NEAR = 60;
+
+/** One entity the pass decided to load. */
+export type StreamCandidate = {
+  readonly mapKey: string;
+  readonly entityIndex: number;
+  readonly distance: number;
+  /** Whether it fell inside the view cone. Ordering puts these first. */
+  readonly inView: boolean;
+};
+
+/**
  * The streaming decision for one pass: what to load, and what to unload.
  *
  * A map streams only while the camera is inside its declared streaming box
@@ -600,6 +646,27 @@ export function entityStreamRadius(entity: Placed): number {
  * the nearest unloaded entities within their own LOD-tier radius load, up to
  * `batchLimit`. Loaded entities unload once they drift beyond their radius
  * with hysteresis so a camera parked on a boundary does not thrash.
+ *
+ * # What `view` changes, and what it deliberately does not
+ *
+ * Given a view, the batch is filled with what is **on screen** first and only
+ * then with what is behind the camera. It does not change *which* entities are
+ * candidates and it does not change the unload rule — both stay the sphere they
+ * were. That distinction is the whole design: culling the candidate set to the
+ * frustum would mean turning around and finding nothing there, and then a
+ * reload storm as the same geometry streams back in. Ordering costs nothing and
+ * cannot pop, and with a batch of 24 against a sphere holding thousands, order
+ * is what the user actually experiences as load speed.
+ *
+ * # Why this is not a collect-then-sort
+ *
+ * It used to be. With the base game placed, a pass pushed every one of ~46,000
+ * in-radius placements into an array, sorted it, and took the first 24 —
+ * measured at **76ms, four times a second, on the main thread**. It also built
+ * a key string per placement per pass, 763,102 of them, before deciding it
+ * wanted none. Now the top `batchLimit` are kept by insertion as the scan runs,
+ * and the loaded and pending sets are regrouped once per pass by map so the
+ * inner loop compares integers instead of allocating strings.
  */
 export function streamingDecision(
   cameraGta: readonly [number, number, number],
@@ -607,11 +674,23 @@ export function streamingDecision(
   loadedKeys: ReadonlySet<string>,
   pendingKeys: ReadonlySet<string>,
   batchLimit: number,
-): { load: readonly { mapKey: string; entityIndex: number; distance: number }[]; unload: readonly string[] } {
-  const load: { mapKey: string; entityIndex: number; distance: number }[] = [];
+  view?: StreamView | null,
+): { load: readonly StreamCandidate[]; unload: readonly string[] } {
   const unload: string[] = [];
+  if (batchLimit <= 0 && loadedKeys.size === 0) return { load: [], unload };
+
+  const loadedByMap = groupKeysByMap(loadedKeys);
+  const pendingByMap = groupKeysByMap(pendingKeys);
+
+  // Kept sorted best-first and never longer than the batch, so the scan pays
+  // one comparison against the current worst for the overwhelming majority of
+  // placements and an insert for almost none.
+  const best: StreamCandidate[] = [];
 
   for (const entry of entries) {
+    const loadedHere = loadedByMap.get(entry.key);
+    const pendingHere = pendingByMap.get(entry.key);
+
     // The map's footprint decides in-range, not its height: a camera overhead
     // still streams what is below it, and the per-entity radius governs how
     // far out geometry actually loads.
@@ -621,29 +700,92 @@ export function streamingDecision(
       cameraGta[1] >= entry.extentsMin[1] - STREAM_REGION_MARGIN &&
       cameraGta[1] <= entry.extentsMax[1] + STREAM_REGION_MARGIN;
 
-    for (const placement of entry.placements) {
-      const key = keyFor(entry.key, placement.index);
-      const radius = entityStreamRadius(placement);
-      const distance = Math.hypot(
-        placement.position[0] - cameraGta[0],
-        placement.position[1] - cameraGta[1],
-        placement.position[2] - cameraGta[2],
-      );
+    // Out of range the whole map goes, and it goes without touching a single
+    // placement: what is loaded is already the answer.
+    if (!inRange) {
+      if (loadedHere) {
+        for (const index of loadedHere) unload.push(keyFor(entry.key, index));
+      }
+      continue;
+    }
 
-      if (!inRange) {
-        if (loadedKeys.has(key)) unload.push(key);
+    for (const placement of entry.placements) {
+      const dx = placement.position[0] - cameraGta[0];
+      const dy = placement.position[1] - cameraGta[1];
+      const dz = placement.position[2] - cameraGta[2];
+      const distanceSq = dx * dx + dy * dy + dz * dz;
+      const radius = entityStreamRadius(placement);
+
+      if (loadedHere?.has(placement.index)) {
+        const drop = radius * 1.5;
+        if (distanceSq > drop * drop) unload.push(keyFor(entry.key, placement.index));
         continue;
       }
-      if (loadedKeys.has(key) || pendingKeys.has(key)) {
-        if (loadedKeys.has(key) && distance > radius * 1.5) unload.push(key);
-      } else if (distance <= radius) {
-        load.push({ mapKey: entry.key, entityIndex: placement.index, distance });
+      if (distanceSq > radius * radius) continue;
+      if (pendingHere?.has(placement.index)) continue;
+      if (best.length >= batchLimit && batchLimit > 0) {
+        // Cheap reject before the square root: anything farther than the worst
+        // candidate can still win on being in view, so this only skips when the
+        // worst is in view too.
+        const worst = best[best.length - 1]!;
+        if (worst.inView && distanceSq >= worst.distance * worst.distance) continue;
       }
+
+      const distance = Math.sqrt(distanceSq);
+      const inView =
+        !view ||
+        distance <= STREAM_VIEW_NEAR ||
+        (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
+          Math.max(distance, 1e-6) >=
+          view.cosHalfAngle;
+      insertCandidate(
+        best,
+        { mapKey: entry.key, entityIndex: placement.index, distance, inView },
+        batchLimit,
+      );
     }
   }
 
-  load.sort((a, b) => a.distance - b.distance);
-  return { load: load.slice(0, batchLimit), unload };
+  return { load: best, unload };
+}
+
+/**
+ * `mapKey` → the entity indexes it holds, from a set of `keyFor` keys.
+ *
+ * Done once per pass so the scan can ask an integer question. The sets are the
+ * loaded and pending geometry — thousands at most against three quarters of a
+ * million placements, so this is the cheap side of the trade by three orders of
+ * magnitude.
+ */
+function groupKeysByMap(keys: ReadonlySet<string>): Map<string, Set<number>> {
+  const byMap = new Map<string, Set<number>>();
+  for (const key of keys) {
+    const parsed = parseKey(key);
+    if (!parsed) continue;
+    const set = byMap.get(parsed.mapKey);
+    if (set) set.add(parsed.entityIndex);
+    else byMap.set(parsed.mapKey, new Set([parsed.entityIndex]));
+  }
+  return byMap;
+}
+
+/** On screen before off screen, then nearest first. */
+function betterCandidate(a: StreamCandidate, b: StreamCandidate): boolean {
+  if (a.inView !== b.inView) return a.inView;
+  return a.distance < b.distance;
+}
+
+/** Insert into a best-first list capped at `limit`, dropping the worst. */
+function insertCandidate(
+  best: StreamCandidate[],
+  candidate: StreamCandidate,
+  limit: number,
+): void {
+  let at = best.length;
+  while (at > 0 && betterCandidate(candidate, best[at - 1]!)) at -= 1;
+  if (at >= limit) return;
+  best.splice(at, 0, candidate);
+  if (best.length > limit) best.length = limit;
 }
 
 /** The margin around a map's streaming box in which it still streams. */

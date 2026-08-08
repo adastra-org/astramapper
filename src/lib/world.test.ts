@@ -18,9 +18,11 @@ import {
   popHistory,
   serializeProject,
   streamingDecision,
+  STREAM_VIEW_COS_HALF_ANGLE,
   worldToGta,
   type Placed,
   type RegionEntry,
+  type StreamView,
   type TransformEdit,
 } from "./world";
 
@@ -419,6 +421,146 @@ describe("streamingDecision", () => {
     expect(decision.load).toEqual([]);
     expect(decision.unload).toEqual([]);
   });
+
+  test("orders by distance alone when there is no view", () => {
+    // Entity 0 is behind the camera and nearest; with no view it still wins.
+    const entries = [
+      region("m1", [
+        placedAtXy("m1", 0, -100, 0),
+        placedAtXy("m1", 1, 400, 0),
+        placedAtXy("m1", 2, 200, 0),
+      ]),
+    ];
+    const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 3);
+    expect(decision.load.map((c) => c.entityIndex)).toEqual([0, 2, 1]);
+  });
+
+  describe("with a view", () => {
+    /** Looking down +X in the game's Z-up space. */
+    const lookingAlongX: StreamView = {
+      forward: [1, 0, 0],
+      cosHalfAngle: STREAM_VIEW_COS_HALF_ANGLE,
+    };
+
+    test("fills the batch with what is on screen before what is behind", () => {
+      // The near one is behind the camera; the far one is straight ahead.
+      const entries = [
+        region("m1", [
+          placedAtXy("m1", 0, -100, 0),
+          placedAtXy("m1", 1, 400, 0),
+        ]),
+      ];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(),
+        new Set(),
+        2,
+        lookingAlongX,
+      );
+
+      expect(decision.load.map((c) => c.entityIndex)).toEqual([1, 0]);
+      expect(decision.load.map((c) => c.inView)).toEqual([true, false]);
+    });
+
+    test("a batch too small to hold both keeps the one on screen", () => {
+      const entries = [
+        region("m1", [placedAtXy("m1", 0, -100, 0), placedAtXy("m1", 1, 400, 0)]),
+      ];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(),
+        new Set(),
+        1,
+        lookingAlongX,
+      );
+
+      expect(decision.load).toHaveLength(1);
+      expect(decision.load[0]!.entityIndex).toBe(1);
+    });
+
+    test("still orders by distance among the entities on screen", () => {
+      const entries = [
+        region("m1", [
+          placedAtXy("m1", 0, 500, 0),
+          placedAtXy("m1", 1, 200, 0),
+          placedAtXy("m1", 2, 350, 0),
+        ]),
+      ];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(),
+        new Set(),
+        3,
+        lookingAlongX,
+      );
+
+      expect(decision.load.map((c) => c.entityIndex)).toEqual([1, 2, 0]);
+      expect(decision.load.every((c) => c.inView)).toBe(true);
+    });
+
+    /**
+     * A cone has nothing at its apex. Without the near rule the models the
+     * camera is standing among score as behind it and load last.
+     */
+    test("counts what the camera is standing among as on screen", () => {
+      const entries = [
+        region("m1", [
+          placedAtXy("m1", 0, -10, 0), // behind, but a few metres away
+          placedAtXy("m1", 1, 600, 0), // dead ahead, far
+        ]),
+      ];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(),
+        new Set(),
+        2,
+        lookingAlongX,
+      );
+
+      expect(decision.load.map((c) => c.inView)).toEqual([true, true]);
+      expect(decision.load.map((c) => c.entityIndex)).toEqual([0, 1]);
+    });
+
+    /**
+     * The point of ordering rather than culling. Something behind the camera
+     * must still be a candidate, or turning around finds nothing there and the
+     * same geometry streams back in as a burst.
+     */
+    test("does not cull what is behind the camera out of the candidates", () => {
+      const entries = [region("m1", [placedAtXy("m1", 0, -300, 0)])];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(),
+        new Set(),
+        4,
+        lookingAlongX,
+      );
+
+      expect(decision.load).toHaveLength(1);
+      expect(decision.load[0]!.inView).toBe(false);
+    });
+
+    /** The view decides order, never what unloads — otherwise turning the
+     *  camera would tear out everything it stopped looking at. */
+    test("does not unload what the camera turned away from", () => {
+      const entries = [region("m1", [placedAtXy("m1", 0, -300, 0)])];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(["m1:0"]),
+        new Set(),
+        4,
+        lookingAlongX,
+      );
+
+      expect(decision.unload).toEqual([]);
+    });
+  });
 });
 
 describe("history", () => {
@@ -467,6 +609,11 @@ const entryFixture: Placed = {
 
 /** A placed entity at a given position, for the streamer tests. */
 function placedAt(name: string, x: number, y: number, index = 0): Placed {
+  return { ...entryFixture, name, index, position: [x, y, 0] };
+}
+
+/** The same, with the entity index up front — the view tests need distinct ones. */
+function placedAtXy(name: string, index: number, x: number, y: number): Placed {
   return { ...entryFixture, name, index, position: [x, y, 0] };
 }
 
