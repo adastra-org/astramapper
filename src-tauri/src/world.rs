@@ -264,7 +264,10 @@ pub async fn world_asset(
     game: State<'_, GameState>,
 ) -> Result<Option<String>, String> {
     let loaded = game.loaded()?;
-    blocking(move || Ok(find_model_for(&loaded.manager, &name))).await
+    blocking(move || {
+        crate::perf::span("world_asset", || Ok(find_model_for(&loaded.manager, &name)))
+    })
+    .await
 }
 
 /// One model file read into drawables, with the texture hashes its parts want.
@@ -589,7 +592,12 @@ pub async fn world_model(
     let loaded = game.loaded()?;
     let caps = gpu.get();
     blocking(move || {
+        // Same hit/miss split as `world_map`, and for a bigger spread: a
+        // compiled model is a texture chain and a mip copy, a cached one is a
+        // mapped read.
+        let compiled = std::sync::atomic::AtomicBool::new(false);
         let compile = || {
+            compiled.store(true, std::sync::atomic::Ordering::Relaxed);
             compile_world_model(
                 &path,
                 &loaded.keys,
@@ -598,13 +606,24 @@ pub async fn world_model(
                 caps,
             )
         };
-        match &loaded.cache {
+        let started = std::time::Instant::now();
+        let out = match &loaded.cache {
             Some(cache) => {
                 let key = crate::cache::model_key(&loaded.manager, &path, caps);
                 cache.get_or_insert_with(key, cw_cache::Kind::Model, compile)
             }
             None => compile(),
-        }
+        };
+        crate::perf::record(
+            if compiled.load(std::sync::atomic::Ordering::Relaxed) {
+                "world_model (miss)"
+            } else {
+                "world_model (hit)"
+            },
+            started.elapsed(),
+            out.as_ref().map(|b| b.len() as u64).unwrap_or(0),
+        );
+        out
     })
     .await
     .map(tauri::ipc::Response::new)
@@ -751,7 +770,12 @@ pub async fn world_map(
 ) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
     blocking(move || {
+        // The closure is what knows whether the cache answered, so it is what
+        // decides which span this call lands in. A hit and a miss are different
+        // work — 48x apart — and one average over both describes neither.
+        let flattened = std::sync::atomic::AtomicBool::new(false);
         let compile = || {
+            flattened.store(true, std::sync::atomic::Ordering::Relaxed);
             // Both indexes are built once and kept: scanning every `.ytyp` is
             // the expensive part, and only a map that places interiors needs it.
             let map = read_world_map(
@@ -763,14 +787,25 @@ pub async fn world_map(
             )?;
             crate::placements::encode(&map)
         };
-        match &loaded.cache {
+        let started = std::time::Instant::now();
+        let out = match &loaded.cache {
             Some(cache) => {
                 let key =
                     crate::cache::map_key(&loaded.manager, &path, loaded.typ_generation());
                 cache.get_or_insert_with(key, cw_cache::Kind::Map, compile)
             }
             None => compile(),
-        }
+        };
+        crate::perf::record(
+            if flattened.load(std::sync::atomic::Ordering::Relaxed) {
+                "world_map (miss)"
+            } else {
+                "world_map (hit)"
+            },
+            started.elapsed(),
+            out.as_ref().map(|b| b.len() as u64).unwrap_or(0),
+        );
+        out
     })
     .await
     .map(tauri::ipc::Response::new)

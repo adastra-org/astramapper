@@ -154,6 +154,41 @@ Consequences of the decision:
 Explorer Mode's model preview shares this stack and continues to load on demand
 so it stays out of the startup bundle.
 
+## Diagnostics
+
+**F3**, from anywhere in the app. The overlay shows both halves of `perf`: the
+WebView's spans and gauges from `src/lib/perf.ts`, and the backend's from
+`src-tauri/src/perf.rs`, which arrive over IPC in the same camelCase shape so
+one table renders either side. Set `ASTRAMAPPER_PERF=1` to also echo each
+backend span to stderr as it completes.
+
+There are two recorders rather than one because the spans worth watching on the
+frontend — a streaming pass, a geometry sync, a frame — never cross the
+boundary, and reporting each of them over IPC would cost more than the span.
+
+Three things the design commits to:
+
+- **Always on, never sampled.** Recording is a lock and a few adds on paths that
+  are already doing archive I/O or building meshes. Instrumentation that has to
+  be switched on is instrumentation that is off when the report comes in.
+- **The outcome is part of the span name.** `world_map (hit)` and
+  `world_map (miss)` are different work — 48x apart — and one average over both
+  describes neither.
+- **Spans and gauges are separate.** A span's fields are sums and extremes over
+  a history; "how many models are resident" summed over a history is not a
+  number. Draw calls, triangles and resident models are gauges, read as they are
+  now.
+
+Percentiles come off a bounded window of the last 256 samples per span, so a
+span called ten thousand times costs a fixed 2 KB. The count, total, min and max
+stay exact over every call.
+
+This exists because phase 4 is measurement-led and every number in `phases.md`
+came from a throwaway benchmark or an `#[ignore]`d gate. That is the right tool
+for deciding what to build and no use at all for *why was that slow, on this
+machine, just now* — a scratch harness cannot answer it because it is not
+running.
+
 ## Build and CI
 
 `.github/workflows/ci.yml` defines the checks: `cargo fmt`, `cargo clippy`,

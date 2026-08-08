@@ -19,6 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
+import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
 import { createGeometryStore } from "../lib/world/geometryStore";
@@ -550,13 +551,19 @@ export function World(): React.JSX.Element {
       const view = facing
         ? { forward: worldToGta(facing), cosHalfAngle: STREAM_VIEW_COS_HALF_ANGLE }
         : null;
-      const { load, unload } = streamingDecision(
-        cameraGta,
-        regionEntries,
-        loadedKeys,
-        pending.current,
-        STREAM_BATCH,
-        view,
+      // The pass is timed because it runs on the main thread four times a
+      // second against every placement in range: when it regresses, it
+      // regresses as stutter rather than as anything anyone would think to
+      // profile. It was 76ms before 4.12.
+      const { load, unload } = perf.measure("stream pass", () =>
+        streamingDecision(
+          cameraGta,
+          regionEntries,
+          loadedKeys,
+          pending.current,
+          STREAM_BATCH,
+          view,
+        ),
       );
       for (const candidate of load) {
         const entity = index.placement(candidate.mapKey, candidate.entityIndex);
@@ -1817,8 +1824,16 @@ function Canvas({
 
     const clock = new THREE.Clock();
     let frame = 0;
+    let lastFrameAt = 0;
     const tick = () => {
       frame = requestAnimationFrame(tick);
+      // Wall clock between two `tick` entries, not the time spent inside one.
+      // What matters is whether the display is keeping up, and the gap is what
+      // says so — work done outside this callback still lands in it.
+      const now = performance.now();
+      if (lastFrameAt > 0) perf.frame(now - lastFrameAt);
+      lastFrameAt = now;
+
       const dt = Math.min(clock.getDelta(), 0.05);
       const baseSpeed = 60;
       // Far from the world, fly fast — a full-map overview is reachable in
@@ -1855,6 +1870,14 @@ function Canvas({
       applyEdits();
       updateGizmo();
       renderer.render(scene, camera);
+      // What the GPU was actually asked to do this frame. Three.js resets the
+      // render counters per frame, so these are read straight after it and are
+      // this frame's, not a running total.
+      perf.gauge("draw calls", renderer.info.render.calls);
+      perf.gauge("triangles", renderer.info.render.triangles);
+      perf.gauge("geometries", renderer.info.memory.geometries);
+      perf.gauge("textures", renderer.info.memory.textures);
+      perf.gauge("resident models", loadedState.current.size);
     };
 
     /** Lay every live edit onto its box instance or geometry holder. */
@@ -1972,6 +1995,12 @@ function Canvas({
   useEffect(() => {
     const group = geometryGroup.current;
     if (!group) return;
+    // Timed for the reason the comment above gives: this pass runs once a frame
+    // while a preload fills the world, so anything here that is proportional to
+    // the whole rather than to the delta shows up as the world getting slower
+    // the more of it is loaded. That is a shape a single number makes obvious
+    // and a profile does not.
+    const syncStarted = performance.now();
 
     const cameraWorld = new THREE.Vector3();
     const matrix = new THREE.Matrix4();
@@ -2078,6 +2107,7 @@ function Canvas({
         loaded.band = band;
       }
     };
+    perf.record("geometry sync", performance.now() - syncStarted);
     // `entries` is in the deps because the setup effect tears the geometry
     // group down when the placed maps change; this effect must repopulate it.
   }, [geometry, entries, shadowed]);

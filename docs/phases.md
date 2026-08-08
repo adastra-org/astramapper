@@ -17,9 +17,9 @@ Read alongside [architecture.md](architecture.md) (why things are shaped this wa
 | 1 — Core port (`cw-core`) | **in progress** — 1.1 crypto, 1.2 RPF, 1.3 MetaTypes and the drawable, texture, audio, clip, bounds and fragment slices of 1.4 done, plus `YtypFile` and `YmapFile`, all gates cleared |
 | 2 — Explorer Mode | **in progress** — browsing, per-type viewers, extraction |
 | 3 — World View | **complete** — renderer decided (three.js), world mode shell, WASD camera, raycast selection, single-map placement, DLC/patchday content groups, real-geometry LOD streaming with textures, move/rotate/scale gizmos + undo/redo, `.cwproj` save/load, per-map load-region streaming, MLO entity-set expansion |
-| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope, a view-ordered streaming pass, flattened maps in the cache |
+| 4 — World performance, shaders and tooling | **in progress** — mapped archives, world commands off the event loop, archetype-driven texture resolution, binary IPC envelope carrying GPU texture blocks and geometry, cache storage layer, the renderer's per-pass sweeps made proportional to what changed, placements off JSON and into the envelope, a view-ordered streaming pass, flattened maps in the cache, in-app diagnostics |
 
-Branch: work happens on `dev`. Current tests: **284 unit + 54 gate + 137 frontend**.
+Branch: work happens on `dev`. Current tests: **292 unit + 54 gate + 149 frontend**.
 The gates are `#[ignore]`d and need a local install:
 
 ```bash
@@ -1356,6 +1356,31 @@ not need protecting from eviction to stay resident.
 matters — byte identity across a reopen — and checks what comes back is still a
 readable envelope. `the_ytyp_generation_is_part_of_the_map_key` pins the key
 input, the same way `gpu_capabilities_are_part_of_the_key` does for models.
+
+### 4.14 Instrumentation, so the next number does not need a scratch file
+
+Every measurement in 4.1 through 4.13 came from a throwaway benchmark or an
+`#[ignore]`d gate, and every one of them was deleted after it had done its job.
+That is the right way to decide what to build and it cannot answer the question
+that actually gets asked: *why was that slow, on this machine, just now.*
+
+So the same spans are recorded in the running app. `src-tauri/src/perf.rs` and
+`src/lib/perf.ts` are one design in two languages, and the F3 overlay renders
+both with one table because the report shapes match. See `architecture.md` under
+**Diagnostics** for the three things it commits to; the one worth repeating here
+is that **the outcome is part of the span name** — `world_map (hit)` and
+`world_map (miss)` are 48x apart, and averaging them produces a number that
+describes neither.
+
+What is instrumented is what this phase measured by hand: the open broken into
+its four phases, the two lazy install indexes, the two cached world commands
+split by hit and miss, the IPC and decode halves of a map and a model, the
+streaming pass, the geometry sync, and the frame. Draw calls, triangles,
+resident models and loaded geometry are gauges rather than spans.
+
+Not `tracing`: what is wanted is a dozen named spans with percentiles readable
+from the WebView, and what that would bring is a span tree, a filter language, a
+subscriber registry and two more crates.
 
 ### Still to come
 

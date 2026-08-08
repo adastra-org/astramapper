@@ -10,6 +10,7 @@
 pub mod bake;
 pub mod cache;
 pub mod explorer;
+pub mod perf;
 pub mod placements;
 pub mod viewer;
 pub mod textures;
@@ -60,6 +61,8 @@ pub fn run() {
             explorer::release_archives,
             cache::cache_stats,
             cache::cache_clear,
+            perf::perf_report,
+            perf::perf_reset,
             bake::bake_start,
             bake::bake_cancel,
             bake::bake_running,

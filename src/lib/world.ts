@@ -8,6 +8,7 @@
  */
 import { invoke } from "@tauri-apps/api/core";
 
+import * as perf from "./perf";
 import { decodePlacements } from "./world/placements";
 import { asFloat32, asUint16, asUint32, Kind, readEnvelope, splitMips } from "./wire";
 
@@ -110,12 +111,23 @@ export function clearWorldCaches(): void {
  */
 export function worldMap(path: string): Promise<WorldMap> {
   const cached = mapCache.get(path);
-  if (cached) return Promise.resolve(cached);
-  return invoke<ArrayBuffer>("world_map", { path }).then((buffer) => {
-    const map = decodePlacements(readEnvelope(buffer));
-    mapCache.set(path, map);
-    return map;
-  });
+  if (cached) {
+    perf.record("worldMap (memo)", 0);
+    return Promise.resolve(cached);
+  }
+  return perf
+    .measureAsync(
+      "worldMap ipc",
+      () => invoke<ArrayBuffer>("world_map", { path }),
+      (buffer) => buffer.byteLength,
+    )
+    .then((buffer) => {
+      const map = perf.measure("worldMap decode", () =>
+        decodePlacements(readEnvelope(buffer)),
+      );
+      mapCache.set(path, map);
+      return map;
+    });
 }
 
 /** Place a `.ymap` the user picked from disk, custom/mod maps included. */
@@ -242,7 +254,12 @@ type MetaPart = Omit<WorldPart, "positions" | "normals" | "uvs" | "indices"> & {
  * `src-tauri/src/textures.rs`.
  */
 export async function worldModel(path: string): Promise<WorldModel> {
-  const buffer = await invoke<ArrayBuffer>("world_model", { path });
+  const buffer = await perf.measureAsync(
+    "worldModel ipc",
+    () => invoke<ArrayBuffer>("world_model", { path }),
+    (b) => b.byteLength,
+  );
+  const started = performance.now();
   const envelope = readEnvelope(buffer);
   if (envelope.kind !== Kind.Model) {
     throw new Error(`${path} came back as envelope kind ${envelope.kind}, not a model`);
@@ -264,7 +281,7 @@ export async function worldModel(path: string): Promise<WorldModel> {
     return section ? asFloat32(section) : null;
   };
 
-  return {
+  const decoded = {
     path: meta.path,
     emptyDrawables: meta.emptyDrawables,
     drawables: meta.drawables.map((drawable) => ({
@@ -297,6 +314,10 @@ export async function worldModel(path: string): Promise<WorldModel> {
       };
     }),
   };
+  // Not `measure`, because the decode straddles an object literal rather than
+  // sitting inside a closure. Same span, taken by hand.
+  perf.record("worldModel decode", performance.now() - started);
+  return decoded;
 }
 
 /** Save a world project payload to disk. Returns the byte count written. */

@@ -50,8 +50,14 @@ impl Loaded {
     /// every other one behind it. Concurrent first calls block until the one
     /// that won finishes, so the `.ytyp` scan still happens exactly once.
     pub fn archetypes(&self) -> &ArchetypeIndexes {
-        self.archetypes
-            .get_or_init(|| index_archetypes(&self.manager, &self.keys))
+        self.archetypes.get_or_init(|| {
+            // Timed because it is lazy: it does not show up in the open, it
+            // shows up as the first placed map being slower than the rest, and
+            // that is a confusing thing to look at without a name on it.
+            crate::perf::span("index.archetypes", || {
+                index_archetypes(&self.manager, &self.keys)
+            })
+        })
     }
 
     /// The interiors half of [`Self::archetypes`].
@@ -62,7 +68,8 @@ impl Loaded {
     /// The entry-basename index, built on first use. Same reasoning as
     /// [`Self::archetypes`].
     pub fn names(&self) -> &HashMap<u32, String> {
-        self.names.get_or_init(|| self.manager.index_names())
+        self.names
+            .get_or_init(|| crate::perf::span("index.names", || self.manager.index_names()))
     }
 
     /// One value standing for the state of every archive that holds a `.ytyp`.
@@ -197,17 +204,24 @@ pub async fn open_game_folder(
 fn scan(folder: &Path, assets: Option<PathBuf>) -> Result<(Loaded, GameSummary), String> {
     let started = std::time::Instant::now();
 
+    // Broken into phases rather than timed as one number: the whole open is
+    // around half a second and which half-second it is decides whether there is
+    // anything to do about it. See `docs/phases.md` 4.10.
     let exe = folder.join("GTA5.exe");
+    let timer = crate::perf::Timer::start("open.read_exe");
     let exe_data = std::fs::read(&exe).map_err(|e| {
         format!(
             "cannot read {}: {e}. Pick the folder holding GTA5.exe.",
             exe.display()
         )
     })?;
-    let keys = GtaKeys::from_exe(&exe_data)
+    timer.stop_with_bytes(exe_data.len() as u64);
+
+    let keys = crate::perf::span("open.recover_keys", || GtaKeys::from_exe(&exe_data))
         .map_err(|e| format!("could not recover the archive keys from GTA5.exe: {e}"))?;
 
-    let manager = RpfManager::scan(folder, &keys).map_err(|e| format!("scan failed: {e}"))?;
+    let manager = crate::perf::span("open.scan_archives", || RpfManager::scan(folder, &keys))
+        .map_err(|e| format!("scan failed: {e}"))?;
 
     let top = manager.top_level().count();
     let summary = GameSummary {

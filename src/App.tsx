@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Boxes, FolderTree, Globe2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatHash } from "./lib/format";
+import { DebugPanel } from "./components/DebugPanel";
 import { Explorer } from "./components/Explorer";
 import { World } from "./components/World";
 
@@ -24,9 +25,26 @@ type ModeId = (typeof MODES)[number]["id"];
 function App(): React.JSX.Element {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [mode, setMode] = useState<ModeId>("explorer");
+  const [debug, setDebug] = useState(false);
 
   useEffect(() => {
     invoke<AppInfo>("app_info").then(setInfo).catch(console.error);
+  }, []);
+
+  // F3 toggles diagnostics. Bound at the window so it works whichever mode is
+  // showing and whatever has focus — except a text field, where F3 is not a
+  // shortcut anyone means.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "F3") return;
+      const target = event.target as HTMLElement | null;
+      if (target?.isContentEditable) return;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      event.preventDefault();
+      setDebug((open) => !open);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   const active = MODES.find((m) => m.id === mode)!;
@@ -38,6 +56,15 @@ function App(): React.JSX.Element {
         <span className="text-xs text-ink-dim">
           {info ? `v${info.version}` : "starting"}
         </span>
+        <button
+          type="button"
+          onClick={() => setDebug((open) => !open)}
+          className={`ml-auto rounded px-2 py-1 text-xs transition-colors ${
+            debug ? "bg-surface-2 text-ink" : "text-ink-dim hover:bg-surface-2/60 hover:text-ink"
+          }`}
+        >
+          Diagnostics <kbd className="font-mono">F3</kbd>
+        </button>
       </header>
 
       <div className="flex min-h-0 flex-1">
@@ -59,7 +86,8 @@ function App(): React.JSX.Element {
           ))}
         </nav>
 
-        <main className="flex min-w-0 flex-1 flex-col">
+        <main className="relative flex min-w-0 flex-1 flex-col">
+          {debug && <DebugPanel onClose={() => setDebug(false)} />}
           {mode === "explorer" ? (
             <Explorer />
           ) : mode === "world" ? (
