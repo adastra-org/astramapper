@@ -51,8 +51,8 @@
 //! silently acquiring a neighbour's archetype hash is not a failure anyone
 //! would catch by looking. Two names that hash differently get two rows.
 
-use cw_core::wire::{Envelope, Kind};
-use serde::Serialize;
+use cw_core::wire::{Envelope, EnvelopeView, Kind};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::world::{WorldEntity, WorldMap};
@@ -201,6 +201,159 @@ pub fn encode(map: &WorldMap) -> Result<Vec<u8>, String> {
 
     Ok(envelope.finish(Kind::Placements, &meta))
 }
+
+/// The metadata [`encode`] writes, read back.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetaIn {
+    path: String,
+    name: String,
+    entity_count: usize,
+    extents_min: [f32; 3],
+    extents_max: [f32; 3],
+    count: usize,
+    names: Vec<String>,
+    name_hashes: Vec<u32>,
+    lod_levels: Vec<String>,
+}
+
+/// A map's placements read back out of an envelope, column by column.
+///
+/// The backend's cell index is built from the same envelopes the cache holds,
+/// so a map is flattened once, by [`encode`], and every consumer reads what that
+/// wrote. Nothing here is an object per placement.
+#[derive(Debug, Default)]
+pub struct DecodedMap {
+    pub path: String,
+    pub name: String,
+    pub entity_count: usize,
+    pub extents_min: [f32; 3],
+    pub extents_max: [f32; 3],
+    /// Distinct archetype names, indexed by `name_slot`.
+    pub names: Vec<String>,
+    pub name_hashes: Vec<u32>,
+    pub lod_levels: Vec<String>,
+    pub index: Vec<u32>,
+    pub name_slot: Vec<u32>,
+    pub flags: Vec<u8>,
+    pub position: Vec<[f32; 3]>,
+    pub rotation: Vec<[f32; 4]>,
+    pub scale_xy: Vec<f32>,
+    pub scale_z: Vec<f32>,
+    pub parent: Vec<i32>,
+    pub lod_slot: Vec<u16>,
+    pub lod_dist: Vec<f32>,
+    pub children: Vec<u32>,
+}
+
+impl DecodedMap {
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+}
+
+fn floats<const N: usize>(bytes: &[u8]) -> Vec<[f32; N]> {
+    bytes
+        .chunks_exact(4 * N)
+        .map(|row| {
+            let mut out = [0.0f32; N];
+            for (value, c) in out.iter_mut().zip(row.chunks_exact(4)) {
+                *value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            }
+            out
+        })
+        .collect()
+}
+
+fn le_u32(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+fn le_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Read an envelope [`encode`] wrote. Refuses one of another kind, and one whose
+/// columns do not all hold `count` elements, because a short column would put
+/// the wrong value on every placement after it.
+pub fn decode(bytes: &[u8]) -> Result<DecodedMap, String> {
+    let view = EnvelopeView::read(bytes).map_err(|e| format!("not a placement envelope: {e}"))?;
+    if view.kind != Kind::Placements {
+        return Err(format!("expected placements, found {:?}", view.kind));
+    }
+    let meta: MetaIn = serde_json::from_str(view.meta)
+        .map_err(|e| format!("could not read the placement metadata: {e}"))?;
+    if view.section_count() != SECTIONS {
+        return Err(format!(
+            "expected {SECTIONS} columns, found {}",
+            view.section_count()
+        ));
+    }
+    let section = |i: usize| view.section(i).unwrap_or(&[]);
+
+    let decoded = DecodedMap {
+        index: le_u32(section(0)),
+        name_slot: le_u32(section(1)),
+        flags: section(2).to_vec(),
+        position: floats::<3>(section(3)),
+        rotation: floats::<4>(section(4)),
+        scale_xy: le_f32(section(5)),
+        scale_z: le_f32(section(6)),
+        parent: section(7)
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+        lod_slot: section(8)
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect(),
+        lod_dist: le_f32(section(9)),
+        children: le_u32(section(10)),
+        path: meta.path,
+        name: meta.name,
+        entity_count: meta.entity_count,
+        extents_min: meta.extents_min,
+        extents_max: meta.extents_max,
+        names: meta.names,
+        name_hashes: meta.name_hashes,
+        lod_levels: meta.lod_levels,
+    };
+
+    let count = meta.count;
+    let lengths = [
+        decoded.index.len(),
+        decoded.name_slot.len(),
+        decoded.flags.len(),
+        decoded.position.len(),
+        decoded.rotation.len(),
+        decoded.scale_xy.len(),
+        decoded.scale_z.len(),
+        decoded.parent.len(),
+        decoded.lod_slot.len(),
+        decoded.lod_dist.len(),
+        decoded.children.len(),
+    ];
+    if let Some(bad) = lengths.iter().position(|&len| len != count) {
+        return Err(format!(
+            "column {bad} holds {} elements, the metadata says {count}",
+            lengths[bad]
+        ));
+    }
+    Ok(decoded)
+}
+
+/// How many columns a placements envelope has.
+const SECTIONS: usize = 11;
 
 #[cfg(test)]
 mod tests {
@@ -368,5 +521,48 @@ mod tests {
             .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(parents, vec![-1, 4]);
+    }
+
+    #[test]
+    fn decode_reads_back_what_encode_wrote() {
+        let mut second = entity(1, "prop_b", 2, "LOD");
+        second.position = [-4.5, 9.25, 100.0];
+        second.rotation = [0.5, -0.5, 0.5, -0.5];
+        second.scale_xy = 2.0;
+        second.scale_z = 3.0;
+        second.parent_index = 4;
+        second.from_mlo = true;
+        second.lod_dist = 250.0;
+        second.children = 7;
+        let bytes = encode(&map(vec![entity(0, "prop_a", 1, "HD"), second])).expect("encode");
+        let back = decode(&bytes).expect("decode");
+
+        assert_eq!(back.path, r"x64a.rpf\a.ymap");
+        assert_eq!(back.len(), 2);
+        assert_eq!(back.names, vec!["prop_a", "prop_b"]);
+        assert_eq!(back.name_hashes, vec![1, 2]);
+        assert_eq!(back.lod_levels, vec!["HD", "LOD"]);
+        assert_eq!(back.index, vec![0, 1]);
+        assert_eq!(back.name_slot, vec![0, 1]);
+        assert_eq!(back.flags, vec![0, 0b10]);
+        assert_eq!(back.position[1], [-4.5, 9.25, 100.0]);
+        assert_eq!(back.rotation[1], [0.5, -0.5, 0.5, -0.5]);
+        assert_eq!(back.scale_xy, vec![1.0, 2.0]);
+        assert_eq!(back.scale_z, vec![1.0, 3.0]);
+        assert_eq!(back.parent, vec![-1, 4]);
+        assert_eq!(back.lod_slot, vec![0, 1]);
+        assert_eq!(back.lod_dist, vec![100.0, 250.0]);
+        assert_eq!(back.children, vec![0, 7]);
+        assert_eq!(back.extents_min, [-1.0, -2.0, -3.0]);
+    }
+
+    #[test]
+    fn decode_reads_an_empty_map_and_refuses_the_wrong_kind() {
+        let back = decode(&encode(&map(vec![])).expect("encode")).expect("decode");
+        assert!(back.is_empty());
+
+        let other = Envelope::new().finish(Kind::Model, "{}");
+        assert!(decode(&other).is_err());
+        assert!(decode(b"not an envelope").is_err());
     }
 }

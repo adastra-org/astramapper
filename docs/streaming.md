@@ -103,5 +103,11 @@ The heap is not under the 300 MB target: `modelCache` keeps every model fetched
   eviction (#6) and a draw call per piece (#10), and the phases are not yet
   applied per cell (needs the cell index, #3). Not measured against the base
   game yet: with strict tiers, structures wait for every terrain piece map-wide.
+- #3 / #4 The base game's placements live in the backend's cell index and the
+  WebView holds only the working set (v0.2.1); see
+  [hex-streaming.md](hex-streaming.md). Models for a cell arrive with it in one
+  reply. F3: `cells held`, `cell placements held`, `cells pending`,
+  `cell working set reach (m)`, `cell pass`, `worldIndex build/cells ipc`,
+  `cell batch models`, `cell batch (MB)`. Not yet measured in a flight.
 - #9 Phase classification is by name tokens.
 - #10 One draw call per entity (1,000-4,600 in the city).

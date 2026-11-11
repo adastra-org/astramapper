@@ -201,7 +201,7 @@ export function HexView({
           setHover("");
         }}
       />
-      <Controls settings={settings} onSettings={onSettings} />
+      <Controls settings={settings} onSettings={onSettings} backend={model.backend} />
       <Stats settings={settings} summary={summary} hover={hover} />
     </div>
   );
@@ -272,9 +272,12 @@ function Header({
 function Controls({
   settings,
   onSettings,
+  backend,
 }: {
   settings: HexSettings;
   onSettings: (next: HexSettings) => void;
+  /** The adaptive partition is the backend index's, so its sizes are fixed. */
+  backend: boolean;
 }): React.JSX.Element {
   const set = (patch: Partial<HexSettings>) => onSettings({ ...settings, ...patch });
   return (
@@ -301,23 +304,32 @@ function Controls({
         </>
       ) : (
         <>
-          <Slider
-            label="Finest cell"
-            value={settings.fine}
-            min={50}
-            max={400}
-            step={25}
-            unit=" m"
-            onChange={(fine) => set({ fine })}
-          />
-          <Slider
-            label="Split above"
-            value={settings.threshold}
-            min={250}
-            max={8000}
-            step={250}
-            onChange={(threshold) => set({ threshold })}
-          />
+          {backend ? (
+            <p className="text-[11px] text-ink-dim">
+              The partition is the backend index&apos;s: finest cell and split threshold were
+              fixed when it was built. The budget below is what the streamer holds.
+            </p>
+          ) : (
+            <>
+            <Slider
+              label="Finest cell"
+              value={settings.fine}
+              min={50}
+              max={400}
+              step={25}
+              unit=" m"
+              onChange={(fine) => set({ fine })}
+            />
+            <Slider
+              label="Split above"
+              value={settings.threshold}
+              min={250}
+              max={8000}
+              step={250}
+              onChange={(threshold) => set({ threshold })}
+            />
+            </>
+          )}
           <Slider
             label="Budget"
             value={settings.budget}

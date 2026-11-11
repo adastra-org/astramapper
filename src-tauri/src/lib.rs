@@ -9,12 +9,14 @@
 // scan without a Tauri runtime.
 pub mod bake;
 pub mod cache;
+pub mod cells;
 pub mod explorer;
 pub mod perf;
 pub mod placements;
 pub mod textures;
 pub mod viewer;
 pub mod world;
+pub mod world_index;
 
 use serde::Serialize;
 
@@ -43,6 +45,7 @@ pub fn run() {
         .manage(explorer::GameState::default())
         .manage(viewer::ViewerState::default())
         .manage(world::GpuState::default())
+        .manage(world_index::WorldIndexState::default())
         // An `Arc` because `open_game_folder` cancels the running bake, and the
         // pass itself holds the same flag from a blocking thread.
         .manage(std::sync::Arc::new(bake::BakeState::default()))
@@ -74,6 +77,8 @@ pub fn run() {
             world::world_map_file,
             world::world_asset,
             world::world_model,
+            world_index::world_index_build,
+            world_index::world_index_cells,
             world::set_gpu_capabilities,
             world::project_save,
             world::project_load,

@@ -77,6 +77,10 @@ pub enum Kind {
     Paths = 4,
     /// A `.ymap`'s flattened placements, column by column.
     Placements = 5,
+    /// The world index's partition: one row per cell, column by column.
+    Cells = 6,
+    /// A batch of cells: their placements, plus the models those cells need.
+    CellData = 7,
 }
 
 impl Kind {
@@ -87,6 +91,8 @@ impl Kind {
             3 => Kind::Collision,
             4 => Kind::Paths,
             5 => Kind::Placements,
+            6 => Kind::Cells,
+            7 => Kind::CellData,
             _ => return None,
         })
     }

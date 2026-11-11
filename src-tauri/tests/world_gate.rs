@@ -841,3 +841,87 @@ fn an_unresolvable_archetype_names_no_file() {
         None
     );
 }
+
+/// The numbers #4 chooses its defaults from: how the base game's placements
+/// fall into the adaptive partition at several thresholds, and how far a
+/// working set under several budgets reaches in the city and in the country.
+///
+/// ```text
+/// cargo test -p astramapper --release --test world_gate -- --ignored --nocapture density
+/// ```
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn density_of_the_base_game_under_the_adaptive_partition() {
+    use astramapper_lib::cells::{sizes_for, PartitionParams};
+    use astramapper_lib::placements::{decode, encode};
+    use astramapper_lib::world_index::WorldIndex;
+
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let names = manager.index_names();
+
+    let started = std::time::Instant::now();
+    let decoded: Vec<_> = ymaps_in_group(&manager, "base")
+        .iter()
+        .filter_map(|(path, _)| {
+            let map =
+                read_world_map(path, &keys, &manager, Some(&archetypes.mlo), Some(&names)).ok()?;
+            decode(&encode(&map).ok()?).ok()
+        })
+        .collect();
+    println!(
+        "read {} maps in {:.1}s",
+        decoded.len(),
+        started.elapsed().as_secs_f64()
+    );
+
+    // Camera spots in game coordinates: Legion Square, the Los Santos airport,
+    // Sandy Shores, Paleto Bay, Mount Chiliad.
+    let spots = [
+        ("Legion Square", 195.0, -933.0),
+        ("LS airport", -1337.0, -3044.0),
+        ("Sandy Shores", 1850.0, 3700.0),
+        ("Paleto Bay", -150.0, 6200.0),
+        ("Mount Chiliad", 450.0, 5500.0),
+    ];
+
+    for fine in [100.0, 50.0] {
+        for threshold in [500usize, 1000, 2000, 4000] {
+            let params = PartitionParams {
+                sizes: sizes_for(fine, 5),
+                threshold,
+            };
+            let index = WorldIndex::build("gate", "base", &decoded, 0, params).expect("build");
+            let counts: Vec<u32> = index.partition.leaves.iter().map(|l| l.count).collect();
+            let max = counts.iter().copied().max().unwrap_or(0);
+            let mut sorted = counts.clone();
+            sorted.sort_unstable();
+            let p50 = sorted[sorted.len() / 2];
+            let p99 = sorted[sorted.len() * 99 / 100];
+            let mut per_level = [0usize; 8];
+            for leaf in &index.partition.leaves {
+                per_level[leaf.level as usize] += 1;
+            }
+            println!(
+                "fine {fine} m, threshold {threshold}: {} placements ({} terrain), {} leaves, \
+                 leaf count p50 {p50} p99 {p99} max {max}, per level {:?}",
+                index.report.placements,
+                index.report.terrain,
+                index.report.leaves,
+                &per_level[..5]
+            );
+            if fine == 100.0 {
+                for budget in [20_000usize, 50_000, 100_000] {
+                    let reach: Vec<String> = spots
+                        .iter()
+                        .map(|(name, x, y)| {
+                            let set = index.partition.working_set(*x, *y, budget);
+                            format!("{name} {} cells {:.0} m", set.leaves.len(), set.reach)
+                        })
+                        .collect();
+                    println!("    budget {budget}: {}", reach.join("; "));
+                }
+            }
+        }
+    }
+}

@@ -28,7 +28,7 @@ in another.
 
 Several sizes at once, coarse to fine (finest 100 m by default, each coarser
 level double, five levels). Every placement starts in the coarsest grid; a cell
-holding more than a threshold (2,000 by default) is split and its placements
+holding more than a threshold (1,000 by default) is split and its placements
 move to the next finer grid, repeatedly. The working set is the nearest leaves
 until a **placement budget** (50,000 by default) is spent. In the city the
 budget is spent within a few hundred metres, in the country it reaches
@@ -37,6 +37,71 @@ kilometres, and the memory held is about the same.
 Hexagons do not nest, so a fine cell near a split coarse one can overlap its
 edge. Each placement still lands in exactly one leaf, which is what matters (H3
 makes the same trade).
+
+## The backend index (#3, #4)
+
+The placements no longer live in the WebView. `world_index_build("base")`
+(`src-tauri/src/world_index.rs`) reads every map of a group from the same cached
+envelopes `world_map` serves, into one set of columns with names and LOD labels
+interned across the whole index, and partitions them with `cells.rs`, the Rust
+port of `hex.ts` and `hexAdaptive.ts` (pinned to the same fixtures by tests). It
+returns only the partition: one row per leaf (level, `q`, `r`, count, mean `z`)
+and the split cells. The Hex view draws that partition, so the panel shows the
+cells the backend serves.
+
+`world_index_cells(cells, known)` returns, for a set of cells, their placements as
+the columns of `placements.rs` plus a `mapSlot` column, **and the models those
+cells need**: each as a nested `Kind::Model` envelope, byte for byte what
+`world_model` returns, so one reply replaces a `world_asset` and a `world_model`
+call per name. `known` is the names the frontend already holds, which are left
+out. Models that fail to compile are left out too and the frontend asks for them
+on its own.
+
+Terrain is a pseudo-cell (level 255): wanted map-wide and never evicted (#5), so it
+is outside the partition. The backend classifies it by the same name tokens as the
+frontend (a test pins the two); real flags are #9.
+
+On the frontend, `CellStreamer` (`src/lib/world/cellStreamer.ts`) plans each pass
+(`cellPlan.ts`): the working set is the nearest leaves under the budget; the
+prefetch ring is the leaves just past it that lie ahead of the direction of travel
+(a smoothed camera velocity, the look direction at rest), up to a quarter of the
+budget; the keep set is the working set grown by 1.3x, so a camera on a boundary
+does not fetch and drop the same cell. Cells go out three to a call, two calls at
+once, nearest first. Evicted cells take their geometry with them. `CellStore`
+merges each map's parts across the held cells, so `(mapKey, entityIndex)` stays the
+identity everywhere (geometry store, edits, selection, projects).
+
+What is no longer in the WebView: the 763,716 placements. The box markers are not
+drawn for cell-streamed placements (they were 100 MB of heap), and an individual
+`place` of a DLC or custom map still works the old way.
+
+### Defaults, from the real base game
+
+Measured with `cargo test -p astramapper --release --test world_gate -- --ignored
+--nocapture density` against the base game (4,597 maps read in 2.2 s, 763,716
+placements, 395 of them terrain):
+
+| finest / split above | leaves | leaf size p50 / p99 / max |
+|---|---|---|
+| 100 m / 500 | 2,312 | 277 / 1,270 / 2,632 |
+| 100 m / **1,000** | **1,939** | **331 / 1,303 / 2,632** |
+| 100 m / 2,000 | 1,070 | 640 / 1,903 / 2,632 |
+| 100 m / 4,000 | 570 | 1,110 / 3,898 / 3,976 |
+| 50 m / 1,000 | 2,329 | 274 / 971 / 1,222 |
+
+Reach of the working set (distance to the farthest cell) at a budget of 50,000:
+Legion Square 718 m, Sandy Shores 1,058 m, Mount Chiliad 1,150 m, Paleto Bay
+1,472 m, LS airport 1,684 m. At 20,000 the city is 420 m; at 100,000 it is 1,075 m
+and the open country 1.5-2.2 km. A split threshold of 2,000 doubles the median leaf
+(so a cell reply's models) for no gain in city reach; 500 only adds cells. So the
+defaults are **finest 100 m, split above 1,000, budget 50,000**. The budget is a
+placement count and placements are cheap as columns (~60 bytes); what it really
+bounds is how many cells, and so models, are in play, with the byte budget (#6)
+bounding the models. To re-measure on another install, run the command above.
+
+The partition is built once per session and kept in memory (the build is the one
+slow call, ~2 s on a warm cache); it is rebuilt by `world_index_build`, not when a
+single map is placed, since only the base group is indexed.
 
 ## Load order
 
@@ -83,13 +148,19 @@ work and can be used to choose the defaults against the real base game.
    and the pauses, independent of cells.
 2. Re-measure `ipc ping` (#8). If the floor remains, batch per cell.
 3. **Backend cell index and a batched command** (#3), using the partition the Hex
-   view shows (#4).
+   view shows (#4). Done in v0.2.1; see [the backend index](#the-backend-index-3-4).
 4. Whole-map terrain layer and per-cell phases (#5).
 5. Memory budget and eviction (#6); persistent cache and onboarding (#7).
 
 ## Open questions
 
-- Default threshold and budget, from real density (the Hex view prints it).
-- Compute the partition once and store it, or rebuild when maps change?
+- Fly the base game in the app and check that cells stream in and out without a
+  spike; tune cells per call, concurrency and the 1.3x keep factor from F3
+  (`cells held`, `cell placements held`, `cells pending`, `cell pass`,
+  `worldIndex cells ipc`).
+- Maps placed one by one (DLC, custom) are not in the index and still load whole.
+  Index them too, or keep them as the small-scale path?
+- Box markers for cell-streamed placements, and selecting an entity before its
+  geometry loads (the selection also goes when its cell is evicted).
 - How the working set interacts with each entity's own LOD radius
   (`entityStreamRadius`); related to the earlier idea in #1.
