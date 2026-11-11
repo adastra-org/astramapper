@@ -227,7 +227,7 @@ green channel, which is the standard DirectX-to-OpenGL normal-map conversion.
 Neither is a format change, which is why they live in the viewer and not in
 `cw-core`.
 
-**Terrain blends four layers by vertex data** (v0.3.7, read from
+**Terrain blends four layers by vertex data** (v0.3.9, read from
 `CodeWalker.Shaders/TerrainPS.hlsl` and `TerrainShader.cs`). The ground shaders
 (`terrain_cb_w_4lyr*`) bind their colour in `TextureSampler_layer0` to `3`
 (`3576369631`, `606121937`, `831736502`, `2025281789`), not in `DiffuseSampler`,
@@ -609,6 +609,31 @@ Approximations already in the tree, before the shader work proper:
 | BC4/ATI1 | Decoded into red with green and blue at zero, following the reference. |
 | Normal map handedness | Corrected with a negative `normalScale.y` in the shader rather than by inverting the green channel on the CPU, which is not possible without decoding the blocks. |
 | Terrain | Four layers blended by `COLOUR0` / `COLOUR1` / `TEXCOORD1` as in `TerrainPS.hlsl`, lit by the standard material. No layer normal maps, specular, parallax or tint. |
+
+### Shaders: cutout, proxies and the render bucket (v0.3.8)
+
+`ShaderFx.name` is the *base* name and several `.sps` files share it. Surveyed
+over every 6th model file of the base game (24,684 files,
+`cargo run --release -p cw-core --example shader_buckets -- 6`): the part
+carries `ShaderFx.file_name` (hash of `<name>.sps`) and `render_bucket`.
+
+- `normal` with file `normal_cutout.sps` and `default` with `cutout.sps` appear in
+  the same tree as the opaque `normal` / `default`; only the file tells them apart.
+  Tree LODs also carry `trees_shadow_proxy` (a solid hull) and `cpv_only`.
+- Render bucket in stock files: 0 solid, 1 alpha (glass, cable, `*_alpha`), 2 decal,
+  3 cutout, 6 water. Bucket 3 holds 4,916 shaders over 32 files, every one a cutout
+  family (`cutout*`, `normal_*cutout*`, `trees*`, `trees_lod`, `trees_lod2`,
+  `grass_fur*`, `cloth_*cutout`, `vehicle_cutout`, `*screendooralpha`). The World
+  view alpha tests a part when its file is in the reference's `CutoutBatches` list
+  or its bucket is 3.
+- The reference does not draw `trees_shadow_proxy`, `cpv_only`, `decal_shadow_only`
+  (`ShaderManager.cs`: "currently don't draw"). Neither does the World view now.
+- Alpha test: `BasicPS.hlsl` discards `a <= 0.33` for every non-decal part; the
+  World view applies it to cutout parts only (`ALPHA_TEST_REF`), leaving opaque
+  parts whose diffuse alpha is a spec or mask channel untouched.
+
+Open (`TODO(port)`): `trees_lod2` billboards use `TreesLodShader` and its
+`AlphaTest` vector in the reference; here they take the plain 0.33.
 
 ## Open questions
 

@@ -123,7 +123,7 @@ a PR:
 | `smoke` | World opens, frames render, cells are held, the console has no errors |
 | `streaming-bounded` | flying a loop over the city at 120 m/s, cells held and placements held stay under a ceiling, the model cache stays within 10% of its budget, no console errors |
 | `terrain-distance` | looking level toward Sandy Shores and Paleto Bay from the Maze Bank Tower, terrain is drawn far beyond the streamed cells (the band from above the horizon to just under it has terrain-coloured pixels, not only sky and the grid helper); screenshots kept |
-| `terrain-revisit` | the ground over Sandy Shores at a fixed pose, then a flight to the LS airport and back at 120 m/s: the distant ground band is the same picture on return (`imageDiff` under 8%) and still drawn (coverage >= 50% at both visits); the view from the far end looking back is kept (v0.3.7) |
+| `terrain-revisit` | the ground over Sandy Shores at a fixed pose, then a flight to the LS airport and back at 120 m/s: the distant ground band is the same picture on return (`imageDiff` under 8%) and still drawn (coverage >= 50% at both visits); the view from the far end looking back is kept (v0.3.9) |
 | `heap-flight` | touring the map at 150 m/s, the JS heap stays under a ceiling and its second half is within 20% of the first (#23) |
 
 The ceilings come from what the first flight measured (`debug-bridge.md`) and

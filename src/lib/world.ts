@@ -214,6 +214,11 @@ export type WireTexture = {
 export type WorldPart = {
   readonly name: string;
   readonly shader: number;
+  /** Jenkins hash of the `.sps` file name; decides alpha test and hidden parts (`partDraw`).
+   *  Absent in a model cached before v0.3.8. */
+  readonly shaderFile?: number;
+  /** The shader's render bucket: 3 is a cutout. Absent in a model cached before v0.3.8. */
+  readonly renderBucket?: number;
   readonly diffuse: number | null;
   readonly normal: number | null;
   readonly specular: number | null;

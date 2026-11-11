@@ -35,7 +35,7 @@
 import { ENVELOPE_VERSION } from "../wire";
 
 /** Bumped when the layout of what is stored changes. */
-const LAYOUT_VERSION = 3;
+const LAYOUT_VERSION = 4;
 
 /** A record is only re-stamped on a read once it is this stale, so a hot model
  *  costs one write a minute and not one per use. */

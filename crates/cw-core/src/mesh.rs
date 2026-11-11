@@ -99,6 +99,14 @@ pub struct MeshPart {
     /// Jenkins hash of the shader name. Resolving it to text needs the name
     /// tables from `MetaNames.cs`, which are not ported yet.
     pub shader: u32,
+    /// Jenkins hash of the shader's `.sps` file name (`trees_normal_spec.sps`).
+    /// `shader` is the base name and several files share it (`normal` is also
+    /// `normal_cutout`, `default` is also `cutout`), so what a part is drawn
+    /// with, an alpha test or no draw at all, is decided on this one.
+    pub shader_file: u32,
+    /// The shader's render bucket: 0 solid, 1 alpha, 2 decal, 3 cutout in the
+    /// stock files (see `docs/formats.md`).
+    pub render_bucket: u8,
     /// Jenkins hash of the texture that fills this geometry's diffuse slot, if
     /// its shader binds one. The viewer resolves it against the drawable's
     /// embedded dictionary or the model's sibling `.ytd`.
@@ -166,7 +174,11 @@ impl MeshBundle {
                         }
                     })
                     .unwrap_or_default();
-                if let Some(part) = MeshPart::from_geometry(geometry, shader, textures, m, g) {
+                if let Some(mut part) = MeshPart::from_geometry(geometry, shader, textures, m, g) {
+                    if let Some(fx) = shader_fx {
+                        part.shader_file = fx.file_name;
+                        part.render_bucket = fx.render_bucket;
+                    }
                     parts.push(part);
                 }
             }
@@ -310,6 +322,8 @@ impl MeshPart {
         Some(Self {
             name: format!("model{model_index}.geometry{geometry_index}"),
             shader,
+            shader_file: 0,
+            render_bucket: 0,
             diffuse: textures.diffuse,
             normal: textures.normal,
             specular: textures.specular,
