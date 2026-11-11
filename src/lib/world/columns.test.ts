@@ -47,6 +47,20 @@ describe("PlacementColumns", () => {
     expect(cols.entityIndex(1)).toBe(7);
   });
 
+  test("a class survives the round trip and rides the name slot", () => {
+    const list = [
+      placed(0, { name: "prop_kelp", nameHash: 9, archetypeClass: 2 }),
+      placed(1, { name: "prop_kelp", nameHash: 9, archetypeClass: 2 }),
+      placed(2, { name: "prop_plain", nameHash: 8 }),
+    ];
+    const cols = columnsFromPlaced(list);
+
+    expect(cols.archetypeClass(0)).toBe(2);
+    expect(cols.archetypeClass(1)).toBe(2);
+    expect(cols.archetypeClass(2)).toBe(0);
+    for (let row = 0; row < list.length; row += 1) expect(cols.at(row)).toEqual(list[row]!);
+  });
+
   test("rowOf is the identity for an unfiltered map", () => {
     const cols = columnsFromPlaced([placed(0), placed(1), placed(2)]);
 

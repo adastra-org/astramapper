@@ -54,6 +54,8 @@ type PlacementMeta = {
   readonly count: number;
   readonly names: readonly string[];
   readonly nameHashes: readonly number[];
+  /** Per name, the archetype class the backend decided. Older cached envelopes lack it. */
+  readonly nameClasses?: readonly number[];
   readonly lodLevels: readonly string[];
 };
 
@@ -123,6 +125,7 @@ export function decodePlacements(envelope: Envelope): WorldMap {
     children,
     names: meta.names,
     nameHashes: meta.nameHashes,
+    nameClasses: meta.nameClasses,
     lodLevels: meta.lodLevels,
   });
 

@@ -136,6 +136,7 @@ function envelopeOf(
       count: rows.length,
       names: ["prop_a", "prop_b"],
       nameHashes: [11, 22],
+      nameClasses: [0, 2],
       lodLevels: ["HD", "LOD"],
       ...meta,
     }),
@@ -179,7 +180,29 @@ describe("decodePlacements", () => {
       lodLevel: "LOD",
       lodDist: 250,
       children: 6,
+      // `prop_b` is the second name, which the metadata classes as vegetation.
+      archetypeClass: 2,
     });
+  });
+
+  test("carries each name's archetype class onto its rows", () => {
+    const map = decodePlacements(
+      readEnvelope(envelopeOf([row({ nameIndex: 0 }), row({ index: 1, nameIndex: 1 })])),
+    );
+    const entities = map.entities as PlacementColumns;
+
+    expect(entities.archetypeClass(0)).toBe(0);
+    expect(entities.archetypeClass(1)).toBe(2);
+    // Only a classified row carries the field.
+    expect(entities.at(0).archetypeClass).toBeUndefined();
+    expect(entities.at(1).archetypeClass).toBe(2);
+  });
+
+  test("an envelope without classes (a cache from before #9) decodes as no class", () => {
+    const map = decodePlacements(
+      readEnvelope(envelopeOf([row({ nameIndex: 1 })], { nameClasses: undefined })),
+    );
+    expect((map.entities as PlacementColumns).archetypeClass(0)).toBe(0);
   });
 
   test("carries the map's own fields through the metadata", () => {

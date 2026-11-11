@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { columnsFromPlaced, type PlacementColumns } from "./world/columns";
+import { ARCHETYPE_CLASS, columnsFromPlaced, type PlacementColumns } from "./world/columns";
 import {
   applyEdit,
   axisRotate,
@@ -406,6 +406,49 @@ describe("streamPenalty", () => {
     ]);
   });
 
+  describe("archetype class from the data (#9)", () => {
+    const classed = (name: string, archetypeClass: number, lodLevel = "HD") =>
+      streamPenalty({ ...entryFixture, name, lodLevel, archetypeClass });
+
+    test("a decal or vegetation class decides without any name token", () => {
+      expect(classed("ap1_01_c_puds_06", ARCHETYPE_CLASS.decal)).toBe(STREAM_PHASE_PENALTY.decal);
+      expect(classed("prop_coral_kelp_01", ARCHETYPE_CLASS.vegetation)).toBe(
+        STREAM_PHASE_PENALTY.vegetation,
+      );
+      // Whatever the LOD tier: the class is about what the thing is.
+      expect(classed("ap1_01_c_puds_06", ARCHETYPE_CLASS.decal, "SLOD2")).toBe(
+        STREAM_PHASE_PENALTY.decal,
+      );
+    });
+
+    test("the data wins over a name that says something else", () => {
+      expect(classed("prop_tree_card", ARCHETYPE_CLASS.decal)).toBe(STREAM_PHASE_PENALTY.decal);
+      expect(classed("v_decal_road_02", ARCHETYPE_CLASS.vegetation)).toBe(
+        STREAM_PHASE_PENALTY.vegetation,
+      );
+    });
+
+    test("no class, or an absent one, falls back to the name tokens", () => {
+      expect(classed("prop_tree_oak_01", ARCHETYPE_CLASS.none)).toBe(
+        STREAM_PHASE_PENALTY.vegetation,
+      );
+      expect(penalty("v_decal_road_02")).toBe(STREAM_PHASE_PENALTY.decal);
+      expect(classed("prop_building_01", ARCHETYPE_CLASS.none)).toBe(
+        STREAM_PHASE_PENALTY.structure,
+      );
+    });
+
+    test("terrain stays on its name: no archetype data identifies ground", () => {
+      expect(classed("cs1_01_terrain_a", ARCHETYPE_CLASS.vegetation)).toBe(
+        STREAM_PHASE_PENALTY.terrain,
+      );
+    });
+
+    test("an unknown class number is ignored rather than trusted", () => {
+      expect(classed("prop_building_01", 99)).toBe(STREAM_PHASE_PENALTY.structure);
+    });
+  });
+
   test("matches whole name tokens, not substrings", () => {
     // `powerplant` and `terrace` contain plant / ter but are neither.
     expect(penalty("prop_powerplant_01")).toBe(STREAM_PHASE_PENALTY.structure);
@@ -428,6 +471,23 @@ describe("streamingDecision", () => {
     // terrain first although it is farther than the tree; the tree last
     // although it is nearer than the far building.
     expect(names).toEqual([3, 0, 2, 1]);
+  });
+
+  test("a classified decal and vegetation load in their phases though their names say nothing", () => {
+    const classed = (name: string, index: number, x: number, archetypeClass: number): Placed => ({
+      ...placedAtXy(name, index, x, 0),
+      archetypeClass,
+    });
+    const entries = [
+      regionEntryOf("m1", [
+        classed("prop_kelp_01", 0, 10, ARCHETYPE_CLASS.vegetation),
+        classed("ap1_puddle_a", 1, 20, ARCHETYPE_CLASS.decal),
+        placedAtXy("prop_building_01", 2, 80, 0),
+      ]),
+    ];
+    const { load } = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4);
+    // structure, then the decal, then the vegetation, though the kelp is nearest.
+    expect(load.map((c) => c.entityIndex)).toEqual([2, 1, 0]);
   });
 
   const region = (

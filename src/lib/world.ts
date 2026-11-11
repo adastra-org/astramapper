@@ -9,7 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import * as perf from "./perf";
-import type { PlacementColumns } from "./world/columns";
+import { ARCHETYPE_CLASS, type PlacementColumns } from "./world/columns";
 import { decodePlacements } from "./world/placements";
 import { asFloat32, asUint16, asUint32, Kind, readEnvelope, splitMips } from "./wire";
 
@@ -63,6 +63,12 @@ export type Placed = {
   /** The entity's own LOD distance, the streamer's HD→LOD boundary. */
   readonly lodDist: number;
   readonly children: number;
+  /**
+   * What the archetype record says this is (`ARCHETYPE_CLASS`, from flags, asset
+   * type and bounding box: #9). Absent or 0 means the data says nothing and the
+   * name decides.
+   */
+  readonly archetypeClass?: number;
 };
 
 /** A `.ymap` read for the world. */
@@ -875,7 +881,7 @@ export function streamingDecision(
       if (pendingHere?.has(entityIndex)) continue;
 
       const distance = Math.sqrt(distanceSq);
-      const penalty = streamPenaltyOf(cols.name(row), lodLevel);
+      const penalty = streamPenaltyOf(cols.name(row), lodLevel, cols.archetypeClass(row));
       // The view only ever adds to the rank, so distance plus penalty is a floor
       // on it: anything whose floor already loses to the worst candidate kept
       // cannot win, and skips the cone test.
@@ -987,7 +993,10 @@ export function terrainRowsOf(cols: PlacementColumns): Uint32Array {
   if (!rows) {
     const found: number[] = [];
     for (let row = 0; row < cols.length; row += 1) {
-      if (streamPenaltyOf(cols.name(row), cols.lodLevel(row)) === STREAM_PHASE_PENALTY.terrain) {
+      if (
+        streamPenaltyOf(cols.name(row), cols.lodLevel(row), cols.archetypeClass(row)) ===
+        STREAM_PHASE_PENALTY.terrain
+      ) {
         found.push(row);
       }
     }
@@ -1012,22 +1021,28 @@ function isTerrainRow(terrain: Uint32Array, row: number): boolean {
 }
 
 /**
- * The phase penalty for one entity. Decided by name where the name is telling
- * (terrain, decal, vegetation) and by LOD tier otherwise: HD structures are
- * the structure phase, the coarse LOD and SLOD tiers go last. A name that
- * matches wrongly only loads its entity in the wrong order; nothing is dropped.
+ * The phase penalty for one entity. Terrain is decided by name, because no
+ * archetype data identifies ground safely (see `cw-core` `filetypes/class.rs`).
+ * Decals and vegetation are decided by the archetype class the backend read from
+ * the `.ytyp` flags and bounding box; where the data says nothing, by name
+ * tokens. Otherwise by LOD tier: HD structures are the structure phase, the
+ * coarse LOD and SLOD tiers go last. A misclassification only loads its entity
+ * in the wrong order; nothing is dropped.
  */
 export function streamPenalty(entity: Placed): number {
-  return streamPenaltyOf(entity.name, entity.lodLevel);
+  return streamPenaltyOf(entity.name, entity.lodLevel, entity.archetypeClass);
 }
 
-/** `streamPenalty` from the two fields it reads, for a scan over columns. */
-export function streamPenaltyOf(name: string, lodLevel: string): number {
+/** `streamPenalty` from the fields it reads, for a scan over columns. */
+export function streamPenaltyOf(name: string, lodLevel: string, archetypeClass = 0): number {
   let byName = namePenalty.get(name);
   if (byName === undefined) {
     byName = classifyName(name);
     namePenalty.set(name, byName);
   }
+  if (byName === STREAM_PHASE_PENALTY.terrain) return byName;
+  if (archetypeClass === ARCHETYPE_CLASS.decal) return STREAM_PHASE_PENALTY.decal;
+  if (archetypeClass === ARCHETYPE_CLASS.vegetation) return STREAM_PHASE_PENALTY.vegetation;
   if (byName >= 0) return byName;
   return lodLevel === "ORPHAN_HD" || lodLevel === "HD"
     ? STREAM_PHASE_PENALTY.structure
