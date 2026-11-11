@@ -1,0 +1,48 @@
+{
+  "_comment": "Named zones in game coordinates (X east, Y north, metres). A leaf cell belongs to the FIRST region, in this order, that contains its centre, so list the small specific ones before the big general ones. Leaves in none fall into the built-in 'countryside' cluster. See docs/hex-streaming.md.",
+  "regions": [
+    {
+      "key": "airport",
+      "name": "Airport",
+      "shape": { "type": "box", "min": [-2200, -3700], "max": [-900, -2300] }
+    },
+    {
+      "key": "port",
+      "name": "Port",
+      "shape": { "type": "box", "min": [700, -3700], "max": [1500, -2600] }
+    },
+    {
+      "key": "city",
+      "name": "City",
+      "shape": {
+        "type": "polygon",
+        "points": [
+          [-1950, -2300],
+          [1300, -2300],
+          [1300, -100],
+          [-1950, -100]
+        ]
+      }
+    },
+    {
+      "key": "sandy-shores",
+      "name": "Sandy Shores",
+      "shape": { "type": "box", "min": [1000, 2500], "max": [2800, 4300] }
+    },
+    {
+      "key": "paleto-bay",
+      "name": "Paleto Bay",
+      "shape": { "type": "box", "min": [-1100, 5700], "max": [400, 7200] }
+    },
+    {
+      "key": "north",
+      "name": "North",
+      "shape": { "type": "box", "min": [-5000, 1500], "max": [5500, 8500] }
+    },
+    {
+      "key": "south",
+      "name": "South",
+      "shape": { "type": "box", "min": [-5000, -5500], "max": [5500, 1500] }
+    }
+  ]
+}

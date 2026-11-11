@@ -64,6 +64,22 @@ export type CellGrid = {
   readonly leaves: readonly AdaptiveCell[];
   /** Cells that were split finer, so a leaf can tell "split" from "empty". */
   readonly splits: readonly CellRef[];
+  /** Named zones: sets of leaves (`clusters.ts`). Empty from an older backend. */
+  readonly clusters: readonly ClusterInfo[];
+  /** The cluster of each leaf, an index into `clusters`, parallel to `leaves`. */
+  readonly leafCluster: Uint16Array;
+};
+
+/** One zone cluster, as the backend counted it. */
+export type ClusterInfo = {
+  readonly key: string;
+  readonly name: string;
+  /** Leaves in it. */
+  readonly leaves: number;
+  /** Placements in them (terrain is in none). */
+  readonly placements: number;
+  /** Distinct archetype names across those placements. */
+  readonly models: number;
 };
 
 type GridMeta = {
@@ -74,10 +90,21 @@ type GridMeta = {
   readonly failed: number;
   readonly placements: number;
   readonly terrain: number;
+  readonly clusters?: readonly ClusterInfo[];
 };
 
 /** Partition envelope section indices. */
-const GRID = { level: 0, q: 1, r: 2, count: 3, z: 4, splitLevel: 5, splitQ: 6, splitR: 7 } as const;
+const GRID = {
+  level: 0,
+  q: 1,
+  r: 2,
+  count: 3,
+  z: 4,
+  splitLevel: 5,
+  splitQ: 6,
+  splitR: 7,
+  cluster: 8,
+} as const;
 
 /** Decode the partition `world_index_build` returns. */
 export function decodeCellGrid(buffer: ArrayBuffer): CellGrid {
@@ -123,6 +150,19 @@ export function decodeCellGrid(buffer: ArrayBuffer): CellGrid {
     splits.push({ level: splitLevel[i]!, q: splitQ[i]!, r: splitR[i]! });
   }
 
+  // Absent from a backend without zone clusters: every leaf is in none.
+  const clusters = meta.clusters ?? [];
+  const clusterSection = envelope.section(GRID.cluster);
+  const leafCluster = clusterSection ? asUint16(clusterSection) : new Uint16Array(leaves.length);
+  if (leafCluster.length !== leaves.length) {
+    throw new Error(`the partition has ${leaves.length} leaves and ${leafCluster.length} clusters`);
+  }
+  for (const at of leafCluster) {
+    if (at >= clusters.length && clusters.length > 0) {
+      throw new Error(`a leaf is in cluster ${at}, past the ${clusters.length} listed`);
+    }
+  }
+
   return {
     group: meta.group,
     sizes: meta.sizes,
@@ -133,6 +173,8 @@ export function decodeCellGrid(buffer: ArrayBuffer): CellGrid {
     terrain: meta.terrain,
     leaves,
     splits,
+    clusters,
+    leafCluster,
   };
 }
 

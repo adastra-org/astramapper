@@ -49,6 +49,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::cells::{CellId, Partition, PartitionParams, DEFAULT_FINE, DEFAULT_LEVELS};
+use crate::clusters::{Cluster, Clusters, Regions};
 use crate::explorer::GameState;
 use crate::placements::DecodedMap;
 use crate::world::{blocking, find_model_for, map_envelope, ymaps_in_group, GpuState};
@@ -225,6 +226,8 @@ pub struct WorldIndex {
     /// Ids of the ground placements, the layer outside the partition.
     pub terrain: Vec<u32>,
     pub partition: Partition,
+    /// The partition's leaves grouped into named zones.
+    pub clusters: Clusters,
     pub report: BuildReport,
 }
 
@@ -267,6 +270,7 @@ impl WorldIndex {
         let ys: Vec<f32> = store.position.iter().map(|p| p[1]).collect();
         let zs: Vec<f32> = store.position.iter().map(|p| p[2]).collect();
         let partition = Partition::build(&xs, &ys, &zs, &rest, params);
+        let clusters = Clusters::build(Regions::builtin(), &partition, &store.name_of);
 
         let report = BuildReport {
             maps: maps.len(),
@@ -282,6 +286,7 @@ impl WorldIndex {
             store,
             terrain,
             partition,
+            clusters,
             report,
         })
     }
@@ -290,8 +295,10 @@ impl WorldIndex {
     ///
     /// Sections: 0 level `u8`, 1 q `i32`, 2 r `i32`, 3 count `u32`, 4 mean z
     /// `f32` — per leaf — then 5 level `u8`, 6 q `i32`, 7 r `i32` per split
-    /// cell. Centres are not sent: `hexCenter` makes them from `(q, r)` and the
-    /// level's size, and both sides compute the same number.
+    /// cell, then 8 cluster `u16` per leaf: an index into the metadata's
+    /// `clusters` (zone clusters, `crate::clusters`). Centres are not sent:
+    /// `hexCenter` makes them from `(q, r)` and the level's size, and both sides
+    /// compute the same number.
     pub fn partition_envelope(&self) -> Vec<u8> {
         let leaves = &self.partition.leaves;
         let mut level = Vec::with_capacity(leaves.len());
@@ -316,6 +323,11 @@ impl WorldIndex {
             split_r.extend_from_slice(&sr.to_le_bytes());
         }
 
+        let mut cluster = Vec::with_capacity(leaves.len() * 2);
+        for &at in &self.clusters.of_leaf {
+            cluster.extend_from_slice(&at.to_le_bytes());
+        }
+
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct Meta<'a> {
@@ -329,6 +341,8 @@ impl WorldIndex {
             terrain: usize,
             leaves: usize,
             splits: usize,
+            /// Zone clusters; a leaf's section-8 value indexes this list.
+            clusters: &'a [Cluster],
         }
         let meta = Meta {
             group: &self.group,
@@ -340,11 +354,22 @@ impl WorldIndex {
             terrain: self.report.terrain,
             leaves: leaves.len(),
             splits: splits.len(),
+            clusters: &self.clusters.list,
         };
         let meta = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
 
         let mut envelope = Envelope::new();
-        for section in [level, q, r, count, z, split_level, split_q, split_r] {
+        for section in [
+            level,
+            q,
+            r,
+            count,
+            z,
+            split_level,
+            split_q,
+            split_r,
+            cluster,
+        ] {
             envelope.push(section);
         }
         envelope.finish(Kind::Cells, &meta)
@@ -719,6 +744,131 @@ pub async fn world_index_cells(
     .map(tauri::ipc::Response::new)
 }
 
+/// What a cluster's models really weigh once compiled.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterMeasure {
+    pub key: String,
+    /// Distinct archetype names in the cluster.
+    pub models: usize,
+    /// Distinct model files those names resolve to (several names can share one).
+    pub files: usize,
+    /// Names no model file was found for.
+    pub unresolved: usize,
+    /// Files that did not compile.
+    pub failed: usize,
+    /// Compiled bytes of every file that did, each counted once.
+    pub bytes: u64,
+    /// The largest single compiled file.
+    pub largest: u64,
+    pub millis: u64,
+}
+
+/// Size every path with `measure`, on the model pool, keeping only the lengths so
+/// the models themselves are dropped as they are counted. Returns
+/// `(total bytes, largest, failed)`.
+pub fn measure_models(
+    paths: &[String],
+    measure: impl Fn(&str) -> Option<usize> + Sync,
+) -> (u64, u64, usize) {
+    let run = || -> Vec<Option<usize>> { paths.par_iter().map(|p| measure(p)).collect() };
+    let sizes = match model_pool() {
+        Some(pool) => pool.install(run),
+        None => paths.iter().map(|p| measure(p)).collect(),
+    };
+    let mut bytes = 0u64;
+    let mut largest = 0u64;
+    let mut failed = 0usize;
+    for size in sizes {
+        match size {
+            Some(n) => {
+                bytes += n as u64;
+                largest = largest.max(n as u64);
+            }
+            None => failed += 1,
+        }
+    }
+    (bytes, largest, failed)
+}
+
+impl WorldIndex {
+    /// The cells of a cluster, in leaf order, as the frontend would name them.
+    pub fn cluster_cells(&self, cluster: &Cluster) -> Vec<CellRef> {
+        cluster
+            .leaves
+            .iter()
+            .map(|&i| {
+                let leaf = &self.partition.leaves[i as usize];
+                CellRef {
+                    level: leaf.level,
+                    q: leaf.q,
+                    r: leaf.r,
+                }
+            })
+            .collect()
+    }
+
+    /// Measure a cluster: resolve its models to files and size each compiled one.
+    pub fn measure_cluster(
+        &self,
+        cluster: &Cluster,
+        find: impl Fn(&str) -> Option<String>,
+        measure: impl Fn(&str) -> Option<usize> + Sync,
+    ) -> ClusterMeasure {
+        let started = std::time::Instant::now();
+        let gathered = self.gather(&self.cluster_cells(cluster));
+        let names = self.names_in(&gathered);
+        let (assets, paths) = resolve_assets(&names, &HashSet::new(), find);
+        let (bytes, largest, failed) = measure_models(&paths, measure);
+        ClusterMeasure {
+            key: cluster.key.clone(),
+            models: names.len(),
+            files: paths.len(),
+            unresolved: assets.iter().filter(|a| a.path.is_none()).count(),
+            failed,
+            bytes,
+            largest,
+            millis: started.elapsed().as_millis() as u64,
+        }
+    }
+}
+
+/// Compile (or read from the cache) every model of a zone cluster and report
+/// their total size, without keeping any of them.
+///
+/// On demand and slow on a cold cache: a city-sized zone is gigabytes of
+/// geometry. Models land in the persistent cache as a side effect, so a second
+/// measure, or loading the zone afterwards, reads them back.
+#[tauri::command]
+pub async fn world_index_cluster_measure(
+    key: String,
+    game: State<'_, GameState>,
+    gpu: State<'_, GpuState>,
+    state: State<'_, WorldIndexState>,
+) -> Result<ClusterMeasure, String> {
+    let loaded = game.loaded()?;
+    let index = state.current(&loaded.folder)?;
+    let caps = gpu.get();
+    blocking(move || {
+        let cluster = index
+            .clusters
+            .find(&key)
+            .ok_or_else(|| format!("no zone cluster '{key}'"))?;
+        Ok(crate::perf::span("world_index.cluster_measure", || {
+            index.measure_cluster(
+                cluster,
+                |name| find_model_for(&loaded.manager, name),
+                |path| {
+                    crate::world::model_envelope(&loaded, caps, path)
+                        .ok()
+                        .map(|b| b.len())
+                },
+            )
+        }))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +1045,64 @@ mod tests {
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
         assert_eq!(counts.iter().sum::<u32>(), 6);
+    }
+
+    #[test]
+    fn the_partition_envelope_carries_each_leafs_cluster() {
+        let index = world();
+        let bytes = index.partition_envelope();
+        let view = EnvelopeView::read(&bytes).expect("read");
+        let leaves = index.partition.leaves.len();
+        let section = view.section(8).expect("cluster column");
+        assert_eq!(section.len(), leaves * 2);
+        let meta: serde_json::Value = serde_json::from_str(view.meta).expect("json");
+        let clusters = meta["clusters"].as_array().expect("clusters");
+        assert_eq!(clusters.last().expect("last")["key"], "countryside");
+        let total: u64 = clusters
+            .iter()
+            .map(|c| c["placements"].as_u64().expect("placements"))
+            .sum();
+        assert_eq!(total, 6, "every partitioned placement is in a cluster");
+        for chunk in section.chunks_exact(2) {
+            let at = u16::from_le_bytes([chunk[0], chunk[1]]) as usize;
+            assert!(at < clusters.len());
+        }
+    }
+
+    #[test]
+    fn a_clusters_models_are_measured_once_each_and_failures_counted() {
+        let index = world();
+        let all = index
+            .clusters
+            .list
+            .iter()
+            .max_by_key(|c| c.placements)
+            .expect("a cluster")
+            .clone();
+        let measured = index.measure_cluster(
+            &all,
+            |name| (name != "prop_far").then(|| format!("models\\{name}.ydr")),
+            |path| (!path.contains("prop_bin")).then_some(100),
+        );
+        assert_eq!(measured.key, all.key);
+        assert_eq!(measured.models, all.models);
+        // `prop_far` has no file; the others each have one.
+        assert_eq!(measured.files + measured.unresolved, measured.models);
+        assert_eq!(
+            measured.bytes,
+            100 * (measured.files - measured.failed) as u64
+        );
+        assert!(measured.largest <= 100);
+    }
+
+    #[test]
+    fn measuring_sizes_every_path_and_counts_failures() {
+        let paths: Vec<String> = ["a", "bb", "fail", "dddd"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (bytes, largest, failed) = measure_models(&paths, |p| (p != "fail").then_some(p.len()));
+        assert_eq!((bytes, largest, failed), (7, 4, 1));
     }
 
     fn batch(index: &WorldIndex, cells: &[CellRef], known: &[&str]) -> Vec<u8> {

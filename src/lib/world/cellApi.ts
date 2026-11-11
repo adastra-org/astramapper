@@ -52,3 +52,27 @@ export async function worldIndexCells(
   );
   return perf.measure("worldIndex cells decode", () => decodeCellBatch(buffer));
 }
+
+/** What a zone cluster's models weigh once compiled, as the backend measured it. */
+export type ClusterMeasure = {
+  readonly key: string;
+  /** Distinct archetype names. */
+  readonly models: number;
+  /** Distinct model files those names resolve to. */
+  readonly files: number;
+  readonly unresolved: number;
+  readonly failed: number;
+  readonly bytes: number;
+  readonly largest: number;
+  readonly millis: number;
+};
+
+/**
+ * Compile (or read from the cache) every model of a zone and report their total
+ * size. On demand and slow on a cold cache: a zone is gigabytes of geometry.
+ */
+export async function worldIndexClusterMeasure(key: string): Promise<ClusterMeasure> {
+  return perf.measureAsync("worldIndex cluster measure", () =>
+    invoke<ClusterMeasure>("world_index_cluster_measure", { key }),
+  );
+}

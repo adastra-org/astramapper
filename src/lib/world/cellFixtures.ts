@@ -72,7 +72,19 @@ export function gridBuffer(
   sizes: readonly number[],
   leaves: readonly LeafSpec[],
   splits: readonly CellRef[] = [],
-  overrides: { readonly placements?: number; readonly terrain?: number } = {},
+  overrides: {
+    readonly placements?: number;
+    readonly terrain?: number;
+    /** Zone clusters and each leaf's index into them; omitted, as an older backend. */
+    readonly clusters?: readonly {
+      readonly key: string;
+      readonly name: string;
+      readonly leaves: number;
+      readonly placements: number;
+      readonly models: number;
+    }[];
+    readonly leafCluster?: readonly number[];
+  } = {},
 ): ArrayBuffer {
   const placements = leaves.reduce((sum, l) => sum + l.count, 0) + (overrides.terrain ?? 0);
   return buildEnvelope(
@@ -87,6 +99,7 @@ export function gridBuffer(
       terrain: overrides.terrain ?? 0,
       leaves: leaves.length,
       splits: splits.length,
+      ...(overrides.clusters ? { clusters: overrides.clusters } : {}),
     },
     [
       u8(leaves.map((l) => l.level)),
@@ -97,6 +110,7 @@ export function gridBuffer(
       u8(splits.map((s) => s.level)),
       i32(splits.map((s) => s.q)),
       i32(splits.map((s) => s.r)),
+      ...(overrides.leafCluster ? [u16(overrides.leafCluster)] : []),
     ],
   );
 }

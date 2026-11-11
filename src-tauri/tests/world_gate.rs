@@ -1013,3 +1013,148 @@ fn cell_replies_over_the_base_game() {
         }
     }
 }
+
+/// The base game's leaves read out per zone cluster: how many cells, placements
+/// and distinct models each named zone holds, where its cells really are, and
+/// which cells fell outside every region. Cheap (a few seconds); use it to tune
+/// `src-tauri/data/zones.json`.
+///
+/// ```text
+/// cargo test -p astramapper --release --test world_gate -- --ignored --nocapture zone_clusters_over
+/// ```
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn zone_clusters_over_the_base_game() {
+    use astramapper_lib::cells::PartitionParams;
+    use astramapper_lib::clusters::COUNTRYSIDE_KEY;
+    use astramapper_lib::placements::{decode, encode};
+    use astramapper_lib::world_index::WorldIndex;
+
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let names = manager.index_names();
+    let decoded: Vec<_> = ymaps_in_group(&manager, "base")
+        .iter()
+        .filter_map(|(path, _)| {
+            let map =
+                read_world_map(path, &keys, &manager, Some(&archetypes.mlo), Some(&names)).ok()?;
+            decode(&encode(&map).ok()?).ok()
+        })
+        .collect();
+    let index =
+        WorldIndex::build("gate", "base", &decoded, 0, PartitionParams::default()).expect("build");
+    let leaves = &index.partition.leaves;
+    println!(
+        "{} leaves, {} placements partitioned, {} terrain",
+        leaves.len(),
+        index.report.placements - index.report.terrain,
+        index.report.terrain
+    );
+    for cluster in &index.clusters.list {
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for &i in &cluster.leaves {
+            let l = &leaves[i as usize];
+            x0 = x0.min(l.x);
+            y0 = y0.min(l.y);
+            x1 = x1.max(l.x);
+            y1 = y1.max(l.y);
+        }
+        let bbox = if cluster.leaf_count > 0 {
+            format!("centres x {x0:.0}..{x1:.0}, y {y0:.0}..{y1:.0}")
+        } else {
+            "no leaves".to_string()
+        };
+        println!(
+            "{:<14} {:>5} leaves {:>8} placements {:>6} models  {bbox}",
+            cluster.name, cluster.leaf_count, cluster.placements, cluster.models
+        );
+    }
+    let in_a_cluster: usize = index.clusters.list.iter().map(|c| c.leaf_count).sum();
+    assert_eq!(in_a_cluster, leaves.len(), "every leaf is in exactly one");
+
+    // The heaviest cells nobody claimed, to see what a region would have to cover.
+    if let Some(rest) = index.clusters.find(COUNTRYSIDE_KEY) {
+        let mut heavy: Vec<_> = rest.leaves.iter().map(|&i| &leaves[i as usize]).collect();
+        heavy.sort_by_key(|l| std::cmp::Reverse(l.count));
+        for l in heavy.iter().take(8) {
+            println!(
+                "  unassigned: level {} at ({:.0}, {:.0}) holds {}",
+                l.level, l.x, l.y, l.count
+            );
+        }
+    }
+}
+
+/// What each zone's models weigh once compiled, measured against the real base
+/// game. Slow (it compiles every distinct model of the zone, a worker-count at a
+/// time, and keeps none of them) and the numbers are the point: they say whether
+/// loading a whole zone is something a machine can do. `ASTRAMAPPER_ZONES`
+/// (comma-separated keys) narrows it.
+///
+/// ```text
+/// cargo test -p astramapper --release --test world_gate -- --ignored --nocapture zone_cluster_model
+/// ```
+#[test]
+#[ignore = "needs a local GTA V install; compiles gigabytes of models"]
+fn zone_cluster_model_sizes_over_the_base_game() {
+    use astramapper_lib::cells::PartitionParams;
+    use astramapper_lib::placements::{decode, encode};
+    use astramapper_lib::textures::GpuCaps;
+    use astramapper_lib::world_index::WorldIndex;
+
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let names = manager.index_names();
+    let decoded: Vec<_> = ymaps_in_group(&manager, "base")
+        .iter()
+        .filter_map(|(path, _)| {
+            let map =
+                read_world_map(path, &keys, &manager, Some(&archetypes.mlo), Some(&names)).ok()?;
+            decode(&encode(&map).ok()?).ok()
+        })
+        .collect();
+    let index =
+        WorldIndex::build("gate", "base", &decoded, 0, PartitionParams::default()).expect("build");
+    let only: Option<Vec<String>> = std::env::var("ASTRAMAPPER_ZONES")
+        .ok()
+        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+
+    let mut total = 0u64;
+    for cluster in &index.clusters.list {
+        if cluster.leaf_count == 0 {
+            continue;
+        }
+        if let Some(only) = &only {
+            if !only.contains(&cluster.key) {
+                continue;
+            }
+        }
+        let measured = index.measure_cluster(
+            cluster,
+            |name| find_model_for(&manager, name),
+            |path| {
+                compile_world_model(path, &keys, &manager, Some(&archetypes), GpuCaps::default())
+                    .ok()
+                    .map(|b| b.len())
+            },
+        );
+        total += measured.bytes;
+        println!(
+            "{:<14} {:>5} cells {:>6} models -> {:>5} files ({} unresolved, {} failed): \
+             {:.2} GB, largest {:.1} MB, {:.0}s",
+            cluster.name,
+            cluster.leaf_count,
+            measured.models,
+            measured.files,
+            measured.unresolved,
+            measured.failed,
+            measured.bytes as f64 / 1_073_741_824.0,
+            measured.largest as f64 / 1_048_576.0,
+            measured.millis as f64 / 1000.0,
+        );
+    }
+    println!(
+        "all measured zones: {:.2} GB (a model used in two zones counts in both)",
+        total as f64 / 1_073_741_824.0
+    );
+}

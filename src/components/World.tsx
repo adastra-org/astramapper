@@ -28,6 +28,7 @@ import { worldIndexBuild, worldIndexCells } from "../lib/world/cellApi";
 import { adaptiveGridOf, gridBounds, type CellGrid, type DecodedBatch } from "../lib/world/cellData";
 import { travelHeading, type Heading } from "../lib/world/cellPlan";
 import { CellStreamer } from "../lib/world/cellStreamer";
+import { clusterRows } from "../lib/world/clusters";
 import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
 import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
@@ -39,6 +40,7 @@ import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
 import { HexView } from "./world/HexView";
 import { CellPanel } from "./world/CellPanel";
+import { ClusterPanel } from "./world/ClusterPanel";
 import { PlacedList } from "./world/PlacedList";
 import {
   DEFAULT_HEX_SETTINGS,
@@ -421,6 +423,23 @@ export function World(): React.JSX.Element {
   }, [status?.gameOpen, loadBaseIndex]);
 
   const deselect = useCallback(() => setSelected(null), []);
+
+  /** Measured model bytes per zone cluster, kept for the session. */
+  const [zoneBytes, setZoneBytes] = useState<ReadonlyMap<string, number>>(new Map());
+  const measuredZone = useCallback(
+    (key: string, bytes: number) => setZoneBytes((now) => new Map(now).set(key, bytes)),
+    [],
+  );
+  const loadZone = useCallback((key: string) => {
+    cellStreamer.pin(key);
+  }, []);
+  const releaseZone = useCallback((key: string) => {
+    // The zone's cells leave now; their geometry goes with them.
+    const left = cellStreamer.unpin(key);
+    if (left.length > 0) {
+      geometryStore.removeMany(left.map((row) => keyFor(row.mapKey, row.entityIndex)));
+    }
+  }, []);
 
   const remove = useCallback((path: string) => {
     setPlaced((current) => current.filter((m) => m.path !== path));
@@ -1120,6 +1139,14 @@ export function World(): React.JSX.Element {
 
               <Section title={`Placed (${totalPlaced.toLocaleString()})`}>
                 {grid && <CellPanel grid={grid} stats={cellStreamer.stats()} />}
+                {grid && (
+                  <ClusterPanel
+                    rows={clusterRows(grid, cellStreamer.clusterProgress(), zoneBytes)}
+                    onLoad={loadZone}
+                    onRelease={releaseZone}
+                    onMeasured={measuredZone}
+                  />
+                )}
                 <PlacedList
                   entries={entries}
                   selectedKey={selected?.mapKey ?? null}
