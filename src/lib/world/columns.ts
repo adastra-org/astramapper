@@ -26,6 +26,14 @@ const FLAG_IS_MLO = 1;
 /** Bit 1 of the flags column. */
 const FLAG_FROM_MLO = 2;
 
+/**
+ * The archetype class carried per name (`nameClasses` in the envelope metadata),
+ * as `cw-core`'s `ArchetypeClass`. The numbers are the wire contract; append,
+ * never renumber. No class for terrain: nothing in the archetype record
+ * identifies ground safely, so terrain stays on its name.
+ */
+export const ARCHETYPE_CLASS = { none: 0, decal: 1, vegetation: 2 } as const;
+
 /** The raw columns and tables a `PlacementColumns` is laid over. */
 export type ColumnSource = {
   readonly count: number;
@@ -44,6 +52,8 @@ export type ColumnSource = {
   readonly children: Uint32Array;
   readonly names: readonly string[];
   readonly nameHashes: readonly number[];
+  /** Per name slot, an `ARCHETYPE_CLASS`. Absent when the backend sent none. */
+  readonly nameClasses?: readonly number[];
   readonly lodLevels: readonly string[];
 };
 
@@ -104,6 +114,11 @@ export class PlacementColumns {
     return this.source.names[this.source.nameSlots[row]!] ?? "";
   }
 
+  /** What the archetype record says this row is, an `ARCHETYPE_CLASS`; 0 for nothing. */
+  archetypeClass(row: number): number {
+    return this.source.nameClasses?.[this.source.nameSlots[row]!] ?? 0;
+  }
+
   lodLevel(row: number): string {
     return this.source.lodLevels[this.source.lodSlots[row]!] ?? "";
   }
@@ -156,6 +171,9 @@ export class PlacementColumns {
     const flag = s.flags[row]!;
     const p = row * 3;
     const r = row * 4;
+    // Only a row the data classified carries it, so a placement with no class
+    // stays the same shape as before.
+    const archetypeClass = s.nameClasses?.[slot] ?? 0;
     return {
       index: s.indexes[row]!,
       name: s.names[slot] ?? "",
@@ -170,6 +188,7 @@ export class PlacementColumns {
       lodLevel: s.lodLevels[s.lodSlots[row]!] ?? "",
       lodDist: s.lodDists[row]!,
       children: s.children[row]!,
+      ...(archetypeClass !== 0 && { archetypeClass }),
     };
   }
 
@@ -286,6 +305,7 @@ export function columnsFromPlaced(list: readonly Placed[]): PlacementColumns {
   const count = list.length;
   const names: string[] = [];
   const nameHashes: number[] = [];
+  const nameClasses: number[] = [];
   const lodLevels: string[] = [];
   const nameSlotOf = new Map<string, number>();
   const lodSlotOf = new Map<string, number>();
@@ -306,12 +326,14 @@ export function columnsFromPlaced(list: readonly Placed[]): PlacementColumns {
     const item = list[row]!;
     // Keyed by name and hash together, so two entities sharing a name but not a
     // hash keep their own hash.
-    const nameKey = `${item.nameHash}:${item.name}`;
+    const archetypeClass = item.archetypeClass ?? 0;
+    const nameKey = `${item.nameHash}:${archetypeClass}:${item.name}`;
     let nameSlot = nameSlotOf.get(nameKey);
     if (nameSlot === undefined) {
       nameSlot = names.length;
       names.push(item.name);
       nameHashes.push(item.nameHash);
+      nameClasses.push(archetypeClass);
       nameSlotOf.set(nameKey, nameSlot);
     }
     let lodSlot = lodSlotOf.get(item.lodLevel);
@@ -348,6 +370,7 @@ export function columnsFromPlaced(list: readonly Placed[]): PlacementColumns {
     children,
     names,
     nameHashes,
+    nameClasses,
     lodLevels,
   });
 }

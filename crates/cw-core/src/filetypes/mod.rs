@@ -11,10 +11,12 @@
 //! Read-only. Writing is not ported: the `MetaBuilder` half of `MetaTypes.cs`
 //! stays out, so neither format round-trips yet.
 
+pub mod class;
 pub mod mlo;
 pub mod ymap;
 pub mod ytyp;
 
+pub use class::{classify_archetype, ArchetypeClass};
 pub use mlo::{
     expand_mlo_entities, index_archetypes, index_mlo_archetypes, ArchetypeIndexes, ArchetypeInfo,
     MloWorldEntity,

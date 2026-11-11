@@ -38,7 +38,7 @@ const ICONS: Record<EntryKind, typeof Folder> = {
  * pane receives decoded text, mesh buffers or explicit byte ranges. Nothing
  * here parses archive bytes.
  */
-export function Explorer(): React.JSX.Element {
+export function Explorer({ onGameOpen }: { onGameOpen?: () => void }): React.JSX.Element {
   const [summary, setSummary] = useState<GameSummary | null>(null);
   const [path, setPath] = useState("");
   const [rows, setRows] = useState<Listing[]>([]);
@@ -82,12 +82,13 @@ export function Explorer(): React.JSX.Element {
       setRows(await listDir(""));
       setPath("");
       await setLastGameFolder(folder);
+      onGameOpen?.();
     } catch (cause) {
       setError(String(cause));
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [onGameOpen]);
 
   // A folder opened earlier in this session survives a remount of this panel,
   // since the scan lives in Rust state rather than here. Across app restarts
@@ -96,12 +97,15 @@ export function Explorer(): React.JSX.Element {
   useEffect(() => {
     gameIsOpen()
       .then(async (isOpen) => {
-        if (isOpen) return navigate("");
+        if (isOpen) {
+          onGameOpen?.();
+          return navigate("");
+        }
         const last = await getLastGameFolder();
         if (last) await openFolder(last);
       })
       .catch((cause: unknown) => setError(String(cause)));
-  }, [navigate, openFolder]);
+  }, [navigate, openFolder, onGameOpen]);
 
   const pick = useCallback(async () => {
     const folder = await openDialog({

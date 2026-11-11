@@ -67,9 +67,21 @@ pub fn model_key(manager: &RpfManager, path: &str, caps: GpuCaps) -> Option<Cach
 /// list* — so a stale one does not merely draw something wrong, it changes what
 /// exists in the world. The entry key covers the map's own archive; this covers
 /// the other input. See [`crate::explorer::Loaded::typ_generation`].
+///
+/// `PLACEMENTS_FORMAT` is mixed in so a change to what the envelope carries
+/// invalidates what is already cached: bump it when the encoder or the archetype
+/// classifier changes. v2 added the per-name archetype classes.
 pub fn map_key(manager: &RpfManager, path: &str, typ_generation: u64) -> Option<CacheKey> {
-    entry_key(manager, path, Kind::Map, typ_generation)
+    entry_key(
+        manager,
+        path,
+        Kind::Map,
+        typ_generation ^ PLACEMENTS_FORMAT.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    )
 }
+
+/// The version of the cached placement payload. See [`map_key`].
+const PLACEMENTS_FORMAT: u64 = 2;
 
 /// The key for any artifact compiled out of one archive entry.
 fn entry_key(manager: &RpfManager, path: &str, kind: Kind, params: u64) -> Option<CacheKey> {

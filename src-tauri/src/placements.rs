@@ -38,6 +38,17 @@
 //! | 9 | `lodDist` | `f32` |
 //! | 10 | `children` | `u32` |
 //!
+//! # The archetype class
+//!
+//! Which load phase an archetype belongs to — decal, vegetation, or "the data
+//! says nothing" — is decided from the `.ytyp` archetype record (flags, asset
+//! type, bounding box; see `cw_core::filetypes::class`). It rides in the
+//! metadata as `nameClasses`, one `u8` per row of the name table, rather than as
+//! a twelfth column: the class is a function of the archetype, so a street of
+//! one prop pays for it once, and the section order stays untouched. A map read
+//! without the archetype index (tests, `encode`) writes class 0 everywhere, and
+//! the frontend falls back to the name tokens.
+//!
 //! # Two string tables, not two string columns
 //!
 //! `name` and `lodLevel` are the only strings, and both repeat heavily — a
@@ -51,6 +62,7 @@
 //! silently acquiring a neighbour's archetype hash is not a failure anyone
 //! would catch by looking. Two names that hash differently get two rows.
 
+use cw_core::filetypes::{classify_archetype, ArchetypeInfo};
 use cw_core::wire::{Envelope, EnvelopeView, Kind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -77,6 +89,9 @@ struct Meta<'a> {
     names: Vec<&'a str>,
     /// Each name's archetype hash, parallel to `names`.
     name_hashes: Vec<u32>,
+    /// Each name's archetype class (`ArchetypeClass` as a `u8`, 0 = none),
+    /// parallel to `names`.
+    name_classes: Vec<u8>,
     /// Distinct LOD level labels, indexed by the `lodLevel` column.
     lod_levels: Vec<&'a str>,
 }
@@ -89,10 +104,20 @@ struct Meta<'a> {
 /// than assumed — a wrapped index would put every entity in the wrong band with
 /// nothing to show for it.
 pub fn encode(map: &WorldMap) -> Result<Vec<u8>, String> {
+    encode_with(map, None)
+}
+
+/// [`encode`] with the archetype index the classes are read from. `None`, or a
+/// hash the index does not know, writes class 0 and leaves the name to decide.
+pub fn encode_with(
+    map: &WorldMap,
+    archetypes: Option<&HashMap<u32, ArchetypeInfo>>,
+) -> Result<Vec<u8>, String> {
     let count = map.entities.len();
 
     let mut names: Vec<&str> = Vec::new();
     let mut name_hashes: Vec<u32> = Vec::new();
+    let mut name_classes: Vec<u8> = Vec::new();
     let mut name_index: HashMap<(&str, u32), u32> = HashMap::new();
     let mut lod_levels: Vec<&str> = Vec::new();
     let mut lod_index: HashMap<&str, u16> = HashMap::new();
@@ -133,6 +158,11 @@ pub fn encode(map: &WorldMap) -> Result<Vec<u8>, String> {
                 let slot = names.len() as u32;
                 names.push(name.as_str());
                 name_hashes.push(*name_hash);
+                name_classes.push(
+                    archetypes
+                        .and_then(|index| index.get(name_hash))
+                        .map_or(0, |info| classify_archetype(info) as u8),
+                );
                 name_index.insert(key, slot);
                 slot
             }
@@ -180,6 +210,7 @@ pub fn encode(map: &WorldMap) -> Result<Vec<u8>, String> {
         count,
         names,
         name_hashes,
+        name_classes,
         lod_levels,
     };
     let meta = serde_json::to_string(&meta)
@@ -358,7 +389,25 @@ const SECTIONS: usize = 11;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cw_core::filetypes::class::{FLAG_DONT_CAST_SHADOWS, FLAG_DOUBLE_SIDED};
+    use cw_core::meta::typed::AssetType;
     use cw_core::wire::EnvelopeView;
+
+    fn archetype(flags: u32, extent: [f32; 3]) -> ArchetypeInfo {
+        ArchetypeInfo {
+            name: 0,
+            asset_name: 0,
+            asset_type: AssetType::AssetDrawable,
+            drawable_dictionary: 0,
+            texture_dictionary: 0,
+            physics_dictionary: 0,
+            bb_min: [0.0; 3],
+            bb_max: extent,
+            lod_dist: 100.0,
+            flags,
+            is_mlo: false,
+        }
+    }
 
     fn entity(index: usize, name: &str, hash: u32, lod: &str) -> WorldEntity {
         WorldEntity {
@@ -564,5 +613,56 @@ mod tests {
         let other = Envelope::new().finish(Kind::Model, "{}");
         assert!(decode(&other).is_err());
         assert!(decode(b"not an envelope").is_err());
+    }
+
+    #[test]
+    fn each_name_row_carries_the_class_the_archetype_index_decides() {
+        let index: HashMap<u32, ArchetypeInfo> = HashMap::from([
+            (1, archetype(FLAG_DOUBLE_SIDED, [2.0; 3])),
+            (3, archetype(FLAG_DONT_CAST_SHADOWS, [6.0, 9.0, 0.01])),
+            (4, archetype(0, [6.0, 9.0, 4.0])),
+        ]);
+        let bytes = encode_with(
+            &map(vec![
+                entity(0, "prop_bush", 1, "HD"),
+                entity(1, "prop_unindexed", 2, "HD"),
+                entity(2, "ap1_puddle", 3, "HD"),
+                entity(3, "prop_bush", 1, "HD"),
+                entity(4, "prop_wall", 4, "HD"),
+            ]),
+            Some(&index),
+        )
+        .expect("encode");
+        let meta = meta_of(&bytes);
+
+        // Parallel to `names`: vegetation, none (not indexed), decal, none.
+        assert_eq!(
+            meta["names"],
+            serde_json::json!(["prop_bush", "prop_unindexed", "ap1_puddle", "prop_wall"])
+        );
+        assert_eq!(meta["nameClasses"], serde_json::json!([2, 0, 1, 0]));
+    }
+
+    #[test]
+    fn without_an_index_every_class_is_none_and_the_name_decides() {
+        let bytes = encode(&map(vec![
+            entity(0, "prop_a", 1, "HD"),
+            entity(1, "prop_b", 2, "HD"),
+        ]))
+        .expect("encode");
+        assert_eq!(meta_of(&bytes)["nameClasses"], serde_json::json!([0, 0]));
+    }
+
+    /// The class lives in the metadata, not in a column: the section order is the
+    /// contract with `src/lib/world/placements.ts` and must not move.
+    #[test]
+    fn the_class_does_not_add_a_section() {
+        let index: HashMap<u32, ArchetypeInfo> =
+            HashMap::from([(1, archetype(FLAG_DOUBLE_SIDED, [2.0; 3]))]);
+        let bytes = encode_with(&map(vec![entity(0, "a", 1, "HD")]), Some(&index)).expect("encode");
+        assert_eq!(
+            EnvelopeView::read(&bytes).expect("read").section_count(),
+            11
+        );
     }
 }

@@ -71,6 +71,7 @@ pub fn run() {
             bake::bake_running,
             world::world_status,
             world::system_memory,
+            world::hardware_info,
             world::world_dlc_ymaps,
             world::world_maps_in_group,
             world::world_map,
