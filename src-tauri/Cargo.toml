@@ -37,7 +37,7 @@ base64.workspace = true
 # for whatever the user is waiting on.
 rayon.workspace = true
 # Total and available RAM, for the world view's model budget (#6).
-sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk"] }
 
 [dev-dependencies]
 # The explorer gate drives cw-core directly to build a manager to list.

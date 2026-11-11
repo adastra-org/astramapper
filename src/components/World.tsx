@@ -71,7 +71,6 @@ import {
   worldMap,
   worldMapFile,
   worldMapsInGroup,
-  worldModel,
   worldStatus,
   systemMemory,
   worldToGta,
@@ -91,6 +90,7 @@ import {
   ModelCache,
   modelBudgetBytes,
 } from "../lib/world/modelCache";
+import { loadModelPersisted, openModelTier } from "../lib/world/modelTier";
 
 /** Placing a map whose LOD buckets would exceed this turns shadows off. */
 const SHADOW_LIMIT = 5_000;
@@ -132,6 +132,10 @@ const MODEL_BUDGET_REFRESH_MS = 10_000;
 /** Model reads already on their way, by path, so two entities sharing a model
  *  that are both out at once share one `world_model` call. */
 const modelInFlight = new Map<string, Promise<WorldModel>>();
+/** The persistent tier opening for the current install (#7). Awaited before the
+ *  first fetch so a model is never asked of the backend while the disk is
+ *  still being checked; never rejects, a broken store just means IPC. */
+let modelTierReady: Promise<void> = Promise.resolve();
 
 /**
  * Model requests allowed out at once.
@@ -253,6 +257,9 @@ export function World(): React.JSX.Element {
           geometryStore.clear();
           clearWorldCaches();
         }
+        modelTierReady = openModelTier(loaded.gameOpen ? loaded.installStamp : null).catch(
+          () => undefined,
+        );
         setStatus(loaded);
         setError(null);
         // A game folder means real geometry: stream it from the start so the
@@ -432,7 +439,9 @@ export function World(): React.JSX.Element {
               // knows which block formats this context can take. Memoized, so
               // every call after the first is one already-resolved promise.
               request = reportGpuCaps()
-                .then(() => worldModel(path))
+                // Disk first, IPC for what disk has not seen (#7).
+                .then(() => modelTierReady)
+                .then(() => loadModelPersisted(path))
                 .then((fetched) => {
                   modelCache.set(path, fetched, entity.position);
                   return fetched;
