@@ -227,6 +227,36 @@ green channel, which is the standard DirectX-to-OpenGL normal-map conversion.
 Neither is a format change, which is why they live in the viewer and not in
 `cw-core`.
 
+**Terrain blends four layers by vertex data** (v0.3.7, read from
+`CodeWalker.Shaders/TerrainPS.hlsl` and `TerrainShader.cs`). The ground shaders
+(`terrain_cb_w_4lyr*`) bind their colour in `TextureSampler_layer0` to `3`
+(`3576369631`, `606121937`, `831736502`, `2025281789`), not in `DiffuseSampler`,
+and an optional `lookupSampler` (`2295086480`) the `_cm` variants use as a blend
+mask. All four layers are sampled with `TEXCOORD0`; the mask with `TEXCOORD1`.
+The weight is `w = mask ? mix(mask, COLOUR1, COLOUR0.a) : COLOUR1`, then
+`mix(mix(l0, l1, w.b), mix(l2, l3, w.b), w.g)`. The vertex layouts the
+reference lists for them (`PNCCT`, `PNCCTT`, `PNCCTX`, `PNCCTTX`, `PNCTTX`...)
+all carry `COLOUR0` and `COLOUR1`, which is why the decode needed both, not
+only `COLOUR0`. `MeshPart` carries them for a part that binds any layer
+(`layers`, `mask`, `colours` as 8 bytes a vertex, `uvs1`); other parts are
+unchanged. Not read: the layer normal maps (`BumpSampler_layer0..3`), specular,
+the `pxm` parallax and the `tnt` tint of the golf variants. Open: the reference
+comments `vc1 = m; //needs work!` for the `_cm` variants and "perhaps another
+sampling of the mask is needed" for the others; this port follows the formula
+as written.
+
+**Open question: layer textures outside the model's own chain.** Of the layers
+`ch1_05_land5` binds, about half (`cs_rsn_tf_mntscrubs002`,
+`cs_rsn_sl_lushgrassrock3`, `dh_ch02_rockface_03/04`, `cs_rsd_ah_roadcut_01a`...)
+are not in the drawable's embedded dictionary, nor in the archetype's
+`textureDictionary`, nor in the model's folder; they sit in other maps' `.ytd`s
+(214 dictionaries hold the five hashes checked). The game gets them through the
+parent TXD chain (`CMapParentTxds` in the maps' `_manifest.ymf`, child ->
+parent dictionary), which `cw-core` does not read (only the generic tree). Until
+it does, a layer that does not resolve is blended as flat grey, which is the
+pale patches left on lowland ground. Next step: a typed `CMapParentTxds` reader
+and the parent walk in `resolve_textures_with`.
+
 ### Notes on the resource layer
 
 **Two segments, no relocation pass.** A resource payload is a system half and a
@@ -534,6 +564,7 @@ Approximations already in the tree, before the shader work proper:
 | BC5/ATI2 normal maps | Blue is left at zero rather than reconstructed as `sqrt(1 - x² - y²)`. The PNG path did the same, so this is not a regression, but it is wrong and belongs in the uber-shader. None appeared in a 510-texture sample of placed city geometry (93.3% BC1, 6.5% BC3). |
 | BC4/ATI1 | Decoded into red with green and blue at zero, following the reference. |
 | Normal map handedness | Corrected with a negative `normalScale.y` in the shader rather than by inverting the green channel on the CPU, which is not possible without decoding the blocks. |
+| Terrain | Four layers blended by `COLOUR0` / `COLOUR1` / `TEXCOORD1` as in `TerrainPS.hlsl`, lit by the standard material. No layer normal maps, specular, parallax or tint. |
 
 ## Open questions
 

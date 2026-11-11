@@ -84,6 +84,7 @@ samples) fails, with the reason in the report; it never passes by default.
 | `series` | a statistic of a series a `sample` recorded: `sample`, `key` (a gauge name, `fps`, or `span:<name>.<p50\|p95\|max\|mean>`), `stat`. `value` may be `{ key, stat?, factor? }` to compare with another series, e.g. the model cache against its budget |
 | `span` | `span`, `stat` (`p50`, `p95`, `max`, `mean`, `calls`), from the WebView's spans, else the backend's |
 | `logs` | the number of console lines of `level` (`error`, `warn`) since the run began, minus any matching the `ignore` regexes |
+| `imageDiff` | the fraction of a screenshot's `region` that differs from another screenshot (`against`) of the same size by more than `tolerance` per channel (default 30). The same pose twice: 0 is the same picture |
 | `image` | the fraction of a screenshot's `region` (`[x0, y0, x1, y1]` as fractions) that differs from the background colour (the scene's clear colour by default, or `"corner"`), with a per-channel `tolerance` (default 6). The scene draws a grid a little lighter than the clear colour, so ground checks need a larger tolerance |
 
 Series statistics: `last`, `first`, `min`, `max`, `mean`, `slopePerMin` (least
@@ -122,6 +123,7 @@ a PR:
 | `smoke` | World opens, frames render, cells are held, the console has no errors |
 | `streaming-bounded` | flying a loop over the city at 120 m/s, cells held and placements held stay under a ceiling, the model cache stays within 10% of its budget, no console errors |
 | `terrain-distance` | looking level toward Sandy Shores and Paleto Bay from the Maze Bank Tower, terrain is drawn far beyond the streamed cells (the band from above the horizon to just under it has terrain-coloured pixels, not only sky and the grid helper); screenshots kept |
+| `terrain-revisit` | the ground over Sandy Shores at a fixed pose, then a flight to the LS airport and back at 120 m/s: the distant ground band is the same picture on return (`imageDiff` under 8%) and still drawn (coverage >= 50% at both visits); the view from the far end looking back is kept (v0.3.7) |
 | `heap-flight` | touring the map at 150 m/s, the JS heap stays under a ceiling and its second half is within 20% of the first (#23) |
 
 The ceilings come from what the first flight measured (`debug-bridge.md`) and

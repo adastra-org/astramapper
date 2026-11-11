@@ -217,11 +217,19 @@ export type WorldPart = {
   readonly diffuse: number | null;
   readonly normal: number | null;
   readonly specular: number | null;
+  /** The four ground layers of a `terrain_cb_w_4lyr` shader, by texture hash. */
+  readonly layers: readonly (number | null)[] | null;
+  /** The blend mask of the `_cm` terrain variants, by texture hash. */
+  readonly mask: number | null;
   readonly vertexCount: number;
   readonly triangleCount: number;
   readonly positions: Float32Array;
   readonly normals: Float32Array | null;
   readonly uvs: Float32Array | null;
+  /** Terrain blends only: texcoord1, which the mask is sampled with. */
+  readonly uvs1: Float32Array | null;
+  /** Terrain blends only: `COLOUR0` then `COLOUR1` as RGBA bytes, 8 a vertex. */
+  readonly colours: Uint8Array | null;
   /** `Uint16Array` unless the part indexes 65,536 vertices or more. */
   readonly indices: Uint16Array | Uint32Array;
 };
@@ -265,10 +273,15 @@ export type WorldModel = {
 };
 
 /** The metadata shape the backend writes into the envelope, before decoding. */
-type MetaPart = Omit<WorldPart, "positions" | "normals" | "uvs" | "indices"> & {
+type MetaPart = Omit<
+  WorldPart,
+  "positions" | "normals" | "uvs" | "uvs1" | "colours" | "indices"
+> & {
   readonly positions: number;
   readonly normals: number | null;
   readonly uvs: number | null;
+  readonly uvs1?: number | null;
+  readonly colours?: number | null;
   readonly indices: number;
   readonly indexBits: number;
 };
@@ -365,6 +378,9 @@ export function decodeWorldModel(
     return section ? asFloat32(section) : null;
   };
 
+  const bytes = (index: number | null): Uint8Array | null =>
+    index === null ? null : (envelope.section(index) ?? null);
+
   const decoded: WorldModel = {
     path: meta.path,
     byteLength,
@@ -382,6 +398,10 @@ export function decodeWorldModel(
             positions: floats(part.positions) ?? new Float32Array(0),
             normals: floats(part.normals),
             uvs: floats(part.uvs),
+            uvs1: floats(part.uvs1 ?? null),
+            colours: bytes(part.colours ?? null),
+            layers: part.layers ?? null,
+            mask: part.mask ?? null,
             indices: !indices
               ? new Uint16Array(0)
               : part.indexBits === 16
@@ -832,6 +852,7 @@ export function streamingDecision(
   pendingKeys: ReadonlySet<string>,
   batchLimit: number,
   view?: StreamView | null,
+  terrainReach = Infinity,
 ): { load: readonly StreamCandidate[]; unload: readonly string[] } {
   const unload: string[] = [];
   if (batchLimit <= 0 && loadedKeys.size === 0) return { load: [], unload };
@@ -861,6 +882,12 @@ export function streamingDecision(
       const dy = cols.y(row) - cameraGta[1];
       const dz = cols.z(row) - cameraGta[2];
       const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // The ground the shaders found has a byte budget (`terrainBudget.ts`); past
+      // its reach it is not asked for, so what was dropped for room is not
+      // fetched again.
+      if (distance > terrainReach && isBudgetedGround(cols.name(row), cols.archetypeClass(row))) {
+        continue;
+      }
       if (
         best.length >= batchLimit &&
         batchLimit > 0 &&
@@ -1089,12 +1116,29 @@ export function streamPenaltyOf(name: string, lodLevel: string, archetypeClass =
     namePenalty.set(name, byName);
   }
   if (byName === STREAM_PHASE_PENALTY.terrain) return byName;
+  if (archetypeClass === ARCHETYPE_CLASS.ground) return STREAM_PHASE_PENALTY.terrain;
   if (archetypeClass === ARCHETYPE_CLASS.decal) return STREAM_PHASE_PENALTY.decal;
   if (archetypeClass === ARCHETYPE_CLASS.vegetation) return STREAM_PHASE_PENALTY.vegetation;
   if (byName >= 0) return byName;
   return lodLevel === "ORPHAN_HD" || lodLevel === "HD"
     ? STREAM_PHASE_PENALTY.structure
     : STREAM_PHASE_PENALTY.farLod;
+}
+
+/**
+ * Whether a placement is ground the shaders found and its name does not say.
+ * The whole-map layer is two populations: the pieces with a terrain token in
+ * their name (395 in the base game, never dropped, as designed in #5) and these
+ * (about 4,900), which are many and small and live under a byte budget.
+ */
+export function isBudgetedGround(name: string, archetypeClass = 0): boolean {
+  if (archetypeClass !== ARCHETYPE_CLASS.ground) return false;
+  let byName = namePenalty.get(name);
+  if (byName === undefined) {
+    byName = classifyName(name);
+    namePenalty.set(name, byName);
+  }
+  return byName !== STREAM_PHASE_PENALTY.terrain;
 }
 
 /**
@@ -1108,10 +1152,18 @@ export function stillStreamWanted(
   entry: Pick<RegionEntry, "extentsMin" | "extentsMax">,
   placement: Placed,
   view?: StreamView | null,
+  terrainReach = Infinity,
 ): boolean {
   // The ground is wanted everywhere (#5), so a waiting terrain request never
-  // goes stale however far the camera has moved.
-  if (streamPenalty(placement) === STREAM_PHASE_PENALTY.terrain) return true;
+  // goes stale however far the camera has moved, except past the reach its
+  // byte budget allows.
+  if (streamPenalty(placement) === STREAM_PHASE_PENALTY.terrain) {
+    if (!isBudgetedGround(placement.name, placement.archetypeClass)) return true;
+    const dx = placement.position[0] - cameraGta[0];
+    const dy = placement.position[1] - cameraGta[1];
+    const dz = placement.position[2] - cameraGta[2];
+    return Math.sqrt(dx * dx + dy * dy + dz * dz) <= terrainReach;
+  }
   const inRange =
     cameraGta[0] >= entry.extentsMin[0] - STREAM_REGION_MARGIN &&
     cameraGta[0] <= entry.extentsMax[0] + STREAM_REGION_MARGIN &&

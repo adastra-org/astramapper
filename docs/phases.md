@@ -1400,10 +1400,10 @@ Then the shader parameter values and extended vertex decode that phase 4 skipped
 and that the shader work now needs; the `World.tsx` decomposition; GLSL shader
 profiles; layers, search and multi-select; and the collision and AI path layers.
 
-Two gaps are visible in the app today and are expected rather than regressions.
-**Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is
-driven by `COLOUR0` and `TEXCOORD1`, which `MeshPart` does not decode yet.
-**Trees read as solid canopies** because there is no alpha test yet.
+One gap is visible in the app today and is expected rather than a regression:
+**trees read as solid canopies** because there is no alpha test yet. (Terrain
+used to render flat grey; since v0.3.7 `COLOUR0`, `COLOUR1` and `TEXCOORD1` are
+decoded and the four layers are blended, see `formats.md`.)
 
 ## Anti-goals
 

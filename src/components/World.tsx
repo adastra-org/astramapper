@@ -30,6 +30,13 @@ import { worldIndexBuild, worldIndexCells } from "../lib/world/cellApi";
 import { adaptiveGridOf, gridBounds, type CellGrid, type DecodedBatch } from "../lib/world/cellData";
 import { travelHeading, type Heading } from "../lib/world/cellPlan";
 import { CellStreamer } from "../lib/world/cellStreamer";
+import {
+  grownReach,
+  terrainBudget,
+  trimTerrain,
+  type GroundPiece,
+} from "../lib/world/terrainBudget";
+import { applyTerrainBlend, setTerrainAttributes } from "../lib/world/terrainMaterial";
 import { clusterRows } from "../lib/world/clusters";
 import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
@@ -73,6 +80,7 @@ import {
   serializeProject,
   candidateRank,
   stillStreamWanted,
+  isBudgetedGround,
   streamRank,
   streamingDecision,
   STREAM_VIEW_COS_HALF_ANGLE,
@@ -309,6 +317,8 @@ export function World(): React.JSX.Element {
   /** Where the camera was at the last streaming pass, and which way it went. */
   const lastCamera = useRef<[number, number] | null>(null);
   const lastHeading = useRef<Heading | null>(null);
+  /** How far out the ground is asked for: its byte budget decides (`terrainBudget.ts`). */
+  const terrainReach = useRef(Infinity);
   /** The camera's world position, written by the canvas every frame. */
   /** Where the camera is and which way it faces, written by the canvas each
    *  frame. The streamer reads both: the position bounds what is a candidate,
@@ -853,11 +863,16 @@ export function World(): React.JSX.Element {
       perf.measure("stream requeue", () =>
         modelQueue.reprioritize(({ data }) => {
           const entry = regionByKey.get(data.mapKey);
-          if (!entry || !stillStreamWanted(cameraGta, entry, data.entity, view)) return null;
+          if (
+            !entry ||
+            !stillStreamWanted(cameraGta, entry, data.entity, view, terrainReach.current)
+          ) {
+            return null;
+          }
           return streamRank(cameraGta, data.entity, view);
         }),
       );
-      const { load, unload } = perf.measure("stream pass", () =>
+      const decided = perf.measure("stream pass", () =>
         streamingDecision(
           cameraGta,
           regionEntries,
@@ -865,8 +880,11 @@ export function World(): React.JSX.Element {
           pending.current,
           STREAM_BATCH,
           view,
+          terrainReach.current,
         ),
       );
+      const { load } = decided;
+      let unload = decided.unload;
       // `load` is best-first. Once the queue is full a candidate only gets in by
       // beating the worst one waiting, so the first that cannot ends the pass.
       for (const candidate of load) {
@@ -880,6 +898,36 @@ export function World(): React.JSX.Element {
         }
         void loadEntity(candidate.mapKey, entity, rank);
       }
+      // The ground the shaders found keeps a byte budget: past it the farthest
+      // pieces go and the streamer stops asking for what lies beyond them. The
+      // pieces with a terrain token are exempt, as designed in #5.
+      const ground: GroundPiece[] = [];
+      for (const g of geometryStore.all()) {
+        if (!isBudgetedGround(g.entity.name, g.entity.archetypeClass)) continue;
+        const dx = g.entity.position[0] - cameraGta[0];
+        const dy = g.entity.position[1] - cameraGta[1];
+        const dz = g.entity.position[2] - cameraGta[2];
+        ground.push({
+          key: keyFor(g.mapKey, g.entity.index),
+          distance: Math.sqrt(dx * dx + dy * dy + dz * dz),
+          modelPath: g.modelPath,
+          bytes: g.model.byteLength,
+        });
+      }
+      const groundBudget = terrainBudget(modelBudget);
+      const trim = trimTerrain(ground, groundBudget);
+      if (trim.reach !== null) {
+        terrainReach.current = trim.reach;
+        unload = [...unload, ...trim.drop];
+      } else {
+        terrainReach.current = grownReach(terrainReach.current, trim.bytes, groundBudget);
+      }
+      perf.gauge("ground resident (MB)", Math.round(trim.bytes / 1048576));
+      perf.gauge("ground budget (MB)", Math.round(groundBudget / 1048576));
+      perf.gauge(
+        "ground reach (m)",
+        Number.isFinite(terrainReach.current) ? Math.round(terrainReach.current) : -1,
+      );
       geometryStore.removeMany(unload);
       // Over budget: drop the farthest models nothing draws (#6).
       if (modelCache.bytes > modelBudget) {
@@ -2821,6 +2869,12 @@ function buildSharedParts(
       material.normalScale = new THREE.Vector2(1, -1);
       material.needsUpdate = true;
     }
+    // Ground blends four layers by vertex data; everything above is what the
+    // other shaders get, and the terrain keeps its lighting and its normal map.
+    if (part.layers && part.colours) {
+      setTerrainAttributes(geometry, part.colours, part.uvs1);
+      applyTerrainBlend(material, { layers: resolved.layers, mask: resolved.mask });
+    }
     parts.push({ geometry, material, textureKeys: resolved.keys });
   }
   return parts;
@@ -2905,9 +2959,20 @@ function updateHexLines(lines: THREE.LineSegments, cells: readonly OverlayCell[]
 
 /** The texture map for one part, resolved against the model's uploaded blocks. */
 function resolvePartTextures(
-  part: { readonly diffuse: number | null; readonly normal: number | null },
+  part: {
+    readonly diffuse: number | null;
+    readonly normal: number | null;
+    readonly layers?: readonly (number | null)[] | null;
+    readonly mask?: number | null;
+  },
   textures: WorldModel["textures"],
-): { diffuse: THREE.Texture | null; normal: THREE.Texture | null; keys: string[] } {
+): {
+  diffuse: THREE.Texture | null;
+  normal: THREE.Texture | null;
+  layers: (THREE.Texture | null)[];
+  mask: THREE.Texture | null;
+  keys: string[];
+} {
   // A texture whose section came back empty counts as unresolved, which the
   // caller already handles by leaving the part flat grey. Better that than a
   // throw from inside the render setup.
@@ -2933,6 +2998,11 @@ function resolvePartTextures(
     // which it is.
     diffuse: hold(diffuse, THREE.SRGBColorSpace),
     normal: hold(normal, THREE.NoColorSpace),
+    // The ground's layers are colour; its mask is a weight.
+    layers: (part.layers ?? []).map((hash) =>
+      hold(hash === null ? null : byHash.get(hash), THREE.SRGBColorSpace),
+    ),
+    mask: hold(part.mask == null ? null : byHash.get(part.mask), THREE.NoColorSpace),
     keys,
   };
 }

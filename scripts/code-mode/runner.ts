@@ -4,7 +4,7 @@
  * `Bridge` and a `Clock`, so the unit tests drive it with a fake app and virtual
  * time.
  */
-import { coverage, decodePng, pixel, type Image } from "./png";
+import { coverage, decodePng, difference, pixel, type Image } from "./png";
 import { resolvePlace } from "./places";
 import { CLEAR_COLOR, type Assertion, type Scenario, type Step } from "./scenario";
 import { compare, stat, type Point } from "./stats";
@@ -115,6 +115,8 @@ export function assertionLabel(a: Assertion): string {
       return `console ${a.level}s ${a.op} ${a.value}`;
     case "image":
       return `${a.shot} coverage [${a.region.join(", ")}] ${a.op} ${a.value}`;
+    case "imageDiff":
+      return `${a.shot} vs ${a.against} difference [${a.region.join(", ")}] ${a.op} ${a.value}`;
   }
 }
 
@@ -338,6 +340,17 @@ export async function runScenario(
         if (!image) return result(null, `no screenshot named "${a.shot}" was taken`);
         const bg = a.background === "corner" ? pixel(image, 0, 0) : (a.background ?? CLEAR_COLOR);
         return result(coverage(image, a.region, bg, a.tolerance));
+      }
+      case "imageDiff": {
+        const first = shots.get(a.shot);
+        const second = shots.get(a.against);
+        if (!first) return result(null, `no screenshot named "${a.shot}" was taken`);
+        if (!second) return result(null, `no screenshot named "${a.against}" was taken`);
+        const measured = difference(first, second, a.region, a.tolerance);
+        return result(
+          measured,
+          Number.isNaN(measured) ? "the screenshots differ in size" : undefined,
+        );
       }
     }
   }

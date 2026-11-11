@@ -49,7 +49,7 @@ impl Kind {
     pub fn version(self) -> u16 {
         match self {
             Kind::Index => 1,
-            Kind::Model => 1,
+            Kind::Model => 3,
             Kind::Texture => 1,
             Kind::Map => 1,
             Kind::Collision => 1,

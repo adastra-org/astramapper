@@ -74,7 +74,9 @@ placements too (#9).
 
 Terrain is a pseudo-cell (level 255): wanted map-wide and never evicted (#5), so it
 is outside the partition. The backend classifies it by the same name tokens as the
-frontend (a test pins the two); real flags are #9.
+frontend (a test pins the two); real flags are #9. Ground the drawables' shaders
+identify (class 3, ~4,900 more placements than the tokens find) rides the cells
+but is wanted map-wide like terrain, under a byte budget (streaming.md #5b).
 
 On the frontend, `CellStreamer` (`src/lib/world/cellStreamer.ts`) plans each pass
 (`cellPlan.ts`): the working set is the nearest leaves under the budget; the

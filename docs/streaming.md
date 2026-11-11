@@ -195,6 +195,22 @@ waits at most one window of transfers.
   signal, see #9), it costs memory with no eviction (#6) and a draw call per piece (#10), and the phases are not yet
   applied per cell (needs the cell index, #3). Not measured against the base
   game yet: with strict tiers, structures wait for every terrain piece map-wide.
+- #5b Ground without a terrain token (v0.3.7). The token list finds 395 ground
+  placements in the base game; the drawables' own shaders (`terrain_cb_w_4lyr*`
+  and kin) find 5,355. The other ~4,900 (`ch2_04_land02b`, `cs1_11b_land_01`,
+  `hw1_07_grnd_c`...) were ordinary cell models: dropped with their hex cell when
+  the camera left, never fetched back until it returned, which is the terrain
+  that "disappears from areas already visited". The backend now reads the
+  shaders once (`ground.rs`, cached under `Kind::Index`, span
+  `world_index.ground_census`) and tags those archetypes class 3 (`ground`) on
+  the wire, so `streamPenaltyOf` puts them in the terrain tier and the streamer
+  wants them map-wide. They are many and small, so unlike the token pieces they
+  have a byte budget (`terrainBudget.ts`: `min(1 GB, max(256 MB, half the model
+  cache budget))`): past it `trimTerrain` drops the farthest to 90% and the
+  streamer stops asking beyond the resulting reach (`grownReach` raises it again
+  when there is room, with hysteresis at 75%). Token pieces are exempt, so far
+  mountains never go (`terrain-distance`). F3: `ground resident (MB)`, `ground
+  budget (MB)`, `ground reach (m)`. Scenario: `terrain-revisit`.
 - #3 / #4 The base game's placements live in the backend's cell index and the
   WebView holds only the working set (v0.2.1); see
   [hex-streaming.md](hex-streaming.md). Models for a cell arrive with it in one

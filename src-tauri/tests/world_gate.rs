@@ -1173,3 +1173,271 @@ fn unreadable_base_maps() {
         }
     }
 }
+
+/// How much of the ground the name tokens find, against the shader that draws
+/// it. A model is ground when a part binds a `terrain_cb_w_4lyr` layer; the
+/// terrain pseudo-cell holds only the placements whose archetype name has a
+/// terrain token, so the rest of the ground lives in ordinary cells and leaves
+/// with them.
+///
+/// ```text
+/// cargo test -p astramapper --release --test world_gate -- --ignored --nocapture ground_census
+/// ```
+#[test]
+#[ignore = "needs a local GTA V install; parses every placed model"]
+fn ground_census_over_the_base_game() {
+    use astramapper_lib::cells::PartitionParams;
+    use astramapper_lib::placements::{decode, encode};
+    use astramapper_lib::world_index::{is_terrain_name, WorldIndex};
+    use cw_core::filetype::FileKind;
+    use cw_core::resources::drawable::TERRAIN_LAYER_SAMPLERS;
+    use cw_core::resources::read_named_drawables;
+    use std::collections::{BTreeMap, HashSet};
+    use std::sync::Mutex;
+
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let names = manager.index_names();
+    let decoded: Vec<_> = ymaps_in_group(&manager, "base")
+        .iter()
+        .filter_map(|(path, _)| {
+            let map =
+                read_world_map(path, &keys, &manager, Some(&archetypes.mlo), Some(&names)).ok()?;
+            decode(&encode(&map).ok()?).ok()
+        })
+        .collect();
+    let index =
+        WorldIndex::build("gate", "base", &decoded, 0, PartitionParams::default()).expect("build");
+
+    // Placements per archetype name.
+    let mut per_name = vec![0usize; index.store.names.len()];
+    for &name in &index.store.name_of {
+        per_name[name as usize] += 1;
+    }
+    // One model file may serve several names.
+    let mut by_path: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (id, name) in index.store.names.iter().enumerate() {
+        if let Some(path) = find_model_for(&manager, name) {
+            by_path.entry(path).or_default().push(id);
+        }
+    }
+    let paths: Vec<&String> = by_path.keys().collect();
+    println!(
+        "{} names, {} model files",
+        index.store.names.len(),
+        paths.len()
+    );
+
+    let ground: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+    let sizes: Mutex<BTreeMap<String, (usize, usize)>> = Mutex::new(BTreeMap::new());
+    let started = std::time::Instant::now();
+    std::thread::scope(|scope| {
+        for chunk in paths.chunks(paths.len().div_ceil(8).max(1)) {
+            let (manager, keys, ground, sizes) = (&manager, &keys, &ground, &sizes);
+            scope.spawn(move || {
+                for path in chunk {
+                    let Some(entry_ref) = manager.find(path) else {
+                        continue;
+                    };
+                    let entry = manager.entry(entry_ref);
+                    let kind = FileKind::from_name(&entry.name_lower);
+                    if !matches!(kind, FileKind::Model | FileKind::ModelDictionary) {
+                        continue;
+                    }
+                    let Some((system_size, _)) = entry.resource_segments() else {
+                        continue;
+                    };
+                    let Ok(data) = manager.extract(entry_ref, keys) else {
+                        continue;
+                    };
+                    let Ok(named) = read_named_drawables(kind, &data, system_size) else {
+                        continue;
+                    };
+                    let is_ground = named.iter().any(|d| {
+                        d.drawable.shaders.iter().any(|s| {
+                            TERRAIN_LAYER_SAMPLERS
+                                .iter()
+                                .any(|param| s.texture_for(*param).is_some())
+                        })
+                    });
+                    if is_ground {
+                        ground.lock().unwrap().insert((*path).clone());
+                        // Geometry bytes: every LOD, and the coarsest alone.
+                        let (mut full, mut coarse) = (0usize, 0usize);
+                        for d in &named {
+                            let bundles = cw_core::mesh::MeshBundle::all(&d.drawable);
+                            let size = |b: &cw_core::mesh::MeshBundle| -> usize {
+                                b.parts
+                                    .iter()
+                                    .map(|p| {
+                                        p.positions.len()
+                                            + p.normals.as_ref().map_or(0, |n| n.len())
+                                            + p.uvs.as_ref().map_or(0, |n| n.len())
+                                            + p.colours.as_ref().map_or(0, |n| n.len())
+                                            + p.uvs1.as_ref().map_or(0, |n| n.len())
+                                            + p.indices.len() / 2
+                                    })
+                                    .sum()
+                            };
+                            full += bundles.iter().map(size).sum::<usize>();
+                            coarse += bundles.last().map_or(0, size);
+                        }
+                        sizes
+                            .lock()
+                            .unwrap()
+                            .insert((*path).clone(), (full, coarse));
+                    }
+                }
+            });
+        }
+    });
+    let ground = ground.into_inner().unwrap();
+    let sizes = sizes.into_inner().unwrap();
+    let (full, coarse): (usize, usize) = sizes.values().fold((0, 0), |a, v| (a.0 + v.0, a.1 + v.1));
+    println!(
+        "ground geometry: {:.2} GB with every LOD, {:.2} GB the coarsest LOD alone",
+        full as f64 / 1e9,
+        coarse as f64 / 1e9
+    );
+    println!(
+        "{} ground model files in {:.0}s",
+        ground.len(),
+        started.elapsed().as_secs_f64()
+    );
+
+    let (mut shader_names, mut shader_placements) = (0usize, 0usize);
+    let (mut token_names, mut token_placements) = (0usize, 0usize);
+    let (mut both_names, mut both_placements) = (0usize, 0usize);
+    let mut missed: Vec<(usize, &str)> = Vec::new();
+    for (path, ids) in &by_path {
+        let is_ground = ground.contains(path);
+        for &id in ids {
+            let n = per_name[id];
+            let token = is_terrain_name(&index.store.names[id]);
+            if is_ground {
+                shader_names += 1;
+                shader_placements += n;
+            }
+            if token {
+                token_names += 1;
+                token_placements += n;
+            }
+            if is_ground && token {
+                both_names += 1;
+                both_placements += n;
+            }
+            if is_ground && !token {
+                missed.push((n, index.store.names[id].as_str()));
+            }
+        }
+    }
+    println!(
+        "ground by shader: {shader_names} names, {shader_placements} placements; \
+         by name token: {token_names} / {token_placements}; both: {both_names} / {both_placements}"
+    );
+    // Geometry the whole-map layer would add if it followed the shader.
+    let mut extra = 0usize;
+    let mut biggest: Vec<(usize, &str, usize)> = Vec::new();
+    for (path, ids) in &by_path {
+        let Some(&(full, _)) = sizes.get(path) else {
+            continue;
+        };
+        for &id in ids {
+            if !is_terrain_name(&index.store.names[id]) {
+                extra += full;
+                biggest.push((full, index.store.names[id].as_str(), per_name[id]));
+            }
+        }
+    }
+    biggest.sort_by_key(|a| std::cmp::Reverse(a.0));
+    println!(
+        "ground geometry the token layer misses: {:.2} GB over {} names",
+        extra as f64 / 1e9,
+        biggest.len()
+    );
+    for (bytes, name, n) in biggest.iter().take(8) {
+        println!(
+            "  largest missed: {name} x{n} {:.1} MB",
+            *bytes as f64 / 1e6
+        );
+    }
+    missed.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (n, name) in missed.iter().take(25) {
+        println!("  ground, no token: {name} x{n}");
+    }
+}
+
+/// What a ground model's parts bind: which layers, under which names, and what
+/// the vertex colours look like. A diagnostic for the terrain blend.
+///
+/// ```text
+/// cargo test -p astramapper --release --test world_gate -- --ignored --nocapture ground_blend_probe
+/// ```
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn ground_blend_probe() {
+    use astramapper_lib::textures::GpuCaps;
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    for name in [
+        "ch1_05_land5",
+        "cs1_11b_land_01",
+        "hw1_07_grnd_c",
+        "ch2_04_land02b",
+    ] {
+        let Some(path) = find_model_for(&manager, name) else {
+            println!("{name}: no model");
+            continue;
+        };
+        let bytes = compile_world_model(
+            &path,
+            &keys,
+            &manager,
+            Some(&archetypes),
+            GpuCaps::default(),
+        )
+        .expect("compile");
+        let meta_len = u32::from_le_bytes(bytes[20..24].try_into().unwrap()) as usize;
+        let meta: serde_json::Value = serde_json::from_slice(&bytes[64..64 + meta_len]).unwrap();
+        let names: std::collections::HashMap<u64, String> = meta["textures"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| {
+                (
+                    t["hash"].as_u64().unwrap(),
+                    t["name"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        println!("== {name} ({path})");
+        for d in meta["drawables"].as_array().unwrap() {
+            for (li, lod) in d["lods"].as_array().unwrap().iter().enumerate() {
+                for part in lod["parts"].as_array().unwrap() {
+                    let layers: Vec<String> = part["layers"]
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .map(|h| {
+                                    h.as_u64()
+                                        .map(|h| names.get(&h).cloned().unwrap_or(format!("?{h}")))
+                                        .unwrap_or("-".into())
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    println!(
+                        "  lod{li} {} shader {} diffuse {:?} layers {:?} mask {:?} colours {} uvs1 {}",
+                        part["name"],
+                        part["shader"],
+                        part["diffuse"].as_u64().and_then(|h| names.get(&h)),
+                        layers,
+                        part["mask"].as_u64().and_then(|h| names.get(&h)),
+                        !part["colours"].is_null(),
+                        !part["uvs1"].is_null(),
+                    );
+                }
+            }
+        }
+    }
+}

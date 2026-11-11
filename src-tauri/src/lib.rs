@@ -13,6 +13,7 @@ pub mod cells;
 pub mod clusters;
 pub mod debug_bridge;
 pub mod explorer;
+pub mod ground;
 pub mod perf;
 pub mod placements;
 pub mod textures;
