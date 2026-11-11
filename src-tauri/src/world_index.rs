@@ -73,6 +73,8 @@ pub struct MapInfo {
 pub struct PlacementStore {
     pub names: Vec<String>,
     pub name_hashes: Vec<u32>,
+    /// Per name, the archetype class the map envelopes carried (0 for none).
+    pub name_classes: Vec<u8>,
     pub lod_levels: Vec<String>,
     name_slot: HashMap<(String, u32), u32>,
     lod_slot: HashMap<String, u16>,
@@ -105,7 +107,8 @@ impl PlacementStore {
     pub fn append(&mut self, map_slot: u32, decoded: &DecodedMap) -> Result<(), String> {
         // Translate this map's slots into the store's.
         let mut names = Vec::with_capacity(decoded.names.len());
-        for (name, hash) in decoded.names.iter().zip(&decoded.name_hashes) {
+        for (i, (name, hash)) in decoded.names.iter().zip(&decoded.name_hashes).enumerate() {
+            let class = decoded.name_classes.get(i).copied().unwrap_or(0);
             let next = self.names.len() as u32;
             let slot = *self
                 .name_slot
@@ -113,8 +116,14 @@ impl PlacementStore {
                 .or_insert_with(|| {
                     self.names.push(name.clone());
                     self.name_hashes.push(*hash);
+                    self.name_classes.push(class);
                     next
                 });
+            // The class is the archetype's, so every map agrees; a map that
+            // could not index it says none, which must not erase a class.
+            if class != 0 && self.name_classes[slot as usize] == 0 {
+                self.name_classes[slot as usize] = class;
+            }
             names.push(slot);
         }
         let mut lods = Vec::with_capacity(decoded.lod_levels.len());
@@ -431,6 +440,7 @@ impl WorldIndex {
         // Local tables: only what these rows use, in first-seen order.
         let mut names: Vec<&str> = Vec::new();
         let mut name_hashes: Vec<u32> = Vec::new();
+        let mut name_classes: Vec<u8> = Vec::new();
         let mut name_local: HashMap<u32, u32> = HashMap::new();
         let mut lod_levels: Vec<&str> = Vec::new();
         let mut lod_local: HashMap<u16, u16> = HashMap::new();
@@ -455,6 +465,7 @@ impl WorldIndex {
             let name = *name_local.entry(store.name_of[i]).or_insert_with(|| {
                 names.push(store.names[store.name_of[i] as usize].as_str());
                 name_hashes.push(store.name_hashes[store.name_of[i] as usize]);
+                name_classes.push(store.name_classes[store.name_of[i] as usize]);
                 (names.len() - 1) as u32
             });
             let lod = *lod_local.entry(store.lod_of[i]).or_insert_with(|| {
@@ -520,6 +531,7 @@ impl WorldIndex {
             maps: map_refs,
             names,
             name_hashes,
+            name_classes,
             lod_levels,
             assets,
             models: model_refs,
@@ -553,6 +565,8 @@ struct BatchMeta<'a> {
     maps: Vec<MapRef<'a>>,
     names: Vec<&'a str>,
     name_hashes: Vec<u32>,
+    /// Parallel to `names`: an archetype class, as `nameClasses` in a map envelope.
+    name_classes: Vec<u8>,
     lod_levels: Vec<&'a str>,
     assets: Vec<Asset>,
     models: Vec<ModelRef>,
@@ -1316,5 +1330,32 @@ mod tests {
             ["m0.ydr", "m1.ydr", "m3.ydr", "m4.ydr", "m5.ydr"]
         );
         assert!(compile_capped(&[], 10, |_| Some(vec![])).is_empty());
+    }
+
+    #[test]
+    fn a_name_keeps_its_archetype_class_through_the_store_and_the_batch() {
+        let mut a = decoded(
+            "a.ymap",
+            &[("prop_bush", "HD", 0.0, 0.0), ("prop_wall", "HD", 1.0, 1.0)],
+        );
+        a.name_classes = vec![2, 0];
+        // Another map that could not index the bush says none: it must not erase it.
+        let mut b = decoded("b.ymap", &[("prop_bush", "HD", 2.0, 2.0)]);
+        b.name_classes = vec![0];
+        let mut store = PlacementStore::default();
+        store.append(0, &a).expect("a");
+        store.append(1, &b).expect("b");
+        let bush = store
+            .names
+            .iter()
+            .position(|n| n == "prop_bush")
+            .expect("bush");
+        let wall = store
+            .names
+            .iter()
+            .position(|n| n == "prop_wall")
+            .expect("wall");
+        assert_eq!(store.name_classes[bush], 2);
+        assert_eq!(store.name_classes[wall], 0);
     }
 }

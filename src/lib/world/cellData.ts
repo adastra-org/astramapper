@@ -230,6 +230,7 @@ type BatchMeta = {
   readonly maps: readonly { readonly path: string; readonly name: string }[];
   readonly names: readonly string[];
   readonly nameHashes: readonly number[];
+  readonly nameClasses?: readonly number[];
   readonly lodLevels: readonly string[];
   readonly assets: readonly Asset[];
   readonly models: readonly { readonly path: string; readonly section: number }[];
@@ -336,6 +337,7 @@ export function decodeCellBatch(
         children: new Uint32Array(n),
         names: meta.names,
         nameHashes: meta.nameHashes,
+        nameClasses: meta.nameClasses,
         lodLevels: meta.lodLevels,
       };
       for (let at = 0; at < n; at += 1) {

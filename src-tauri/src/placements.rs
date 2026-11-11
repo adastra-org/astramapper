@@ -245,6 +245,9 @@ struct MetaIn {
     count: usize,
     names: Vec<String>,
     name_hashes: Vec<u32>,
+    /// Absent in an envelope written before archetype classes: all none.
+    #[serde(default)]
+    name_classes: Vec<u8>,
     lod_levels: Vec<String>,
 }
 
@@ -263,6 +266,8 @@ pub struct DecodedMap {
     /// Distinct archetype names, indexed by `name_slot`.
     pub names: Vec<String>,
     pub name_hashes: Vec<u32>,
+    /// Per name slot, an archetype class as in `cw-core`'s `ArchetypeClass`.
+    pub name_classes: Vec<u8>,
     pub lod_levels: Vec<String>,
     pub index: Vec<u32>,
     pub name_slot: Vec<u32>,
@@ -357,6 +362,7 @@ pub fn decode(bytes: &[u8]) -> Result<DecodedMap, String> {
         extents_max: meta.extents_max,
         names: meta.names,
         name_hashes: meta.name_hashes,
+        name_classes: meta.name_classes,
         lod_levels: meta.lod_levels,
     };
 

@@ -67,6 +67,13 @@ describe("mergeColumns", () => {
     expect(merged.at(1).nameHash).toBe(999);
   });
 
+  test("the archetype class follows its name through a merge", () => {
+    const a = columnsFromPlaced([{ ...placed(0, "prop_bush", 0, 0), archetypeClass: 2 }]);
+    const b = columnsFromPlaced([placed(1, "prop_wall", 0, 0), { ...placed(2, "prop_bush", 0, 0), archetypeClass: 2 }]);
+    const merged = mergeColumns([a, b]);
+    expect([0, 1, 2].map((row) => merged.archetypeClass(row))).toEqual([2, 0, 2]);
+  });
+
   test("one part is returned as it is, and rows are found by entity index", () => {
     const only = columnsFromPlaced([placed(7, "lamp", 0, 0)]);
     expect(mergeColumns([only])).toBe(only);

@@ -218,6 +218,7 @@ export function mergeColumns(parts: readonly PlacementColumns[]): PlacementColum
 
   const names: string[] = [];
   const nameHashes: number[] = [];
+  const nameClasses: number[] = [];
   const lodLevels: string[] = [];
   const nameSlotOf = new Map<string, number>();
   const lodSlotOf = new Map<string, number>();
@@ -248,6 +249,7 @@ export function mergeColumns(parts: readonly PlacementColumns[]): PlacementColum
         merged = names.length;
         names.push(name);
         nameHashes.push(hash);
+        nameClasses.push(src.nameClasses?.[slot] ?? 0);
         nameSlotOf.set(key, merged);
       }
       nameMap[slot] = merged;
@@ -296,6 +298,7 @@ export function mergeColumns(parts: readonly PlacementColumns[]): PlacementColum
     children,
     names,
     nameHashes,
+    nameClasses,
     lodLevels,
   });
 }
