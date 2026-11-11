@@ -1,0 +1,41 @@
+name: Cache prune
+
+# Deletes Actions caches (Rust target dirs from Swatinem/rust-cache, etc.) that
+# have not been read for CACHE_MAX_AGE_DAYS. GitHub already evicts unused caches
+# after 7 days and caps a repo at 10 GB, but a cache that is read every few days
+# never ages out on its own, so this enforces an age limit regardless of use.
+#
+# Schedules only run from the default branch, so this takes effect after merge.
+
+on:
+  schedule:
+    - cron: "17 3 * * 0" # weekly, Sunday 03:17 UTC
+  workflow_dispatch:
+
+env:
+  CACHE_MAX_AGE_DAYS: "7"
+
+permissions:
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete caches not accessed in CACHE_MAX_AGE_DAYS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          cutoff=$(date -u -d "${CACHE_MAX_AGE_DAYS} days ago" +%s)
+          gh cache list --repo "$REPO" --limit 1000 \
+            --json id,key,lastAccessedAt,sizeInBytes \
+            --jq '.[] | "\(.id) \(.lastAccessedAt) \(.sizeInBytes) \(.key)"' \
+          | while read -r id accessed size key; do
+              if [ "$(date -u -d "$accessed" +%s)" -lt "$cutoff" ]; then
+                echo "deleting $id ($size bytes, last access $accessed): $key"
+                gh cache delete "$id" --repo "$REPO"
+              fi
+            done
