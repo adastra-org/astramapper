@@ -235,6 +235,9 @@ export type WorldDrawable = {
  */
 export type WorldModel = {
   readonly path: string;
+  /** Size of the response buffer every array below aliases: what dropping this
+   *  model frees, and what the model cache budgets against (#6). */
+  readonly byteLength: number;
   readonly drawables: readonly WorldDrawable[];
   readonly emptyDrawables: number;
   readonly textures: readonly (WireTexture & { readonly levels: readonly Uint8Array[] })[];
@@ -308,8 +311,9 @@ export async function worldModel(path: string): Promise<WorldModel> {
     return section ? asFloat32(section) : null;
   };
 
-  const decoded = {
+  const decoded: WorldModel = {
     path: meta.path,
+    byteLength: buffer.byteLength,
     emptyDrawables: meta.emptyDrawables,
     drawables: meta.drawables.map((drawable) => ({
       ...drawable,
@@ -345,6 +349,11 @@ export async function worldModel(path: string): Promise<WorldModel> {
   // sitting inside a closure. Same span, taken by hand.
   perf.record("worldModel decode", performance.now() - started);
   return decoded;
+}
+
+/** The machine's total and available memory in bytes, for the model budget. */
+export function systemMemory(): Promise<{ total: number; available: number }> {
+  return invoke("system_memory");
 }
 
 /** Save a world project payload to disk. Returns the byte count written. */
