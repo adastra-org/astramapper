@@ -13,9 +13,12 @@ import {
   Crosshair,
   FilePlus,
   Globe2,
+  Hexagon,
   Layers,
   Loader2,
   MapPin,
+  PanelLeftClose,
+  PanelLeftOpen,
   X,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
@@ -197,6 +200,7 @@ export function World(): React.JSX.Element {
   useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
   const geometry = geometryStore.all();
   const [streaming, setStreaming] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hexView, setHexView] = useState(false);
   const [hexScene, setHexScene] = useState(false);
   const [hexSettings, setHexSettings] = useState<HexSettings>(DEFAULT_HEX_SETTINGS);
@@ -828,7 +832,9 @@ export function World(): React.JSX.Element {
       )}
 
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-80 shrink-0 flex-col overflow-y-auto border-r border-edge bg-surface-1">
+        <aside
+          className={`${sidebarOpen ? "flex" : "hidden"} w-80 shrink-0 flex-col overflow-y-auto border-r border-edge bg-surface-1`}
+        >
           {!status ? (
             <div className="flex items-center gap-2 p-4 text-xs text-ink-dim">
               <Loader2 size={13} className="animate-spin" /> reading world status…
@@ -1114,6 +1120,39 @@ export function World(): React.JSX.Element {
         </aside>
 
         <div className="relative flex min-h-0 min-w-0 flex-1">
+          {/* Always in reach, unlike the sidebar sections: the toggles for the
+              sidebar itself and for the hex view in both of its forms. */}
+          <div className="absolute left-2 top-2 z-30 flex items-center gap-1 rounded border border-edge bg-surface-1/90 p-0.5 backdrop-blur">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen((open) => !open)}
+              title={sidebarOpen ? "Hide the sidebar" : "Show the sidebar"}
+              className="rounded p-1 text-ink-dim transition-colors hover:bg-surface-2 hover:text-ink"
+            >
+              {sidebarOpen ? (
+                <PanelLeftClose size={14} strokeWidth={1.75} />
+              ) : (
+                <PanelLeftOpen size={14} strokeWidth={1.75} />
+              )}
+            </button>
+            <span className="mx-0.5 h-4 w-px bg-edge" />
+            <button
+              type="button"
+              onClick={() => setHexView((on) => !on)}
+              title="Hex view: the panel"
+              className={`flex items-center gap-1 rounded px-1.5 py-1 text-[11px] transition-colors hover:bg-surface-2 ${hexView ? "text-[#e0a458]" : "text-ink-dim"}`}
+            >
+              <Hexagon size={13} strokeWidth={1.75} /> Panel
+            </button>
+            <button
+              type="button"
+              onClick={() => setHexScene((on) => !on)}
+              title="Hex view: the cells drawn in the scene"
+              className={`flex items-center gap-1 rounded px-1.5 py-1 text-[11px] transition-colors hover:bg-surface-2 ${hexScene ? "text-[#e0a458]" : "text-ink-dim"}`}
+            >
+              <Hexagon size={13} strokeWidth={1.75} /> Scene
+            </button>
+          </div>
           <Canvas
             entries={entries}
             index={index}

@@ -5,6 +5,7 @@
  */
 import { useMemo } from "react";
 
+import * as perf from "../perf";
 import type { GeometryLoad } from "../world";
 import {
   binInto,
@@ -79,11 +80,15 @@ export function useHexModel(
   const { mode, size, fine, threshold } = settings;
 
   const uniformBase = useMemo(
-    () => (enabled && mode === "uniform" ? binPlacements(entries, size) : null),
+    () =>
+      enabled && mode === "uniform"
+        ? perf.measure("hex bin (uniform)", () => binPlacements(entries, size))
+        : null,
     [enabled, mode, entries, size],
   );
   const adaptiveBase = useMemo(() => {
     if (!enabled || mode !== "adaptive") return null;
+    const started = performance.now();
     let total = 0;
     for (const entry of entries) total += entry.placements.length;
     const xs = new Float64Array(total);
@@ -98,7 +103,9 @@ export function useHexModel(
         at += 1;
       }
     }
-    return buildAdaptive(xs, ys, zs, adaptiveSizes(fine), threshold);
+    const grid = buildAdaptive(xs, ys, zs, adaptiveSizes(fine), threshold);
+    perf.record("hex build (adaptive)", performance.now() - started);
+    return grid;
   }, [enabled, mode, entries, fine, threshold]);
 
   // The resident tally is recounted whenever the loaded set changes.
