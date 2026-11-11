@@ -199,6 +199,254 @@ export class PlacementColumns {
   }
 }
 
+/** Bytes per row across every column of a `ColumnSource`. */
+const BYTES_PER_ROW = 4 + 4 + 12 + 16 + 4 + 4 + 4 + 4 + 4 + 2 + 1;
+
+/**
+ * Every column of `count` rows, as views over one buffer.
+ *
+ * One allocation, not eleven: V8 zeroes each large typed array as it makes it
+ * (about 0.6 ms for eleven arrays of 40,000 rows against 0.03 ms for one buffer,
+ * measured in Node), and a merge made a set of them on the main thread each time
+ * a cell arrived or left. Wider elements come first so every view is aligned.
+ */
+export function allocateColumns(count: number): {
+  indexes: Uint32Array;
+  nameSlots: Uint32Array;
+  positions: Float32Array;
+  rotations: Float32Array;
+  scaleXy: Float32Array;
+  scaleZ: Float32Array;
+  parents: Int32Array;
+  lodDists: Float32Array;
+  children: Uint32Array;
+  lodSlots: Uint16Array;
+  flags: Uint8Array;
+} {
+  const buffer = new ArrayBuffer(count * BYTES_PER_ROW);
+  let offset = 0;
+  const take = <T,>(make: new (buffer: ArrayBuffer, byteOffset: number, length: number) => T, length: number, size: number): T => {
+    const view = new make(buffer, offset, length);
+    offset += length * size;
+    return view;
+  };
+  return {
+    indexes: take(Uint32Array, count, 4),
+    nameSlots: take(Uint32Array, count, 4),
+    positions: take(Float32Array, count * 3, 4),
+    rotations: take(Float32Array, count * 4, 4),
+    scaleXy: take(Float32Array, count, 4),
+    scaleZ: take(Float32Array, count, 4),
+    parents: take(Int32Array, count, 4),
+    lodDists: take(Float32Array, count, 4),
+    children: take(Uint32Array, count, 4),
+    lodSlots: take(Uint16Array, count, 2),
+    flags: take(Uint8Array, count, 1),
+  };
+}
+
+/** The name and LOD tables a merge builds up, so a later merge can carry on from them. */
+type MergeTables = {
+  names: string[];
+  nameHashes: number[];
+  nameClasses: number[];
+  lodLevels: string[];
+  nameSlotOf: Map<string, number>;
+  lodSlotOf: Map<string, number>;
+};
+
+function emptyTables(): MergeTables {
+  return {
+    names: [],
+    nameHashes: [],
+    nameClasses: [],
+    lodLevels: [],
+    nameSlotOf: new Map(),
+    lodSlotOf: new Map(),
+  };
+}
+
+/**
+ * One map's columns, kept up to date as its parts (one per cell held) come and go.
+ *
+ * # Why not `mergeColumns` every time
+ *
+ * A cell arriving or leaving changes a part of every map it touches, a hundred
+ * or so, and each of those used to be merged again from all of its parts: every
+ * part's names re-keyed, every row copied and re-translated, eleven arrays made.
+ * That was 0.66 ms per map on average and 20 to 60 ms per cell, on the main
+ * thread, inside the render that follows the change.
+ *
+ * What changed is one part (or a few), so this keeps the previous result and the
+ * tables it was built with, copies the rows of the parts that stayed as a block
+ * (their slots are already in the merged tables' numbering), and translates only
+ * the parts that are new. A part is "the same" when its `PlacementColumns` is the
+ * same object: a cell held again is a new one.
+ *
+ * Name and LOD tables only ever grow while parts stay; they start again when
+ * nothing stays. Nothing is shared with a result handed out earlier, which keeps
+ * its own arrays, so one still being read is never touched.
+ */
+export class ColumnsMerger {
+  private tables = emptyTables();
+  private keys: string[] = [];
+  private refs: PlacementColumns[] = [];
+  /** The row each kept part starts at, parallel to `keys`. */
+  private starts: number[] = [];
+  private merged: PlacementColumns | null = null;
+
+  /** Forget everything: the next update builds from scratch. */
+  private reset(): void {
+    this.tables = emptyTables();
+    this.keys = [];
+    this.refs = [];
+    this.starts = [];
+    this.merged = null;
+  }
+
+  /**
+   * The columns of every part given. Rows of parts already merged come first, in
+   * the order they were, then the new parts' in the map's order. A single part is
+   * returned as it is.
+   */
+  update(parts: ReadonlyMap<string, PlacementColumns>): PlacementColumns {
+    if (parts.size === 1) {
+      this.reset();
+      return parts.values().next().value!;
+    }
+    const old = this.merged;
+
+    // Which of the old parts survive, as runs of rows to copy in one go.
+    const keptKeys = new Set<string>();
+    const nextKeys: string[] = [];
+    const nextRefs: PlacementColumns[] = [];
+    const nextStarts: number[] = [];
+    const runs: { from: number; to: number }[] = [];
+    let count = 0;
+    if (old) {
+      for (let at = 0; at < this.keys.length; at += 1) {
+        const key = this.keys[at]!;
+        const ref = this.refs[at]!;
+        if (parts.get(key) !== ref) continue;
+        const from = this.starts[at]!;
+        const to = from + ref.length;
+        const last = runs[runs.length - 1];
+        if (last && last.to === from) last.to = to;
+        else runs.push({ from, to });
+        keptKeys.add(key);
+        nextKeys.push(key);
+        nextRefs.push(ref);
+        nextStarts.push(count);
+        count += ref.length;
+      }
+    }
+    if (count === 0) this.tables = emptyTables();
+    const tables = this.tables;
+
+    const added: [string, PlacementColumns][] = [];
+    for (const entry of parts) {
+      if (keptKeys.has(entry[0])) continue;
+      added.push(entry);
+      nextKeys.push(entry[0]);
+      nextRefs.push(entry[1]);
+      nextStarts.push(count);
+      count += entry[1].length;
+    }
+
+    const out = allocateColumns(count);
+    let at = 0;
+    if (old) {
+      const src = old.raw;
+      for (const { from, to } of runs) {
+        const n = to - from;
+        if (n === 0) continue;
+        out.indexes.set(src.indexes.subarray(from, to), at);
+        out.nameSlots.set(src.nameSlots.subarray(from, to), at);
+        out.flags.set(src.flags.subarray(from, to), at);
+        out.positions.set(src.positions.subarray(from * 3, to * 3), at * 3);
+        out.rotations.set(src.rotations.subarray(from * 4, to * 4), at * 4);
+        out.scaleXy.set(src.scaleXy.subarray(from, to), at);
+        out.scaleZ.set(src.scaleZ.subarray(from, to), at);
+        out.parents.set(src.parents.subarray(from, to), at);
+        out.lodSlots.set(src.lodSlots.subarray(from, to), at);
+        out.lodDists.set(src.lodDists.subarray(from, to), at);
+        out.children.set(src.children.subarray(from, to), at);
+        at += n;
+      }
+    }
+    for (const [, part] of added) {
+      appendPart(out, at, part, tables);
+      at += part.length;
+    }
+
+    const merged = new PlacementColumns({
+      count,
+      ...out,
+      names: tables.names,
+      nameHashes: tables.nameHashes,
+      nameClasses: tables.nameClasses,
+      lodLevels: tables.lodLevels,
+    });
+    this.keys = nextKeys;
+    this.refs = nextRefs;
+    this.starts = nextStarts;
+    this.merged = merged;
+    return merged;
+  }
+}
+
+/** Write `part`'s rows at `at`, translating its slots into the merged `tables`. */
+function appendPart(
+  out: ReturnType<typeof allocateColumns>,
+  at: number,
+  part: PlacementColumns,
+  tables: MergeTables,
+): void {
+  const src = part.raw;
+  // This part's slots, translated once per distinct name rather than per row.
+  const nameMap = new Uint32Array(src.names.length);
+  for (let slot = 0; slot < src.names.length; slot += 1) {
+    const name = src.names[slot]!;
+    const hash = src.nameHashes[slot] ?? 0;
+    const key = `${hash}:${name}`;
+    let merged = tables.nameSlotOf.get(key);
+    if (merged === undefined) {
+      merged = tables.names.length;
+      tables.names.push(name);
+      tables.nameHashes.push(hash);
+      tables.nameClasses.push(src.nameClasses?.[slot] ?? 0);
+      tables.nameSlotOf.set(key, merged);
+    }
+    nameMap[slot] = merged;
+  }
+  const lodMap = new Uint16Array(src.lodLevels.length);
+  for (let slot = 0; slot < src.lodLevels.length; slot += 1) {
+    const label = src.lodLevels[slot]!;
+    let merged = tables.lodSlotOf.get(label);
+    if (merged === undefined) {
+      merged = tables.lodLevels.length;
+      tables.lodLevels.push(label);
+      tables.lodSlotOf.set(label, merged);
+    }
+    lodMap[slot] = merged;
+  }
+
+  const n = part.length;
+  out.indexes.set(src.indexes.subarray(0, n), at);
+  out.flags.set(src.flags.subarray(0, n), at);
+  out.positions.set(src.positions.subarray(0, n * 3), at * 3);
+  out.rotations.set(src.rotations.subarray(0, n * 4), at * 4);
+  out.scaleXy.set(src.scaleXy.subarray(0, n), at);
+  out.scaleZ.set(src.scaleZ.subarray(0, n), at);
+  out.parents.set(src.parents.subarray(0, n), at);
+  out.lodDists.set(src.lodDists.subarray(0, n), at);
+  out.children.set(src.children.subarray(0, n), at);
+  for (let row = 0; row < n; row += 1) {
+    out.nameSlots[at + row] = nameMap[src.nameSlots[row]!]!;
+    out.lodSlots[at + row] = lodMap[src.lodSlots[row]!]!;
+  }
+}
+
 /**
  * One set of columns from several, rows in the order given.
  *
@@ -209,98 +457,12 @@ export class PlacementColumns {
  * its hash is, as in `columnsFromPlaced`.
  *
  * Copies every row once. Nothing about the parts is kept, so they can be
- * dropped as soon as this returns.
+ * dropped as soon as this returns. A map that changes a part at a time wants
+ * `ColumnsMerger` instead.
  */
 export function mergeColumns(parts: readonly PlacementColumns[]): PlacementColumns {
   if (parts.length === 1) return parts[0]!;
-  let count = 0;
-  for (const part of parts) count += part.length;
-
-  const names: string[] = [];
-  const nameHashes: number[] = [];
-  const nameClasses: number[] = [];
-  const lodLevels: string[] = [];
-  const nameSlotOf = new Map<string, number>();
-  const lodSlotOf = new Map<string, number>();
-
-  const indexes = new Uint32Array(count);
-  const nameSlots = new Uint32Array(count);
-  const flags = new Uint8Array(count);
-  const positions = new Float32Array(count * 3);
-  const rotations = new Float32Array(count * 4);
-  const scaleXy = new Float32Array(count);
-  const scaleZ = new Float32Array(count);
-  const parents = new Int32Array(count);
-  const lodSlots = new Uint16Array(count);
-  const lodDists = new Float32Array(count);
-  const children = new Uint32Array(count);
-
-  let at = 0;
-  for (const part of parts) {
-    const src = part.raw;
-    // This part's slots, translated once per distinct name rather than per row.
-    const nameMap = new Uint32Array(src.names.length);
-    for (let slot = 0; slot < src.names.length; slot += 1) {
-      const name = src.names[slot]!;
-      const hash = src.nameHashes[slot] ?? 0;
-      const key = `${hash}:${name}`;
-      let merged = nameSlotOf.get(key);
-      if (merged === undefined) {
-        merged = names.length;
-        names.push(name);
-        nameHashes.push(hash);
-        nameClasses.push(src.nameClasses?.[slot] ?? 0);
-        nameSlotOf.set(key, merged);
-      }
-      nameMap[slot] = merged;
-    }
-    const lodMap = new Uint16Array(src.lodLevels.length);
-    for (let slot = 0; slot < src.lodLevels.length; slot += 1) {
-      const label = src.lodLevels[slot]!;
-      let merged = lodSlotOf.get(label);
-      if (merged === undefined) {
-        merged = lodLevels.length;
-        lodLevels.push(label);
-        lodSlotOf.set(label, merged);
-      }
-      lodMap[slot] = merged;
-    }
-
-    const n = part.length;
-    indexes.set(src.indexes.subarray(0, n), at);
-    flags.set(src.flags.subarray(0, n), at);
-    positions.set(src.positions.subarray(0, n * 3), at * 3);
-    rotations.set(src.rotations.subarray(0, n * 4), at * 4);
-    scaleXy.set(src.scaleXy.subarray(0, n), at);
-    scaleZ.set(src.scaleZ.subarray(0, n), at);
-    parents.set(src.parents.subarray(0, n), at);
-    lodDists.set(src.lodDists.subarray(0, n), at);
-    children.set(src.children.subarray(0, n), at);
-    for (let row = 0; row < n; row += 1) {
-      nameSlots[at + row] = nameMap[src.nameSlots[row]!]!;
-      lodSlots[at + row] = lodMap[src.lodSlots[row]!]!;
-    }
-    at += n;
-  }
-
-  return new PlacementColumns({
-    count,
-    indexes,
-    nameSlots,
-    flags,
-    positions,
-    rotations,
-    scaleXy,
-    scaleZ,
-    parents,
-    lodSlots,
-    lodDists,
-    children,
-    names,
-    nameHashes,
-    nameClasses,
-    lodLevels,
-  });
+  return new ColumnsMerger().update(new Map(parts.map((part, at) => [String(at), part])));
 }
 
 /** Columns from a list of `Placed`: the demo world, and tests. */

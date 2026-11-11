@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { fps, frame, measure, measureAsync, record, report, reset } from "./perf";
+import { fps, frame, histQuantile, measure, measureAsync, record, report, reset } from "./perf";
 
 beforeEach(reset);
 
@@ -33,6 +33,36 @@ describe("record", () => {
     const row = report().find((r) => r.name === "a")!;
     expect(row.p50Ms).toBe(50);
     expect(row.p95Ms).toBe(95);
+  });
+
+  /** The window is the last 256 samples; a flight is thousands of frames. */
+  test("run percentiles cover every call since the reset, not just the window", () => {
+    for (let i = 0; i < 1000; i += 1) record("a", 10);
+    for (let i = 0; i < 100; i += 1) record("a", 60);
+    for (let i = 0; i < 256; i += 1) record("a", 10);
+
+    const row = report().find((r) => r.name === "a")!;
+    // The window now holds only 10s, so it cannot see the 100 slow calls.
+    expect(row.p95Ms).toBe(10);
+    // 100 of 1,356 calls (7%) took 60 ms, so the run's 95th percentile is one of them.
+    expect(row.runP50Ms).toBe(10.5);
+    expect(row.runP95Ms).toBe(60.5);
+  });
+
+  test("run percentiles forget on reset", () => {
+    record("a", 30);
+    reset();
+    record("a", 2);
+
+    expect(report().find((r) => r.name === "a")!.runP95Ms).toBe(2.5);
+  });
+
+  test("a sample past the histogram's range counts in its last bin", () => {
+    record("a", 90_000);
+
+    const row = report().find((r) => r.name === "a")!;
+    expect(row.runP95Ms).toBe(500);
+    expect(row.maxMs).toBe(90_000);
   });
 
   test("orders the report by where the time went", () => {
@@ -114,5 +144,20 @@ describe("fps", () => {
 
     expect(fps()).toBeCloseTo(1000 / 16, 6);
     expect(report().find((r) => r.name === "frame")!.maxMs).toBe(300);
+  });
+});
+
+describe("histQuantile", () => {
+  test("is the upper edge of the bin the rank falls in", () => {
+    const hist = new Uint32Array(10);
+    hist[2] = 5;
+    hist[6] = 5;
+    expect(histQuantile(hist, 10, 0.5)).toBe(1.5);
+    expect(histQuantile(hist, 10, 0.51)).toBe(3.5);
+    expect(histQuantile(hist, 10, 1)).toBe(3.5);
+  });
+
+  test("is zero with no calls", () => {
+    expect(histQuantile(new Uint32Array(4), 0, 0.95)).toBe(0);
   });
 });

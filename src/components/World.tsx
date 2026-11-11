@@ -34,6 +34,7 @@ import { clusterRows } from "../lib/world/clusters";
 import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
 import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
+import { throttleSubscribe } from "../lib/world/throttle";
 import {
   createPlacementIndex,
   type PlacementIndex,
@@ -217,6 +218,14 @@ const modelQueue = new RequestQueue<QueuedEntity>(MODEL_REQUEST_LIMIT, (state) =
  * and preloading does not.
  */
 const geometryStore = createGeometryStore();
+/**
+ * How often the World sidebar follows the stores, at most. A change re-renders
+ * all of it, and the stores change every few frames while the camera moves.
+ */
+const SIDEBAR_FOLLOW_MS = 250;
+const NO_GEOMETRY: readonly GeometryLoad[] = [];
+const subscribeCellsSlowly = throttleSubscribe(cellStreamer.subscribe, SIDEBAR_FOLLOW_MS);
+const subscribeGeometrySlowly = throttleSubscribe(geometryStore.subscribe, SIDEBAR_FOLLOW_MS);
 /** The mounted game folder, so the session caches drop when it changes. */
 let lastFolder: string | null = null;
 
@@ -258,8 +267,8 @@ export function World(): React.JSX.Element {
   const [placed, setPlaced] = useState<readonly WorldMap[]>([]);
   /** The backend index's partition of the base game, once built. */
   const [grid, setGrid] = useState<CellGrid | null>(baseGrid);
-  // Re-render when the held cells change.
-  useSyncExternalStore(cellStreamer.subscribe, cellStreamer.getVersion);
+  // Re-render when the held cells change, at the sidebar's pace (`throttle.ts`).
+  useSyncExternalStore(subscribeCellsSlowly, cellStreamer.getVersion);
   const cellEntries = cellStreamer.entries();
   const [busy, setBusy] = useState(false);
   /** A load with a known count, for the progress bar. */
@@ -272,8 +281,10 @@ export function World(): React.JSX.Element {
   // Entities whose real geometry is loaded, streamed or preloaded. The version
   // this returns is only a change signal — the array itself comes from the
   // store's own cache, so its identity holds until something actually loads.
-  useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
-  const geometry = geometryStore.all();
+  // World only shows counts of it, so it follows at the sidebar's pace; the
+  // canvas, which has to build what arrives, subscribes on its own.
+  useSyncExternalStore(subscribeGeometrySlowly, geometryStore.getVersion);
+  const geometryCount = geometryStore.size();
   const [streaming, setStreaming] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hexView, setHexView] = useState(false);
@@ -771,11 +782,14 @@ export function World(): React.JSX.Element {
 
   const backendGrid = useMemo(() => (grid ? adaptiveGridOf(grid) : null), [grid]);
   const frame = useMemo(() => (grid ? gridBounds(grid) : null), [grid]);
+  const hexOn = hexView || hexScene;
+  // The tally of what is loaded is only drawn with the hex view on, so the
+  // list is only read (and a change to it only recounted) then.
   const hexModel = useHexModel(
     regionEntries,
-    geometry,
+    hexOn ? geometryStore.all() : NO_GEOMETRY,
     hexSettings,
-    hexView || hexScene,
+    hexOn,
     backendGrid,
   );
   useEffect(() => {
@@ -969,10 +983,7 @@ export function World(): React.JSX.Element {
   );
 
   const selectionLoaded =
-    selected !== null &&
-    geometry.some(
-      (g) => g.mapKey === selected.mapKey && g.entity.index === selected.entityIndex,
-    );
+    selected !== null && geometryStore.has(keyFor(selected.mapKey, selected.entityIndex));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1104,7 +1115,7 @@ export function World(): React.JSX.Element {
                         className="accent-[#e0a458]"
                       />
                       <span className="text-ink">Stream HD geometry</span>
-                      <span className="ml-auto text-ink-dim">{geometry.length} loaded</span>
+                      <span className="ml-auto text-ink-dim">{geometryCount} loaded</span>
                     </label>
                     <p className="px-4 pb-1 text-[11px] text-ink-dim">
                       Loads the nearest placed entities' models as you fly, swapping
@@ -1135,7 +1146,7 @@ export function World(): React.JSX.Element {
                   <Section title="Preload">
                     <PreloadPanel
                       placedEntities={preloadable}
-                      loaded={geometry.length}
+                      loaded={geometryCount}
                       running={preloading}
                       busy={busy}
                       onStart={preloadAll}
@@ -1322,7 +1333,6 @@ export function World(): React.JSX.Element {
             entries={entries}
             baseFrame={frame}
             index={index}
-            geometry={geometry}
             cameraRef={cameraRef}
             hexSource={hexSource}
             edits={edits}
@@ -1508,7 +1518,6 @@ type CanvasProps = {
   /** `entries`, keyed for constant-time lookup. Built by the parent so the
    *  canvas, the selection panel and the streamer all read one index. */
   index: PlacementIndex<CanvasEntry>;
-  geometry: readonly GeometryLoad[];
   cameraRef: { readonly current: CameraPose };
   /** Asks for the hex cells to draw in the scene, or null while that is off. */
   hexSource: { readonly current: HexSource | null };
@@ -1610,7 +1619,6 @@ function Canvas({
   entries,
   baseFrame,
   index,
-  geometry,
   cameraRef,
   hexSource,
   edits,
@@ -1623,6 +1631,10 @@ function Canvas({
   busy,
 }: CanvasProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
+  // The canvas builds what arrives, so it follows every change; it is a few
+  // hooks and a div, so doing it per frame costs nothing.
+  useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
+  const geometry = geometryStore.all();
   const indexRef = useRef(index);
   indexRef.current = index;
   const editsRef = useRef(edits);
@@ -1684,6 +1696,19 @@ function Canvas({
     // effect can swap its contents without touching boxes or the camera.
     const geometryGroupObject = new THREE.Group();
     world.add(geometryGroupObject);
+    // Nothing in this chain ever moves, so its matrices are computed once. With
+    // the defaults every frame multiplied a matrix for each of the thousands of
+    // instanced meshes below it, for the identity they all still were.
+    // A parent that rewrites its matrix forces every descendant to recompute,
+    // so the scene itself has to stand still as well.
+    scene.matrixAutoUpdate = false;
+    world.updateMatrix();
+    world.matrixAutoUpdate = false;
+    geometryGroupObject.matrixAutoUpdate = false;
+    world.updateMatrixWorld(true);
+    // After the line above, not before: a group that does not update its own
+    // world matrix never computes it, and the meshes below multiply by it.
+    geometryGroupObject.matrixWorldAutoUpdate = false;
     geometryGroup.current = geometryGroupObject;
     instanced.current = new InstancedModels(geometryGroupObject, shadowed);
 

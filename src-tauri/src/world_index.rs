@@ -666,7 +666,7 @@ pub async fn world_index_build(
 /// Most model bytes one `world_index_cells` reply carries. A reply is one IPC
 /// payload held whole in the backend and again in the WebView, so it is bounded
 /// by what a reply can safely cost, not by what the cells need.
-pub const REPLY_MODEL_BYTES: usize = 48 * 1024 * 1024;
+pub const REPLY_MODEL_BYTES: usize = 4 * 1024 * 1024;
 
 /// Stack for the model workers: compiling a drawable's textures recurses deeper
 /// than the 2 MB a default worker gets.

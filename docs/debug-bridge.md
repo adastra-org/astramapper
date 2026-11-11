@@ -108,6 +108,15 @@ under the 300 MB target of #2: the model cache is allowed up to 3 GB (#6) and
 the models in use stay in it. Screenshots after the flight show the textures
 intact.
 
+## Reading a whole run
+
+F3's `p95` is over the last 256 samples. Each span in `/state` also carries
+`runP50Ms` and `runP95Ms` over every call since the last `resetPerf` (0.5 ms
+bins, so an upper edge), which is what to compare between two flights.
+`bun run tauri dev` with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222 --remote-allow-origins=*"`
+also opens the WebView to the DevTools protocol for a CPU profile or a trace
+while the bridge flies a route; see "Frame hitches" in streaming.md.
+
 ## Next
 
 A Code Mode on top of the same channel (scripted scenarios, assertions on the
