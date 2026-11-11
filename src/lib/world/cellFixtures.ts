@@ -119,6 +119,8 @@ export type BatchSpec = {
   readonly rows: readonly RowSpec[];
   readonly maps: readonly { readonly path: string; readonly name: string }[];
   readonly names: readonly string[];
+  /** Archetype class per name; none when absent. */
+  readonly classes?: readonly number[];
   readonly lodLevels?: readonly string[];
   readonly assets?: readonly Asset[];
   /** Each model is a complete `Kind.Model` envelope, nested as one section. */
@@ -150,6 +152,7 @@ export function batchBuffer(spec: BatchSpec): ArrayBuffer {
       maps: spec.maps,
       names: spec.names,
       nameHashes: spec.names.map((_, i) => i + 1),
+      nameClasses: spec.names.map((_, i) => spec.classes?.[i] ?? 0),
       lodLevels: spec.lodLevels ?? ["HD"],
       assets: spec.assets ?? [],
       models: models.map((m, i) => ({ path: m.path, section: columns.length + i })),

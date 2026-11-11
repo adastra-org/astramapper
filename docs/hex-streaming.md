@@ -67,6 +67,10 @@ leaf 70 models and 235 MB (`cell_replies_over_the_base_game` in the gate). Witho
 the cap a single call held that whole reply in the backend and again in the
 WebView, and the app ran out of memory.
 
+The names of a reply carry their archetype class (`nameClasses`, as in a map
+envelope), so decals and vegetation keep their load phase for cell-streamed
+placements too (#9).
+
 Terrain is a pseudo-cell (level 255): wanted map-wide and never evicted (#5), so it
 is outside the partition. The backend classifies it by the same name tokens as the
 frontend (a test pins the two); real flags are #9.

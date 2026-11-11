@@ -153,6 +153,24 @@ describe("a cell batch", () => {
     expect(batch.cells[0]!.count).toBe(0);
   });
 
+  test("the archetype class of each name rides along into the columns", () => {
+    const batch = decodeCellBatch(
+      batchBuffer({
+        cells: [{ level: 0, q: 0, r: 0, start: 0, count: 2 }],
+        rows: [
+          { map: 0, index: 1, name: 0, x: 0, y: 0 },
+          { map: 0, index: 2, name: 1, x: 1, y: 1 },
+        ],
+        maps,
+        names: ["prop_bush", "prop_wall"],
+        classes: [2, 0],
+      }),
+    );
+    const columns = batch.cells[0]!.parts[0]!.columns;
+    expect(columns.archetypeClass(0)).toBe(2);
+    expect(columns.archetypeClass(1)).toBe(0);
+  });
+
   test("assets are handed through, including a name with no file", () => {
     const batch = decodeCellBatch(
       batchBuffer({
