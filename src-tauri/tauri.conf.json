@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AstraMapper",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "identifier": "com.father.astramapper",
   "build": {
     "beforeDevCommand": "bun run dev",
