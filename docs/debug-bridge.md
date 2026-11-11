@@ -87,5 +87,5 @@ Flight over Los Santos at 120 m/s through five waypoints, F3 read through
 
 ## Next
 
-A Code Mode on top of the same channel (scripted scenarios, assertions on the
-gauges) is not built; the commands above are the pieces it would call.
+[Code Mode](code-mode.md) is built on this channel: scripted scenarios with
+assertions on the gauges and spans (`bun scripts/bridge.ts run <scenario>`).
