@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Boxes, FolderTree, Globe2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatHash } from "./lib/format";
 import { DebugPanel } from "./components/DebugPanel";
 import { Explorer } from "./components/Explorer";
+import { Onboarding } from "./components/Onboarding";
 import { World } from "./components/World";
 
 /** Mirrors the `AppInfo` struct returned by the `app_info` Tauri command. */
@@ -26,6 +27,9 @@ function App(): React.JSX.Element {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [mode, setMode] = useState<ModeId>("explorer");
   const [debug, setDebug] = useState(false);
+  // Counts game folders opened, so the precompile prompt can ask once per open.
+  const [gameEpoch, setGameEpoch] = useState(0);
+  const onGameOpen = useCallback(() => setGameEpoch((n) => n + 1), []);
 
   useEffect(() => {
     invoke<AppInfo>("app_info").then(setInfo).catch(console.error);
@@ -88,8 +92,9 @@ function App(): React.JSX.Element {
 
         <main className="relative flex min-w-0 flex-1 flex-col">
           {debug && <DebugPanel onClose={() => setDebug(false)} />}
+          <Onboarding epoch={gameEpoch} />
           {mode === "explorer" ? (
-            <Explorer />
+            <Explorer onGameOpen={onGameOpen} />
           ) : mode === "world" ? (
             <World />
           ) : (

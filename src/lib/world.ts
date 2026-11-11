@@ -28,7 +28,22 @@ export type WorldStatus = {
   readonly dlcGroups: readonly ContentGroup[];
   /** The `.ymap` open in the Explorer, when there is one. */
   readonly openMapPath: string | null;
+  /** Identifies the installed build (hex): the persistent model cache's key. */
+  readonly installStamp: string | null;
 };
+
+/** What the machine has, for the precompile recommendation (#7). */
+export type HardwareInfo = {
+  readonly cores: number;
+  readonly totalMemory: number;
+  readonly availableMemory: number;
+  /** Free bytes on the volume holding the asset cache; `null` if unknown. */
+  readonly freeDiskBytes: number | null;
+};
+
+export function hardwareInfo(): Promise<HardwareInfo> {
+  return invoke<HardwareInfo>("hardware_info");
+}
 
 /** One `.ymap` a content group holds. */
 export type YmapListing = {
@@ -273,6 +288,14 @@ let worldModelInFlight = 0;
 let worldModelPeak = 0;
 
 export async function worldModel(path: string): Promise<WorldModel> {
+  return decodeModel(await worldModelBuffer(path), path);
+}
+
+/**
+ * The raw envelope for a model, as the backend sent it. Split from decoding so
+ * the persistent cache can keep the bytes and skip this call next session (#7).
+ */
+export async function worldModelBuffer(path: string): Promise<ArrayBuffer> {
   worldModelInFlight += 1;
   worldModelPeak = Math.max(worldModelPeak, worldModelInFlight);
   perf.gauge("worldModel in flight", worldModelInFlight);
@@ -295,6 +318,15 @@ export async function worldModel(path: string): Promise<WorldModel> {
     worldModelInFlight -= 1;
     perf.gauge("worldModel in flight", worldModelInFlight);
   }
+  return buffer;
+}
+
+/**
+ * Decode a model envelope into typed-array views over it. Throws on a buffer
+ * that is not a model envelope, which is how a persisted record from another
+ * build of the wire format is told apart from a good one.
+ */
+export function decodeModel(buffer: ArrayBuffer, path: string): WorldModel {
   const started = performance.now();
   const envelope = readEnvelope(buffer);
   if (envelope.kind !== Kind.Model) {
