@@ -19,7 +19,6 @@ import {
   MapPin,
   PanelLeftClose,
   PanelLeftOpen,
-  X,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
 import * as perf from "../lib/perf";
@@ -35,6 +34,7 @@ import {
 import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
 import { HexView } from "./world/HexView";
+import { PlacedList } from "./world/PlacedList";
 import {
   DEFAULT_HEX_SETTINGS,
   overlayCells,
@@ -363,6 +363,8 @@ export function World(): React.JSX.Element {
     autoLoadedBase.current = true;
     void loadBaseMaps();
   }, [status?.gameOpen, loadBaseMaps]);
+
+  const deselect = useCallback(() => setSelected(null), []);
 
   const remove = useCallback((path: string) => {
     setPlaced((current) => current.filter((m) => m.path !== path));
@@ -972,40 +974,13 @@ export function World(): React.JSX.Element {
               )}
 
               <Section title={`Placed (${totalPlaced.toLocaleString()})`}>
-                {entries.map((entry) => (
-                  <div
-                    key={entry.key}
-                    className="group flex items-center gap-2 px-4 py-1 text-xs hover:bg-surface-2/60"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setSelected(null)}
-                      className={`min-w-0 flex-1 truncate text-left ${
-                        selected?.mapKey === entry.key ? "text-accent" : "text-ink"
-                      }`}
-                    >
-                      {entry.name || entry.key}
-                    </button>
-                    <span className="shrink-0 text-ink-dim">
-                      {entry.placements.length.toLocaleString()}
-                    </span>
-                    {!demo && (
-                      <button
-                        type="button"
-                        onClick={() => remove(entry.key)}
-                        aria-label={`remove ${entry.name}`}
-                        className="shrink-0 rounded p-0.5 text-ink-dim transition-colors hover:bg-surface-2 hover:text-red-400"
-                      >
-                        <X size={12} strokeWidth={1.75} />
-                      </button>
-                    )}
-                  </div>
-                ))}
-                {entries.length === 0 && (
-                  <p className="px-4 py-2 text-xs text-ink-dim">
-                    Nothing placed yet. Pick a map from a content group above.
-                  </p>
-                )}
+                <PlacedList
+                  entries={entries}
+                  selectedKey={selected?.mapKey ?? null}
+                  removable={!demo}
+                  onDeselect={deselect}
+                  onRemove={remove}
+                />
               </Section>
 
               <Section title="History">
