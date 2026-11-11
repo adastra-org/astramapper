@@ -57,8 +57,9 @@ call per name. `known` is the names the frontend already holds, which are left
 out. Models that fail to compile are left out too and the frontend asks for them
 on its own.
 
-A reply is bounded: only the first 48 MB of models ride along
-(`REPLY_MODEL_BYTES`), compiled a wave at a time on a pool of their own with large
+A reply is bounded: only the first 4 MB of models ride along
+(`REPLY_MODEL_BYTES`, 48 MB until v0.3.3: a big reply is a 50 to 90 ms task while the
+WebView gathers its body, see streaming.md), compiled a wave at a time on a pool of their own with large
 worker stacks. The rest of the names still arrive with their files, and the
 per-model loader fetches them as before, paced by the model cache budget. This is
 measured, not a guess: against the base game the terrain cell alone names 395
@@ -146,7 +147,7 @@ same batches as every other cell, nearest the camera first, after the working se
 and before the prefetch ring, and are exempt from eviction until `unpin(key)`,
 which evicts them at once (except cells the working set still wants) and returns
 their placements so the geometry goes too. The limits are the existing ones: a
-reply carries at most 48 MB of models (`REPLY_MODEL_BYTES`) and the models go
+reply carries about 4 MB of models (`REPLY_MODEL_BYTES`) and the models go
 through the model cache, which stays under its own byte budget. So pinning a zone
 holds its **placements** (columns, ~60 bytes each) and as many of its models as
 the cache budget keeps; it does not, and cannot, hold the zone's compiled

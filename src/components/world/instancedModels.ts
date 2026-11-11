@@ -192,6 +192,10 @@ class Pool {
       mesh.instanceMatrix.needsUpdate = true;
     }
     this.parent.add(mesh);
+    // The mesh never moves on its own: its instances do. Its world matrix is
+    // taken once, here, because the parent group stops updating its children.
+    mesh.matrixAutoUpdate = false;
+    mesh.updateMatrixWorld(true);
     this.#release(old);
     this.mesh = mesh;
   }

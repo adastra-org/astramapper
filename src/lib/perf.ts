@@ -25,6 +25,15 @@ import { invoke } from "@tauri-apps/api/core";
 /** How many recent samples a span keeps for percentiles. Mirrors `WINDOW`. */
 const WINDOW = 256;
 
+/**
+ * Resolution and range of the run histogram: every call since the last reset
+ * lands in a bin of `BIN_MS`, so a percentile can cover a whole flight and not
+ * only the last `WINDOW` samples (8 seconds of frames). Past `BINS * BIN_MS`
+ * a sample counts in the last bin.
+ */
+const BIN_MS = 0.5;
+const BINS = 1000;
+
 type Entry = {
   calls: number;
   totalMs: number;
@@ -35,6 +44,8 @@ type Entry = {
   recent: Float64Array;
   filled: number;
   at: number;
+  /** Every call since the last reset, in `BIN_MS` bins. */
+  hist: Uint32Array;
 };
 
 const table = new Map<string, Entry>();
@@ -51,6 +62,7 @@ function entryFor(name: string): Entry {
       recent: new Float64Array(WINDOW),
       filled: 0,
       at: 0,
+      hist: new Uint32Array(BINS),
     };
     table.set(name, entry);
   }
@@ -65,6 +77,7 @@ export function record(name: string, ms: number, bytes = 0): void {
   if (ms < entry.minMs) entry.minMs = ms;
   if (ms > entry.maxMs) entry.maxMs = ms;
   entry.bytes += bytes;
+  entry.hist[Math.min(BINS - 1, Math.max(0, Math.floor(ms / BIN_MS)))]! += 1;
   entry.recent[entry.at] = ms;
   entry.at = (entry.at + 1) % WINDOW;
   if (entry.filled < WINDOW) entry.filled += 1;
@@ -119,7 +132,22 @@ export type SpanReport = {
   readonly p95Ms: number;
   readonly maxMs: number;
   readonly bytes: number;
+  /** Percentiles over every call since the last reset, to `BIN_MS`. */
+  readonly runP50Ms?: number;
+  readonly runP95Ms?: number;
 };
+
+/** The `fraction` quantile of a run histogram, as the upper edge of its bin. */
+export function histQuantile(hist: ArrayLike<number>, calls: number, fraction: number): number {
+  if (calls === 0) return 0;
+  const target = Math.max(1, Math.ceil(calls * fraction));
+  let seen = 0;
+  for (let bin = 0; bin < hist.length; bin += 1) {
+    seen += hist[bin]!;
+    if (seen >= target) return (bin + 1) * BIN_MS;
+  }
+  return hist.length * BIN_MS;
+}
 
 /** Nearest-rank percentile over a sorted sequence. */
 function percentile(sorted: ArrayLike<number>, fraction: number): number {
@@ -157,6 +185,8 @@ export function report(): SpanReport[] {
       p95Ms: percentile(sorted, 0.95),
       maxMs: entry.maxMs,
       bytes: entry.bytes,
+      runP50Ms: histQuantile(entry.hist, entry.calls, 0.5),
+      runP95Ms: histQuantile(entry.hist, entry.calls, 0.95),
     });
   }
   rows.sort((a, b) => b.totalMs - a.totalMs);

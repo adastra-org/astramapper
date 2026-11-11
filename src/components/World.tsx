@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { formatHash } from "../lib/format";
 import { registerCamera } from "../lib/debugBridge";
+import { RefCache } from "../lib/world/refCache";
 import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
@@ -33,6 +34,7 @@ import { clusterRows } from "../lib/world/clusters";
 import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
 import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
+import { throttleSubscribe } from "../lib/world/throttle";
 import {
   createPlacementIndex,
   type PlacementIndex,
@@ -216,6 +218,14 @@ const modelQueue = new RequestQueue<QueuedEntity>(MODEL_REQUEST_LIMIT, (state) =
  * and preloading does not.
  */
 const geometryStore = createGeometryStore();
+/**
+ * How often the World sidebar follows the stores, at most. A change re-renders
+ * all of it, and the stores change every few frames while the camera moves.
+ */
+const SIDEBAR_FOLLOW_MS = 250;
+const NO_GEOMETRY: readonly GeometryLoad[] = [];
+const subscribeCellsSlowly = throttleSubscribe(cellStreamer.subscribe, SIDEBAR_FOLLOW_MS);
+const subscribeGeometrySlowly = throttleSubscribe(geometryStore.subscribe, SIDEBAR_FOLLOW_MS);
 /** The mounted game folder, so the session caches drop when it changes. */
 let lastFolder: string | null = null;
 
@@ -257,8 +267,8 @@ export function World(): React.JSX.Element {
   const [placed, setPlaced] = useState<readonly WorldMap[]>([]);
   /** The backend index's partition of the base game, once built. */
   const [grid, setGrid] = useState<CellGrid | null>(baseGrid);
-  // Re-render when the held cells change.
-  useSyncExternalStore(cellStreamer.subscribe, cellStreamer.getVersion);
+  // Re-render when the held cells change, at the sidebar's pace (`throttle.ts`).
+  useSyncExternalStore(subscribeCellsSlowly, cellStreamer.getVersion);
   const cellEntries = cellStreamer.entries();
   const [busy, setBusy] = useState(false);
   /** A load with a known count, for the progress bar. */
@@ -271,8 +281,10 @@ export function World(): React.JSX.Element {
   // Entities whose real geometry is loaded, streamed or preloaded. The version
   // this returns is only a change signal — the array itself comes from the
   // store's own cache, so its identity holds until something actually loads.
-  useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
-  const geometry = geometryStore.all();
+  // World only shows counts of it, so it follows at the sidebar's pace; the
+  // canvas, which has to build what arrives, subscribes on its own.
+  useSyncExternalStore(subscribeGeometrySlowly, geometryStore.getVersion);
+  const geometryCount = geometryStore.size();
   const [streaming, setStreaming] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hexView, setHexView] = useState(false);
@@ -770,11 +782,14 @@ export function World(): React.JSX.Element {
 
   const backendGrid = useMemo(() => (grid ? adaptiveGridOf(grid) : null), [grid]);
   const frame = useMemo(() => (grid ? gridBounds(grid) : null), [grid]);
+  const hexOn = hexView || hexScene;
+  // The tally of what is loaded is only drawn with the hex view on, so the
+  // list is only read (and a change to it only recounted) then.
   const hexModel = useHexModel(
     regionEntries,
-    geometry,
+    hexOn ? geometryStore.all() : NO_GEOMETRY,
     hexSettings,
-    hexView || hexScene,
+    hexOn,
     backendGrid,
   );
   useEffect(() => {
@@ -968,10 +983,7 @@ export function World(): React.JSX.Element {
   );
 
   const selectionLoaded =
-    selected !== null &&
-    geometry.some(
-      (g) => g.mapKey === selected.mapKey && g.entity.index === selected.entityIndex,
-    );
+    selected !== null && geometryStore.has(keyFor(selected.mapKey, selected.entityIndex));
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1103,7 +1115,7 @@ export function World(): React.JSX.Element {
                         className="accent-[#e0a458]"
                       />
                       <span className="text-ink">Stream HD geometry</span>
-                      <span className="ml-auto text-ink-dim">{geometry.length} loaded</span>
+                      <span className="ml-auto text-ink-dim">{geometryCount} loaded</span>
                     </label>
                     <p className="px-4 pb-1 text-[11px] text-ink-dim">
                       Loads the nearest placed entities' models as you fly, swapping
@@ -1134,7 +1146,7 @@ export function World(): React.JSX.Element {
                   <Section title="Preload">
                     <PreloadPanel
                       placedEntities={preloadable}
-                      loaded={geometry.length}
+                      loaded={geometryCount}
                       running={preloading}
                       busy={busy}
                       onStart={preloadAll}
@@ -1321,7 +1333,6 @@ export function World(): React.JSX.Element {
             entries={entries}
             baseFrame={frame}
             index={index}
-            geometry={geometry}
             cameraRef={cameraRef}
             hexSource={hexSource}
             edits={edits}
@@ -1507,7 +1518,6 @@ type CanvasProps = {
   /** `entries`, keyed for constant-time lookup. Built by the parent so the
    *  canvas, the selection panel and the streamer all read one index. */
   index: PlacementIndex<CanvasEntry>;
-  geometry: readonly GeometryLoad[];
   cameraRef: { readonly current: CameraPose };
   /** Asks for the hex cells to draw in the scene, or null while that is off. */
   hexSource: { readonly current: HexSource | null };
@@ -1609,7 +1619,6 @@ function Canvas({
   entries,
   baseFrame,
   index,
-  geometry,
   cameraRef,
   hexSource,
   edits,
@@ -1622,6 +1631,10 @@ function Canvas({
   busy,
 }: CanvasProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
+  // The canvas builds what arrives, so it follows every change; it is a few
+  // hooks and a div, so doing it per frame costs nothing.
+  useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
+  const geometry = geometryStore.all();
   const indexRef = useRef(index);
   indexRef.current = index;
   const editsRef = useRef(edits);
@@ -1683,6 +1696,19 @@ function Canvas({
     // effect can swap its contents without touching boxes or the camera.
     const geometryGroupObject = new THREE.Group();
     world.add(geometryGroupObject);
+    // Nothing in this chain ever moves, so its matrices are computed once. With
+    // the defaults every frame multiplied a matrix for each of the thousands of
+    // instanced meshes below it, for the identity they all still were.
+    // A parent that rewrites its matrix forces every descendant to recompute,
+    // so the scene itself has to stand still as well.
+    scene.matrixAutoUpdate = false;
+    world.updateMatrix();
+    world.matrixAutoUpdate = false;
+    geometryGroupObject.matrixAutoUpdate = false;
+    world.updateMatrixWorld(true);
+    // After the line above, not before: a group that does not update its own
+    // world matrix never computes it, and the meshes below multiply by it.
+    geometryGroupObject.matrixWorldAutoUpdate = false;
     geometryGroup.current = geometryGroupObject;
     instanced.current = new InstancedModels(geometryGroupObject, shadowed);
 
@@ -2352,6 +2378,10 @@ function Canvas({
       // The instanced meshes are what the models cost in draw calls: one per
       // model, LOD bundle and part, not one per entity. Walking every pool is
       // not free, so it is sampled, not per frame.
+      if (ticks % 15 === 0) {
+        perf.gauge("texture cache", textureCache.size);
+        perf.gauge("shared models", sharedModels.size);
+      }
       if (ticks % 15 === 0 && instanced.current) {
         const stats = instanced.current.stats();
         perf.gauge("instanced meshes drawn", stats.drawn);
@@ -2688,7 +2718,12 @@ function totalCount(entries: readonly CanvasEntry[]): number {
 }
 
 /** One part's GPU resources, made once per model and drawn by every entity. */
-type SharedPart = { readonly geometry: THREE.BufferGeometry; readonly material: THREE.Material };
+type SharedPart = {
+  readonly geometry: THREE.BufferGeometry;
+  readonly material: THREE.Material;
+  /** The `textureCache` keys this part holds, released with it. */
+  readonly textureKeys: readonly string[];
+};
 type SharedModel = { readonly lods: readonly (readonly SharedPart[])[]; refs: number };
 
 /**
@@ -2725,12 +2760,20 @@ function releaseShared(model: WorldModel): void {
   shared.refs -= 1;
   if (shared.refs > 0) return;
   for (const lod of shared.lods) {
-    for (const part of lod) {
-      part.geometry.dispose();
-      part.material.dispose();
-    }
+    for (const part of lod) disposePart(part);
   }
   sharedModels.delete(model);
+}
+
+/**
+ * Free one part: its geometry, its material, and its hold on its textures.
+ * `material.dispose()` does not touch the textures it points at, which is what
+ * let every texture of the session stay resident (#23).
+ */
+function disposePart(part: SharedPart): void {
+  part.geometry.dispose();
+  part.material.dispose();
+  for (const key of part.textureKeys) textureCache.release(key);
 }
 
 function buildSharedParts(
@@ -2778,7 +2821,7 @@ function buildSharedParts(
       material.normalScale = new THREE.Vector2(1, -1);
       material.needsUpdate = true;
     }
-    parts.push({ geometry, material });
+    parts.push({ geometry, material, textureKeys: resolved.keys });
   }
   return parts;
 }
@@ -2794,6 +2837,7 @@ function disposeAllShared(): void {
     }
   }
   sharedModels.clear();
+  textureCache.clear();
 }
 
 const editScratch = {
@@ -2863,7 +2907,7 @@ function updateHexLines(lines: THREE.LineSegments, cells: readonly OverlayCell[]
 function resolvePartTextures(
   part: { readonly diffuse: number | null; readonly normal: number | null },
   textures: WorldModel["textures"],
-): { diffuse: THREE.Texture | null; normal: THREE.Texture | null } {
+): { diffuse: THREE.Texture | null; normal: THREE.Texture | null; keys: string[] } {
   // A texture whose section came back empty counts as unresolved, which the
   // caller already handles by leaving the part flat grey. Better that than a
   // throw from inside the render setup.
@@ -2872,13 +2916,24 @@ function resolvePartTextures(
   );
   const diffuse = part.diffuse === null ? null : byHash.get(part.diffuse);
   const normal = part.normal === null ? null : byHash.get(part.normal);
+  // Each upload holds the texture for the part until the part is disposed.
+  const keys: string[] = [];
+  const hold = (
+    texture: WorldModel["textures"][number] | null | undefined,
+    colorSpace: THREE.ColorSpace,
+  ): THREE.Texture | null => {
+    if (!texture) return null;
+    keys.push(textureKey(texture, colorSpace));
+    return uploadTexture(texture, colorSpace);
+  };
   return {
     // Diffuse carries colour and is authored in sRGB; a normal map carries
     // vectors and must stay linear. Getting this backwards washes the whole
     // scene out, and it is set per slot because the texture does not know
     // which it is.
-    diffuse: diffuse ? uploadTexture(diffuse, THREE.SRGBColorSpace) : null,
-    normal: normal ? uploadTexture(normal, THREE.NoColorSpace) : null,
+    diffuse: hold(diffuse, THREE.SRGBColorSpace),
+    normal: hold(normal, THREE.NoColorSpace),
+    keys,
   };
 }
 
@@ -2903,7 +2958,14 @@ const BLOCK_FORMATS: Readonly<Record<string, THREE.CompressedPixelFormat>> = {
  * the colour space is in the key because the same texture can legitimately be
  * bound as both a diffuse and a normal map by two different parts.
  */
-const textureCache = new Map<string, THREE.Texture>();
+const textureCache = new RefCache<THREE.Texture>();
+
+function textureKey(
+  texture: WorldModel["textures"][number],
+  colorSpace: THREE.ColorSpace,
+): string {
+  return `${texture.hash}|${texture.format}|${colorSpace}`;
+}
 
 /**
  * Upload one texture's blocks straight to the GPU.
@@ -2922,10 +2984,14 @@ function uploadTexture(
   texture: WorldModel["textures"][number],
   colorSpace: THREE.ColorSpace,
 ): THREE.Texture {
-  const key = `${texture.hash}|${texture.format}|${colorSpace}`;
-  const cached = textureCache.get(key);
-  if (cached) return cached;
+  return textureCache.acquire(textureKey(texture, colorSpace), () => buildTexture(texture, colorSpace));
+}
 
+/** Build and upload one texture. Called once per key while it has users. */
+function buildTexture(
+  texture: WorldModel["textures"][number],
+  colorSpace: THREE.ColorSpace,
+): THREE.Texture {
   const last = texture.mips[texture.levels.length - 1];
   const complete =
     texture.levels.length > 1 && last !== undefined && last.width <= 1 && last.height <= 1;
@@ -2968,9 +3034,13 @@ function uploadTexture(
   built.minFilter = complete ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   built.magFilter = THREE.LinearFilter;
   built.generateMipmaps = false;
+  // Once the driver has the levels, the JS side has no use for them, and they
+  // are views over the IPC response the model arrived in: dropping them lets
+  // that buffer go as soon as no geometry needs it.
+  built.onUpdate = () => {
+    built.mipmaps = [];
+  };
   built.needsUpdate = true;
-
-  textureCache.set(key, built);
   return built;
 }
 

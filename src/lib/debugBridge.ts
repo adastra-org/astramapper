@@ -321,6 +321,8 @@ function snapshot(): Record<string, unknown> {
     gauges: perf.gauges(),
     spans: perf.report(),
     viewport: { width: window.innerWidth, height: window.innerHeight },
+    // What the page says, for errors shown in the UI rather than the console.
+    pageText: document.body.innerText.replace(/\s+/g, " ").slice(0, 1500),
     // What a `click` can hit right now, so a command can be written from this.
     clickable: clickables()
       .slice(0, 80)

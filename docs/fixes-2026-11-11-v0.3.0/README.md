@@ -42,8 +42,6 @@ Design and numbers: [../hex-streaming.md](../hex-streaming.md#zone-clusters-v030
   stayed 20 to 75 and `cell placements held` under 35,000; the whole-map terrain
   layer is drawn at distance (screenshot). Frame p95 30 to 85 ms and long task p95
   100 to 150 ms during the flight, still above the targets.
-- [ ] JS heap bounded while flying (#23): the heap reached 5.5 GB and does not
-  come back, with the model cache at its budget.
 - [x] Code Mode on the bridge channel (`docs/code-mode.md`, v0.3.4):
   `bun scripts/bridge.ts run <scenario>`. Unit tested against a fake app; run
   against the real dev app (debug build): `smoke`, `streaming-bounded` and
@@ -56,7 +54,10 @@ Design and numbers: [../hex-streaming.md](../hex-streaming.md#zone-clusters-v030
   streamed cells (mountains and islands at the horizon toward Sandy Shores and
   Paleto Bay), but it is separate pieces over the dark grid, not continuous
   ground. Whether that is the intended whole-map layer is not decided here.
-- [ ] JS heap bounded while flying (#23): `heap-flight` on a build without #25
-  (v0.3.4 on dev, debug) fails: heap 6.3 to 9.3 GB in a 146 s tour, +1,344 MB per
-  minute, `textures` still growing while `resident models` fall. Rerun it on a
-  build with #25 before ticking the item above.
+- [~] JS heap bounded while flying (#23): textures were never released and kept
+  whole IPC responses alive; now reference-counted with their model parts. Same
+  flight: heap idle 5.5 GB (growing) -> 3.2 GB (stable, comes back after peaks),
+  textures and geometries follow what is near. Not at the 300 MB target: the
+  model cache budget allows up to 3 GB.
+  `heap-flight` (Code Mode) failed on dev without #25 (heap 6.3 to 9.3 GB in a
+  146 s tour); rerun it on a build with #25 before ticking this.
