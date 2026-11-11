@@ -21,6 +21,7 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 import { formatHash } from "../lib/format";
+import { registerCamera } from "../lib/debugBridge";
 import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
@@ -2435,7 +2436,33 @@ function Canvas({
     const observer = new ResizeObserver(resize);
     observer.observe(container);
 
+    // The debug bridge reads and moves the fly camera through this; it is a
+    // no-op unless the bridge is on. `set` writes the same state WASD does.
+    registerCamera({
+      pose: () => ({
+        position: [state.position.x, state.position.y, state.position.z],
+        yaw: state.yaw,
+        pitch: state.pitch,
+      }),
+      set: (position, yaw, pitch) => {
+        state.position.set(position[0], position[1], position[2]);
+        state.yaw = yaw;
+        state.pitch = pitch;
+      },
+      setKey: (key, down) => {
+        if (down) state.pressed.add(key);
+        else state.pressed.delete(key);
+      },
+      capture: () => {
+        // The drawing buffer is cleared after compositing, so draw and read in
+        // the same task.
+        renderer.render(scene, camera);
+        return renderer.domElement.toDataURL("image/png");
+      },
+    });
+
     return () => {
+      registerCamera(null);
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("keydown", onKeyDown);

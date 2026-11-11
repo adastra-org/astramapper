@@ -11,6 +11,7 @@ pub mod bake;
 pub mod cache;
 pub mod cells;
 pub mod clusters;
+pub mod debug_bridge;
 pub mod explorer;
 pub mod perf;
 pub mod placements;
@@ -57,8 +58,16 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         // Persisting settings (game folder, DLC level, window layout).
         .plugin(tauri_plugin_store::Builder::new().build())
+        // The debug bridge listens only in debug builds, or when asked for with
+        // `ASTRAMAPPER_DEBUG_BRIDGE=1`; see `debug_bridge`.
+        .setup(|_app| {
+            debug_bridge::start();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            debug_bridge::debug_bridge_info,
+            debug_bridge::debug_bridge_sync,
             explorer::open_game_folder,
             explorer::list_dir,
             explorer::game_is_open,

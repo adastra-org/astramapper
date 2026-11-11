@@ -94,14 +94,16 @@ fn echoing() -> bool {
 /// and least of all must it turn a measurement into a second failure.
 pub fn record(name: &'static str, elapsed: Duration, bytes: u64) {
     if echoing() {
-        if bytes > 0 {
-            eprintln!(
+        let line = if bytes > 0 {
+            format!(
                 "[perf] {name} {:.2}ms {bytes}B",
                 elapsed.as_secs_f64() * 1000.0
-            );
+            )
         } else {
-            eprintln!("[perf] {name} {:.2}ms", elapsed.as_secs_f64() * 1000.0);
-        }
+            format!("[perf] {name} {:.2}ms", elapsed.as_secs_f64() * 1000.0)
+        };
+        eprintln!("{line}");
+        crate::debug_bridge::log("perf", &line);
     }
     let mut guard = match table().lock() {
         Ok(guard) => guard,
