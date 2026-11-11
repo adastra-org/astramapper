@@ -30,6 +30,14 @@ import {
 } from "../lib/world/placementIndex";
 import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
+import { HexView } from "./world/HexView";
+import {
+  DEFAULT_HEX_SETTINGS,
+  overlayCells,
+  useHexModel,
+  type HexSettings,
+  type OverlayCell,
+} from "../lib/world/hexModel";
 import {
   applyEdit,
   axisRotate,
@@ -189,6 +197,11 @@ export function World(): React.JSX.Element {
   useSyncExternalStore(geometryStore.subscribe, geometryStore.getVersion);
   const geometry = geometryStore.all();
   const [streaming, setStreaming] = useState(false);
+  const [hexView, setHexView] = useState(false);
+  const [hexScene, setHexScene] = useState(false);
+  const [hexSettings, setHexSettings] = useState<HexSettings>(DEFAULT_HEX_SETTINGS);
+  /** What the 3D canvas asks each frame for the cells to draw; null when off. */
+  const hexSource = useRef<HexSource | null>(null);
   /** Set while a preload runs, so the button can offer to stop it. */
   const [preloading, setPreloading] = useState(false);
   const preloadCancel = useRef(false);
@@ -641,6 +654,14 @@ export function World(): React.JSX.Element {
     [regionEntries],
   );
 
+  const hexModel = useHexModel(regionEntries, geometry, hexSettings, hexView || hexScene);
+  useEffect(() => {
+    hexSource.current = hexScene ? (cam) => overlayCells(hexModel, cam) : null;
+    return () => {
+      hexSource.current = null;
+    };
+  }, [hexScene, hexModel]);
+
   // The streaming pass: every interval, decide what to load and unload from the
   // camera's position. The decision is pure (`streamingDecision`); the effect
   // just carries it out against the load caches and geometry state.
@@ -900,6 +921,26 @@ export function World(): React.JSX.Element {
                       Loads the nearest placed entities' models as you fly, swapping
                       LOD by distance.
                     </p>
+                    <label className="flex cursor-pointer items-center gap-2 px-4 py-1 text-xs hover:bg-surface-2/60">
+                      <input
+                        type="checkbox"
+                        checked={hexView}
+                        onChange={(event) => setHexView(event.target.checked)}
+                        className="accent-[#e0a458]"
+                      />
+                      <span className="text-ink">Hex view</span>
+                      <span className="ml-auto text-ink-dim">panel</span>
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2 px-4 py-1 text-xs hover:bg-surface-2/60">
+                      <input
+                        type="checkbox"
+                        checked={hexScene}
+                        onChange={(event) => setHexScene(event.target.checked)}
+                        className="accent-[#e0a458]"
+                      />
+                      <span className="text-ink">Hex view</span>
+                      <span className="ml-auto text-ink-dim">in the scene</span>
+                    </label>
                   </Section>
 
                   <Section title="Preload">
@@ -1072,11 +1113,13 @@ export function World(): React.JSX.Element {
           )}
         </aside>
 
+        <div className="relative flex min-h-0 min-w-0 flex-1">
           <Canvas
             entries={entries}
             index={index}
             geometry={geometry}
             cameraRef={cameraRef}
+            hexSource={hexSource}
             edits={edits}
             onEdit={onEdit}
             onEditCommit={onEditCommit}
@@ -1086,6 +1129,15 @@ export function World(): React.JSX.Element {
             shadowed={totalPlaced <= SHADOW_LIMIT}
             busy={busy}
           />
+          {hexView && (
+            <HexView
+              model={hexModel}
+              onSettings={setHexSettings}
+              cameraRef={cameraRef}
+              onClose={() => setHexView(false)}
+            />
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1241,6 +1293,9 @@ type CanvasEntry = {
   readonly placements: readonly Placed[];
 };
 
+/** Given the camera in game coordinates, the cells the loader would hold. */
+type HexSource = (camGta: readonly [number, number, number]) => OverlayCell[];
+
 type CanvasProps = {
   entries: readonly CanvasEntry[];
   /** `entries`, keyed for constant-time lookup. Built by the parent so the
@@ -1248,6 +1303,8 @@ type CanvasProps = {
   index: PlacementIndex<CanvasEntry>;
   geometry: readonly GeometryLoad[];
   cameraRef: { readonly current: CameraPose };
+  /** Asks for the hex cells to draw in the scene, or null while that is off. */
+  hexSource: { readonly current: HexSource | null };
   edits: ReadonlyMap<string, TransformEdit>;
   onEdit: (key: string, edit: TransformEdit) => void;
   onEditCommit: (key: string, before: TransformEdit, after: TransformEdit) => void;
@@ -1323,6 +1380,7 @@ function Canvas({
   index,
   geometry,
   cameraRef,
+  hexSource,
   edits,
   onEdit,
   onEditCommit,
@@ -1391,6 +1449,24 @@ function Canvas({
     const geometryGroupObject = new THREE.Group();
     world.add(geometryGroupObject);
     geometryGroup.current = geometryGroupObject;
+
+    // The hex cells the loader would hold, drawn on the ground in the same
+    // game-space group as the models. Drawn over everything (no depth test), or
+    // the terrain would hide the lines that sit on it.
+    const hexLines = new THREE.LineSegments(
+      new THREE.BufferGeometry(),
+      new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.9,
+        depthTest: false,
+      }),
+    );
+    hexLines.frustumCulled = false;
+    hexLines.renderOrder = 999;
+    hexLines.visible = false;
+    world.add(hexLines);
+    let hexAt = 0;
 
     // The placed content decides how big the grid is: a map a few thousand
     // units across still sits on a grid that covers it. The cell size stays
@@ -2002,6 +2078,15 @@ function Canvas({
       cameraRef.current.forward = [look.x, look.y, look.z];
 
       lodUpdate.current?.(camera.position);
+      // Rebuilt a few times a second, not per frame: the cells only change when
+      // the camera crosses one or the loaded set moves.
+      const hex = hexSource.current;
+      if (!hex) {
+        hexLines.visible = false;
+      } else if (now - hexAt > 250) {
+        hexAt = now;
+        updateHexLines(hexLines, hex(worldToGta([camera.position.x, camera.position.y, camera.position.z])));
+      }
       applyEdits();
       updateGizmo();
       // CPU time to submit the frame. Buffer and texture uploads for models
@@ -2091,6 +2176,8 @@ function Canvas({
       renderer.domElement.removeEventListener("click", onClick);
       renderer.domElement.removeEventListener("dblclick", onDoubleClick);
       disposeObject3D(geometryGroupObject);
+      hexLines.geometry.dispose();
+      (hexLines.material as THREE.Material).dispose();
       disposeObject3D(gizmo);
       // `disposeObject3D` just freed every shared buffer; forget them so the
       // rebuild that follows makes fresh ones instead of reusing dead entries.
@@ -2427,6 +2514,47 @@ function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
       return mesh;
     }),
   );
+}
+
+/**
+ * Refill the scene's hex overlay from a list of cells.
+ *
+ * One `LineSegments`, rewritten in place: six edges a cell, so a few hundred
+ * cells is a few thousand vertices and no allocation unless the list outgrows
+ * the buffer. Colour fades from bright at the camera to dim at the edge of the
+ * working set, the same fade the panel uses.
+ */
+function updateHexLines(lines: THREE.LineSegments, cells: readonly OverlayCell[]): void {
+  const vertices = cells.length * 12;
+  const geometry = lines.geometry;
+  let position = geometry.getAttribute("position") as THREE.BufferAttribute | undefined;
+  if (!position || position.count < vertices) {
+    const capacity = Math.max(vertices, 1024);
+    position = new THREE.BufferAttribute(new Float32Array(capacity * 3), 3);
+    geometry.setAttribute("position", position);
+    geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(capacity * 3), 3));
+  }
+  const color = geometry.getAttribute("color") as THREE.BufferAttribute;
+  const tint = new THREE.Color();
+  let at = 0;
+  for (const cell of cells) {
+    tint.setHSL(0.097, 0.85, 0.82 - 0.4 * Math.min(1, cell.shade));
+    for (let i = 0; i < 6; i += 1) {
+      const a = (Math.PI / 180) * (60 * i - 30);
+      const b = (Math.PI / 180) * (60 * (i + 1) - 30);
+      // Lifted a little so a line on the ground is not coplanar with it.
+      position.setXYZ(at, cell.x + cell.size * Math.cos(a), cell.y + cell.size * Math.sin(a), cell.z + 0.5);
+      color.setXYZ(at, tint.r, tint.g, tint.b);
+      at += 1;
+      position.setXYZ(at, cell.x + cell.size * Math.cos(b), cell.y + cell.size * Math.sin(b), cell.z + 0.5);
+      color.setXYZ(at, tint.r, tint.g, tint.b);
+      at += 1;
+    }
+  }
+  geometry.setDrawRange(0, vertices);
+  position.needsUpdate = true;
+  color.needsUpdate = true;
+  lines.visible = cells.length > 0;
 }
 
 /** The texture map for one part, resolved against the model's uploaded blocks. */
