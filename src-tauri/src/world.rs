@@ -796,7 +796,7 @@ pub async fn world_map(
                 Some(loaded.mlo_archetypes()),
                 Some(loaded.names()),
             )?;
-            crate::placements::encode(&map)
+            crate::placements::encode_with(&map, Some(&loaded.archetypes().all))
         };
         let started = std::time::Instant::now();
         let out = match &loaded.cache {
@@ -844,7 +844,10 @@ pub async fn world_map_file(
             Some(loaded.mlo_archetypes()),
             Some(loaded.names()),
         )?;
-        Ok(tauri::ipc::Response::new(crate::placements::encode(&map)?))
+        Ok(tauri::ipc::Response::new(crate::placements::encode_with(
+            &map,
+            Some(&loaded.archetypes().all),
+        )?))
     })
     .await
 }

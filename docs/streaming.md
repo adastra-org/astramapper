@@ -13,9 +13,11 @@ The zone-based redesign lives in [hex-streaming.md](hex-streaming.md).
    Out of view it is a candidate only within half its tier radius (below).
    Phases are strict tiers, in order: terrain, structures at full detail
    (`HD` / `ORPHAN_HD`), decals, vegetation, then the coarse `LOD` / `SLOD`
-   tiers. Terrain, decal and vegetation are recognised by whole-word tokens in
-   the archetype name (`streamPenalty`); anything else is decided by
-   `lodLevel`. A misclassified name only changes order, never drops an entity.
+   tiers. Decal and vegetation come from the archetype class the backend reads
+   from the `.ytyp` record (below); terrain, and anything the data does not
+   classify, from whole-word tokens in the archetype name (`streamPenalty`);
+   anything else is decided by `lodLevel`. A misclassification only changes
+   order, never drops an entity.
 3. **Request queue** (`src/lib/world/requestQueue.ts`). At most 12
    `world_model` requests are in flight; the rest wait. Every pass re-ranks the
    waiting ones against the camera's current position and drops those whose
@@ -125,11 +127,13 @@ The heap is not under the 300 MB target: `modelCache` keeps every model fetched
   terrain rows (`terrainRowsOf`, classified once per map) ahead of everything
   else, ignoring the map's box and the entity's radius, and never unloads them.
   Detail comes from the existing distance LOD swap, so far ground draws its
-  coarse bundle. Still open: it is by name tokens (#9), it costs memory with no
-  eviction (#6) and a draw call per piece (#10), and the phases are not yet
+  coarse bundle. Still open: it is by name tokens (terrain has no safe data
+  signal, see #9), it costs memory with no eviction (#6) and a draw call per piece (#10), and the phases are not yet
   applied per cell (needs the cell index, #3). Not measured against the base
   game yet: with strict tiers, structures wait for every terrain piece map-wide.
-- #9 Phase classification is by name tokens.
+- #9 Decal and vegetation are classified from archetype data (v0.1.6), terrain
+  is still by name; see [Archetype classes](#archetype-classes-9). Not done:
+  drawable shader names.
 - #10 Instanced per model, LOD bundle and part (v0.1.5), see below. Not yet
   measured against the base game in the app.
 
@@ -174,3 +178,38 @@ The harness also checks picking by instance id (200 of 200), an edit moving an
 entity's pick target, a band swap of every entity, and 4,600 -> 2,300 -> 4,600
 churn (draw calls identical after). It drives `InstancedModels` directly: the
 World view itself, with real data, needs the Tauri app and has not been run.
+
+## Archetype classes (#9)
+
+`world_map` already needs the archetype index (`Loaded::archetypes()`, one pass
+over every `.ytyp`, shared with the MLO expansion), so classifying costs nothing
+extra: `classify_archetype` (`crates/cw-core/src/filetypes/class.rs`) runs over
+159,375 archetypes in 2.4 ms. The class rides in the placement envelope's
+metadata as `nameClasses`, a `u8` per row of the name table (not a column, so the
+section order is untouched): `0` none, `1` decal, `2` vegetation. The frontend
+reads it with `PlacementColumns.archetypeClass(row)`; a placement carries
+`archetypeClass` only when it is non-zero, and an envelope without `nameClasses`
+(an old cache) decodes as no class. The map cache key mixes in
+`PLACEMENTS_FORMAT`, so existing cached maps are rebuilt once.
+
+What decides it, measured on the base game with
+`cargo run --release -p cw-core --example archetype_flags`:
+
+| Class | Rule | Evidence |
+|---|---|---|
+| vegetation | drawable or fragment with *Double-sided rendering* (`1 << 16`) | 206 of the 262 archetypes it hits are named as vegetation, and the other 56 are kelp, weeds, cattails, palmetto saplings the name tokens miss; it is on 0.07% of the rest |
+| decal | drawable with *Dont Cast Shadows* (`1 << 13`), thinnest bounding-box axis under 0.1 m, second-thinnest at least 1 m | 887 archetypes; beyond the 52 named decals they are puddles, runway paint, overlays, rail clips, dirt, and also thin glass and billboard planes (loaded in the decal phase, which is harmless) |
+| terrain | none | no flag separates it, and "large and flat" hits 444 of 932 terrain names but also 9,558 others (road splines, walls, wires). The ground layer is never unloaded, so a false positive would stay resident; terrain stays on its name |
+
+Precedence in `streamPenaltyOf`: terrain by name, then the data class, then the
+other name tokens, then the LOD tier. A class from the data overrides a name that
+disagrees.
+
+**Shader names are not reachable cheaply.** A drawable's shader names (the decal
+shaders are the best signal for decals and the only one for terrain) live in the
+model file, not in the `.ytyp`. Placement time knows archetype hashes only; to
+read shaders it would have to extract and parse every distinct model of every
+map (tens of thousands) inside `world_map`, which today reads all 4,597 maps in
+about 2 s. `WirePart.shader` already reaches the frontend with each compiled
+model, so the class could be refined after load (and a per-install table could be
+built by `bake`), but that is a separate piece of work, not done here.

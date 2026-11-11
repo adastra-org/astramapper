@@ -45,9 +45,11 @@ vegetation, then progressively coarser structure LODs.** The first version
 (strict tiers over entities already in range) is in `streamingDecision`; see
 [streaming.md](streaming.md). The terrain layer for the *whole* map is in (#5,
 v0.1.2: always wanted, never unloaded, low detail by the distance LOD swap);
-applying the phases per cell on top waits for the cell index (#3). Better
-classification than name tokens needs archetype flags and shader names from the
-backend (#9).
+applying the phases per cell on top waits for the cell index (#3). Decal
+and vegetation are classified from archetype flags and bounding boxes read in
+Rust (#9, see [streaming.md](streaming.md#archetype-classes-9)); terrain and
+anything the data does not classify still use name tokens, and drawable shader
+names are not reachable at placement time.
 
 ## Memory
 
