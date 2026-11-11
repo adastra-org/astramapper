@@ -16,10 +16,12 @@ hex zones outlined, terrain missing in the area already visited.
 
 ## Placement
 
-- [ ] Many structures are misplaced. Suspected: YMAP entity position, rotation
-  (quaternion convention) or scale, or parent/child entity offsets. Not confirmed.
-  Reproduce with the bridge at a spot with visible misplacement, then compare a
-  placement's decoded transform against CodeWalker's.
+- [~] Many structures are misplaced. Cause: a `CEntityDef` stores the *inverse*
+  of its drawn orientation (CodeWalker `Quaternion.Invert`) and the world view
+  drew the stored one, mirroring every rotation; interior entities of MLOs had
+  the same error; and the placement scale put `scaleZ` on the wrong axis. Fixed
+  in v0.3.6 (see "Notes on YMAP entity transforms" in `docs/formats.md`), pinned by
+  Rust and TS tests. Not ticked until checked in the app at fixed poses.
 
 ## Models and LOD
 

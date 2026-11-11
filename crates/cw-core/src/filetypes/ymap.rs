@@ -69,6 +69,19 @@ pub struct Entity {
 }
 
 impl Entity {
+    /// The entity's orientation in the world, as the reference computes it
+    /// (`YmapEntityDef` constructors, `YmapFile.cs`). A plain `CEntityDef`
+    /// stores the inverse of the orientation it draws with
+    /// (`Orientation = Quaternion.Invert(rotation)`); a `CMloInstanceDef` stores
+    /// it as is. `[x, y, z, w]`, in the game's Z-up space.
+    pub fn orientation(&self) -> [f32; 4] {
+        if self.is_mlo {
+            self.def.rotation
+        } else {
+            super::mlo::invert_orientation(self.def.rotation)
+        }
+    }
+
     /// `YmapEntityDef.LodInParentYmap`: flag bit 3.
     pub fn lod_in_parent_ymap(&self) -> bool {
         (self.def.flags >> 3) & 1 != 0
@@ -394,6 +407,8 @@ mod tests {
         put_f32(&mut d, 0x760 + 32, 1.0);
         put_f32(&mut d, 0x760 + 36, 2.0);
         put_f32(&mut d, 0x760 + 40, 3.0);
+        put_f32(&mut d, 0x760 + 48 + 2 * 4, 0.6); // rotation z
+        put_f32(&mut d, 0x760 + 48 + 3 * 4, 0.8); // rotation w
         put_i32(&mut d, 0x760 + 72, -1); // parentIndex root
         put_i32(&mut d, 0x760 + 84, 1); // lodLevel LOD
                                         // Entity 1: child, at offset 128.
@@ -424,5 +439,23 @@ mod tests {
         assert_eq!(ymap.entities[0].def.archetype_name, 0xAAAA);
         assert_eq!(ymap.entities[1].def.archetype_name, 0xBBBB);
         assert!(!ymap.entities[0].is_mlo);
+    }
+
+    /// `YmapEntityDef.Orientation` is `Quaternion.Invert` of the stored
+    /// rotation for a plain entity, and the stored one for an MLO instance.
+    #[test]
+    fn orientation_inverts_a_plain_entity_and_keeps_an_mlo_instance() {
+        let data = synthetic_ymap();
+        let mut r = ResourceReader::new(&data, data.len());
+        let meta = Meta::read(&mut r).expect("meta");
+        let mut ymap = read_ymap(&meta).expect("ymap");
+
+        assert_eq!(ymap.entities[0].def.rotation, [0.0, 0.0, 0.6, 0.8]);
+        let [x, y, z, w] = ymap.entities[0].orientation();
+        assert!(x == 0.0 && y == 0.0, "{x} {y}");
+        assert!((z + 0.6).abs() < 1e-6 && (w - 0.8).abs() < 1e-6, "{z} {w}");
+
+        ymap.entities[0].is_mlo = true;
+        assert_eq!(ymap.entities[0].orientation(), [0.0, 0.0, 0.6, 0.8]);
     }
 }
