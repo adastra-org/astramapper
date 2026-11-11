@@ -254,7 +254,7 @@ are not in the drawable's embedded dictionary, nor in the archetype's
 parent TXD chain (`CMapParentTxds` in the maps' `_manifest.ymf`, child ->
 parent dictionary), which `cw-core` does not read (only the generic tree). Until
 it does, a layer that does not resolve is blended as flat grey, which is the
-pale patches left on lowland ground. Next step: a typed `CMapParentTxds` reader
+pale patches left on lowland ground. Tracked in issue #32. Next step: a typed `CMapParentTxds` reader
 and the parent walk in `resolve_textures_with`.
 
 ### Notes on the resource layer
