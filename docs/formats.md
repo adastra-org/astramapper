@@ -504,6 +504,50 @@ Planned order: `YndFile`, then the rest. `YmapFile` and `YtypFile` are metadata
 containers, so they already open in the Explorer as trees; what these readers
 add is the typed model above the tree.
 
+### Notes on YMAP entity transforms
+
+Source: `YmapEntityDef` in `YmapFile.cs` (the three constructors), `MloInstanceData`,
+and `Quaternion.Multiply(Vector3)` in `Utils/Quaternions.cs`. Checked in v0.3.6
+after many structures were seen misplaced in the world view.
+
+**A `CEntityDef` stores the inverse of the orientation it draws with.**
+`Orientation = Quaternion.Invert(rotation)` unless the rotation is the identity.
+For a unit quaternion that is the conjugate, `(x, y, z, w) -> (-x, -y, -z, w)`:
+the same turn the other way round. Drawing the stored value as is mirrors every
+yaw, so a building turned 30 degrees sits at -30, and one turned 90 degrees
+looks right only if it is symmetric. Positions were never wrong, which is why
+this read as "some structures are off".
+
+**An MLO instance (`CMloInstanceDef`) stores its orientation as is.** Its
+constructor has the `Invert` commented out. The instance's `Position` and
+`Orientation` are used directly.
+
+**An interior entity composes the two.** For an entity of an MLO archetype
+(`MCEntityDef`): `Position = inst.Position + inst.Orientation * local.position`,
+`Orientation = inst.Orientation * Invert(local.rotation)`. Position composes with
+the instance's orientation as stored; only the entity's own quaternion is
+inverted. `cw_core::filetypes::mlo::expand_mlo_entities` and
+`invert_orientation` do this; `Entity::orientation()` in `ymap.rs` picks the
+rule for a map's own entities. `WorldEntity.rotation`, the placements envelope
+and everything in the app downstream of it carry the **drawn** orientation, so
+three.js gets it unchanged; `PLACEMENTS_FORMAT` was bumped to 3 so cached maps
+are rebuilt. The Explorer's `MapViewer` still lists the raw stored values, which
+is what the file says. In-app edits (`TransformEdit`) hold the drawn orientation
+too; a future `.ymap` writer has to invert it back.
+
+**Scale is `Vector3(scaleXY, scaleXY, scaleZ)` in game axes.** The matrix is
+composed inside the world group, whose `-PI / 2` turn about X is applied after,
+so the placement scale is `[scaleXY, scaleXY, scaleZ]`, not the `[scaleXY,
+scaleZ, scaleXY]` the first version used. Invisible while the two are equal
+(almost always), wrong for the entities that differ.
+
+**Not applied by the reference, so not applied here:** an MLO instance's scale
+on its interior; any archetype pivot or bounding-box offset (the box is only
+used for culling and bounds); `mapExtents` and the content flags (they decide
+what streams, never where a model sits); the parent entity's transform on a
+LOD child (parent/child links only choose which LOD is drawn; each entity has
+an absolute position).
+
 ### Notes on GXT2
 
 **GXT2 is the first file type to round-trip, so it is `done`.** Unlike the

@@ -1227,15 +1227,16 @@ function insertCandidate(
 export const STREAM_REGION_MARGIN = 300;
 
 /**
- * The three.js scale for one placement.
+ * The scale for one placement, in the game's Z-up axes.
  *
- * GTA V is Z-up and three.js is Y-up; the world renderer rotates the whole
- * world group `-PI / 2` about X to reconcile them, which maps a GTA axis
- * `(x, y, z)` onto world `(x, z, -y)`. The game's two scale values — uniform
- * in the ground plane, separate on Z — land on the world axes accordingly.
+ * Placement matrices are composed inside the world group, whose `-PI / 2` turn
+ * about X (Z-up game into three.js's Y-up world) is applied afterwards, so the
+ * matrix is in game space like the position and the quaternion are. The game's
+ * two scale values — uniform in the ground plane, separate on Z — are X, Y and
+ * Z there: `YmapEntityDef.Scale = Vector3(scaleXY, scaleXY, scaleZ)`.
  */
 export function placementScale(scaleXy: number, scaleZ: number): [number, number, number] {
-  return [scaleXy, scaleZ, scaleXy];
+  return [scaleXy, scaleXy, scaleZ];
 }
 
 /**

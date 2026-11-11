@@ -62,8 +62,12 @@ function entry(key: string, positions: readonly (readonly [number, number, numbe
  * wrappers are exercised by `src-tauri/tests/world_gate.rs`.
  */
 describe("placementScale", () => {
-  test("maps the ground-plane scale onto the world's X and Z", () => {
-    expect(placementScale(2, 5)).toEqual([2, 5, 2]);
+  // The matrix is composed in the world group's own space, which is the
+  // game's Z-up space (the group's -PI/2 turn is applied after), so the
+  // ground-plane scale is X and Y and the height scale is Z. `YmapEntityDef`
+  // builds `Vector3(scaleXY, scaleXY, scaleZ)`.
+  test("applies the ground-plane scale to X and Y and the height scale to Z", () => {
+    expect(placementScale(2, 5)).toEqual([2, 2, 5]);
   });
 
   test("keeps a uniform scale uniform", () => {

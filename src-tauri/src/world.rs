@@ -130,10 +130,11 @@ pub struct WorldEntity {
     /// world at its instance's transform.
     pub from_mlo: bool,
     pub position: [f32; 3],
-    /// The stored quaternion, as the file carries it — the world view hands it
-    /// to three.js unchanged. Whether the stored form needs conjugating to
-    /// match the reference's world orientation is open; the gate should pin it
-    /// before real geometry is drawn.
+    /// The orientation the entity is drawn with, in the game's Z-up space: the
+    /// reference's `YmapEntityDef.Orientation`, which is the inverse of the
+    /// quaternion a `CEntityDef` stores (an MLO instance's is stored as is, and
+    /// an interior entity's is the instance's times the inverse of its own).
+    /// The world view hands it to three.js unchanged.
     pub rotation: [f32; 4],
     pub scale_xy: f32,
     pub scale_z: f32,
@@ -1031,7 +1032,7 @@ pub fn flatten_ymap(
             is_mlo: entity.is_mlo,
             from_mlo: false,
             position: entity.def.position,
-            rotation: entity.def.rotation,
+            rotation: entity.orientation(),
             scale_xy: entity.def.scale_xy,
             scale_z: entity.def.scale_z,
             parent_index: entity.def.parent_index,
