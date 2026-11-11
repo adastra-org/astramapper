@@ -28,6 +28,8 @@ export const Kind = {
   Collision: 3,
   Paths: 4,
   Placements: 5,
+  Cells: 6,
+  CellData: 7,
 } as const;
 
 export type KindValue = (typeof Kind)[keyof typeof Kind];
@@ -48,15 +50,24 @@ export type Envelope = {
 /**
  * Read an envelope out of an IPC response.
  *
+ * `byteOffset` and `byteLength` read an envelope nested inside a larger buffer,
+ * as a cell reply carries its models. The nested one must start on the 16-byte
+ * boundary the outer envelope puts its sections on, which keeps every view
+ * inside it aligned.
+ *
  * Throws rather than returning an error value, deliberately: a malformed
  * envelope means the two halves of the wire format have diverged, which is a
  * bug in the build and not a condition any caller can sensibly recover from.
  */
-export function readEnvelope(buffer: ArrayBuffer): Envelope {
-  if (buffer.byteLength < HEADER_BYTES) {
-    throw new Error(`the envelope is ${buffer.byteLength} bytes, shorter than its header`);
+export function readEnvelope(
+  buffer: ArrayBuffer,
+  byteOffset = 0,
+  byteLength: number = buffer.byteLength - byteOffset,
+): Envelope {
+  if (byteLength < HEADER_BYTES) {
+    throw new Error(`the envelope is ${byteLength} bytes, shorter than its header`);
   }
-  const header = new DataView(buffer);
+  const header = new DataView(buffer, byteOffset, byteLength);
   if (header.getUint32(0, true) !== MAGIC) {
     throw new Error("the envelope does not start with AMB0");
   }
@@ -71,22 +82,24 @@ export function readEnvelope(buffer: ArrayBuffer): Envelope {
   const metaLength = header.getUint32(20, true);
   const tableOffset = header.getUint32(24, true);
 
-  if (metaOffset + metaLength > buffer.byteLength) {
+  if (metaOffset + metaLength > byteLength) {
     throw new Error("the envelope's metadata runs past its buffer");
   }
-  const metaText = new TextDecoder().decode(new Uint8Array(buffer, metaOffset, metaLength));
+  const metaText = new TextDecoder().decode(
+    new Uint8Array(buffer, byteOffset + metaOffset, metaLength),
+  );
   const meta: unknown = metaText.length > 0 ? JSON.parse(metaText) : null;
 
   const offsets = new Uint32Array(sectionCount);
   const lengths = new Uint32Array(sectionCount);
   for (let index = 0; index < sectionCount; index += 1) {
     const at = tableOffset + index * SECTION_ENTRY_BYTES;
-    if (at + SECTION_ENTRY_BYTES > buffer.byteLength) {
+    if (at + SECTION_ENTRY_BYTES > byteLength) {
       throw new Error("the envelope's section table runs past its buffer");
     }
     offsets[index] = header.getUint32(at, true);
     lengths[index] = header.getUint32(at + 4, true);
-    if (offsets[index]! + lengths[index]! > buffer.byteLength) {
+    if (offsets[index]! + lengths[index]! > byteLength) {
       throw new Error(`envelope section ${index} runs past its buffer`);
     }
   }
@@ -97,7 +110,7 @@ export function readEnvelope(buffer: ArrayBuffer): Envelope {
     sectionCount,
     section: (index) => {
       if (index < 0 || index >= sectionCount) return null;
-      return new Uint8Array(buffer, offsets[index], lengths[index]);
+      return new Uint8Array(buffer, byteOffset + offsets[index]!, lengths[index]);
     },
   };
 }

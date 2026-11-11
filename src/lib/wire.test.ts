@@ -158,3 +158,27 @@ describe("splitMips", () => {
     expect(splitMips(new Uint8Array([1, 2, 3]), [])).toEqual([]);
   });
 });
+
+describe("readEnvelope on a nested envelope", () => {
+  test("reads an envelope out of the middle of a larger buffer, sections still aligned", () => {
+    const inner = buildEnvelope(Kind.Model, '{"path":"in.ydr"}', [[7, 8, 9], [1, 2, 3, 4]]);
+    const outer = buildEnvelope(Kind.Placements, "{}", [[0], [...new Uint8Array(inner)]]);
+    const carrier = readEnvelope(outer);
+    const slice = carrier.section(1)!;
+    expect(slice.byteOffset % 16).toBe(0);
+
+    const nested = readEnvelope(outer, slice.byteOffset, slice.byteLength);
+    expect(nested.kind).toBe(Kind.Model);
+    expect(nested.meta).toEqual({ path: "in.ydr" });
+    expect([...nested.section(0)!]).toEqual([7, 8, 9]);
+    expect([...nested.section(1)!]).toEqual([1, 2, 3, 4]);
+    // The views are over the outer buffer, at 16-byte boundaries.
+    expect(nested.section(1)!.buffer).toBe(outer);
+    expect(nested.section(1)!.byteOffset % 16).toBe(0);
+  });
+
+  test("a nested range that is too short for a header is refused", () => {
+    const outer = buildEnvelope(Kind.Model, "{}", [[1, 2, 3]]);
+    expect(() => readEnvelope(outer, 0, 10)).toThrow();
+  });
+});

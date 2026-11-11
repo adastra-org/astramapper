@@ -327,8 +327,24 @@ export async function worldModelBuffer(path: string): Promise<ArrayBuffer> {
  * build of the wire format is told apart from a good one.
  */
 export function decodeModel(buffer: ArrayBuffer, path: string): WorldModel {
+  return decodeWorldModel(buffer, 0, buffer.byteLength, path);
+}
+
+/**
+ * Decode a compiled model's envelope into a `WorldModel`.
+ *
+ * `byteOffset` and `byteLength` pick the envelope out of a larger buffer: a cell
+ * reply carries each model as a nested envelope, byte for byte what `world_model`
+ * returns, and decodes it here without copying a section.
+ */
+export function decodeWorldModel(
+  buffer: ArrayBuffer,
+  byteOffset: number,
+  byteLength: number,
+  path: string,
+): WorldModel {
   const started = performance.now();
-  const envelope = readEnvelope(buffer);
+  const envelope = readEnvelope(buffer, byteOffset, byteLength);
   if (envelope.kind !== Kind.Model) {
     throw new Error(`${path} came back as envelope kind ${envelope.kind}, not a model`);
   }
@@ -351,7 +367,7 @@ export function decodeModel(buffer: ArrayBuffer, path: string): WorldModel {
 
   const decoded: WorldModel = {
     path: meta.path,
-    byteLength: buffer.byteLength,
+    byteLength,
     emptyDrawables: meta.emptyDrawables,
     drawables: meta.drawables.map((drawable) => ({
       ...drawable,

@@ -591,42 +591,51 @@ pub async fn world_model(
 ) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
     let caps = gpu.get();
-    blocking(move || {
-        // Same hit/miss split as `world_map`, and for a bigger spread: a
-        // compiled model is a texture chain and a mip copy, a cached one is a
-        // mapped read.
-        let compiled = std::sync::atomic::AtomicBool::new(false);
-        let compile = || {
-            compiled.store(true, std::sync::atomic::Ordering::Relaxed);
-            compile_world_model(
-                &path,
-                &loaded.keys,
-                &loaded.manager,
-                Some(loaded.archetypes()),
-                caps,
-            )
-        };
-        let started = std::time::Instant::now();
-        let out = match &loaded.cache {
-            Some(cache) => {
-                let key = crate::cache::model_key(&loaded.manager, &path, caps);
-                cache.get_or_insert_with(key, cw_cache::Kind::Model, compile)
-            }
-            None => compile(),
-        };
-        crate::perf::record(
-            if compiled.load(std::sync::atomic::Ordering::Relaxed) {
-                "world_model (miss)"
-            } else {
-                "world_model (hit)"
-            },
-            started.elapsed(),
-            out.as_ref().map(|b| b.len() as u64).unwrap_or(0),
-        );
-        out
-    })
-    .await
-    .map(tauri::ipc::Response::new)
+    blocking(move || model_envelope(&loaded, caps, &path))
+        .await
+        .map(tauri::ipc::Response::new)
+}
+
+/// One compiled model's envelope, from the cache when it can be.
+///
+/// Shared by [`world_model`] and the batched cell command, so a model that rode
+/// in one is a cache hit for the other.
+pub(crate) fn model_envelope(
+    loaded: &crate::explorer::Loaded,
+    caps: crate::textures::GpuCaps,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    // Same hit/miss split as `world_map`, and for a bigger spread: a compiled
+    // model is a texture chain and a mip copy, a cached one is a mapped read.
+    let compiled = std::sync::atomic::AtomicBool::new(false);
+    let compile = || {
+        compiled.store(true, std::sync::atomic::Ordering::Relaxed);
+        compile_world_model(
+            path,
+            &loaded.keys,
+            &loaded.manager,
+            Some(loaded.archetypes()),
+            caps,
+        )
+    };
+    let started = std::time::Instant::now();
+    let out = match &loaded.cache {
+        Some(cache) => {
+            let key = crate::cache::model_key(&loaded.manager, path, caps);
+            cache.get_or_insert_with(key, cw_cache::Kind::Model, compile)
+        }
+        None => compile(),
+    };
+    crate::perf::record(
+        if compiled.load(std::sync::atomic::Ordering::Relaxed) {
+            "world_model (miss)"
+        } else {
+            "world_model (hit)"
+        },
+        started.elapsed(),
+        out.as_ref().map(|b| b.len() as u64).unwrap_or(0),
+    );
+    out
 }
 
 /// What the WebView's GL context accepts, as it reported at world-mode start.
@@ -849,45 +858,52 @@ pub async fn world_map(
     game: State<'_, GameState>,
 ) -> Result<tauri::ipc::Response, String> {
     let loaded = game.loaded()?;
-    blocking(move || {
-        // The closure is what knows whether the cache answered, so it is what
-        // decides which span this call lands in. A hit and a miss are different
-        // work — 48x apart — and one average over both describes neither.
-        let flattened = std::sync::atomic::AtomicBool::new(false);
-        let compile = || {
-            flattened.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Both indexes are built once and kept: scanning every `.ytyp` is
-            // the expensive part, and only a map that places interiors needs it.
-            let map = read_world_map(
-                &path,
-                &loaded.keys,
-                &loaded.manager,
-                Some(loaded.mlo_archetypes()),
-                Some(loaded.names()),
-            )?;
-            crate::placements::encode_with(&map, Some(&loaded.archetypes().all))
-        };
-        let started = std::time::Instant::now();
-        let out = match &loaded.cache {
-            Some(cache) => {
-                let key = crate::cache::map_key(&loaded.manager, &path, loaded.typ_generation());
-                cache.get_or_insert_with(key, cw_cache::Kind::Map, compile)
-            }
-            None => compile(),
-        };
-        crate::perf::record(
-            if flattened.load(std::sync::atomic::Ordering::Relaxed) {
-                "world_map (miss)"
-            } else {
-                "world_map (hit)"
-            },
-            started.elapsed(),
-            out.as_ref().map(|b| b.len() as u64).unwrap_or(0),
-        );
-        out
-    })
-    .await
-    .map(tauri::ipc::Response::new)
+    blocking(move || map_envelope(&loaded, &path))
+        .await
+        .map(tauri::ipc::Response::new)
+}
+
+/// One map's placement envelope, from the cache when it can be. Shared by
+/// [`world_map`] and the cell index's build, which reads every map of a group.
+pub(crate) fn map_envelope(
+    loaded: &crate::explorer::Loaded,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    // The closure is what knows whether the cache answered, so it is what
+    // decides which span this call lands in. A hit and a miss are different
+    // work — 48x apart — and one average over both describes neither.
+    let flattened = std::sync::atomic::AtomicBool::new(false);
+    let compile = || {
+        flattened.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Both indexes are built once and kept: scanning every `.ytyp` is
+        // the expensive part, and only a map that places interiors needs it.
+        let map = read_world_map(
+            path,
+            &loaded.keys,
+            &loaded.manager,
+            Some(loaded.mlo_archetypes()),
+            Some(loaded.names()),
+        )?;
+        crate::placements::encode_with(&map, Some(&loaded.archetypes().all))
+    };
+    let started = std::time::Instant::now();
+    let out = match &loaded.cache {
+        Some(cache) => {
+            let key = crate::cache::map_key(&loaded.manager, path, loaded.typ_generation());
+            cache.get_or_insert_with(key, cw_cache::Kind::Map, compile)
+        }
+        None => compile(),
+    };
+    crate::perf::record(
+        if flattened.load(std::sync::atomic::Ordering::Relaxed) {
+            "world_map (miss)"
+        } else {
+            "world_map (hit)"
+        },
+        started.elapsed(),
+        out.as_ref().map(|b| b.len() as u64).unwrap_or(0),
+    );
+    out
 }
 
 /// Place a `.ymap` the user picked from disk, whether or not the install's

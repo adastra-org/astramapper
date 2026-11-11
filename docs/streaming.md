@@ -195,6 +195,12 @@ waits at most one window of transfers.
   signal, see #9), it costs memory with no eviction (#6) and a draw call per piece (#10), and the phases are not yet
   applied per cell (needs the cell index, #3). Not measured against the base
   game yet: with strict tiers, structures wait for every terrain piece map-wide.
+- #3 / #4 The base game's placements live in the backend's cell index and the
+  WebView holds only the working set (v0.2.1); see
+  [hex-streaming.md](hex-streaming.md). Models for a cell arrive with it in one
+  reply. F3: `cells held`, `cell placements held`, `cells pending`,
+  `cell working set reach (m)`, `cell pass`, `worldIndex build/cells ipc`,
+  `cell batch models`, `cell batch (MB)`. Not yet measured in a flight.
 - #9 Decal and vegetation are classified from archetype data (v0.1.6), terrain
   is still by name; see [Archetype classes](#archetype-classes-9). Not done:
   drawable shader names.

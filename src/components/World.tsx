@@ -24,6 +24,10 @@ import { formatHash } from "../lib/format";
 import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
+import { worldIndexBuild, worldIndexCells } from "../lib/world/cellApi";
+import { adaptiveGridOf, gridBounds, type CellGrid, type DecodedBatch } from "../lib/world/cellData";
+import { travelHeading, type Heading } from "../lib/world/cellPlan";
+import { CellStreamer } from "../lib/world/cellStreamer";
 import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
 import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
@@ -34,6 +38,7 @@ import {
 import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
 import { HexView } from "./world/HexView";
+import { CellPanel } from "./world/CellPanel";
 import { InstancedModels } from "./world/instancedModels";
 import { PlacedList } from "./world/PlacedList";
 import {
@@ -70,7 +75,6 @@ import {
   worldDlcYmaps,
   worldMap,
   worldMapFile,
-  worldMapsInGroup,
   worldStatus,
   systemMemory,
   worldToGta,
@@ -129,6 +133,51 @@ const modelCache = new ModelCache<WorldModel>();
 let modelBudget = FALLBACK_MODEL_BUDGET;
 /** How often the budget is recomputed from available memory. */
 const MODEL_BUDGET_REFRESH_MS = 10_000;
+/**
+ * The backend index's partition and the cells held around the camera, outside
+ * the component for the reason the caches above are: re-entering World keeps
+ * the cells it had instead of rebuilding the index and fetching them again.
+ */
+let baseGrid: CellGrid | null = null;
+/** Where a failed cell fetch is reported; set by the mounted component. */
+let reportCellError: (cause: unknown) => void = () => {};
+/** Whether a placement is still held by some cell, so a model that arrives for
+ *  one that was evicted meanwhile is dropped rather than left orphaned. */
+let placementHeld: (mapKey: string, entityIndex: number) => boolean = () => true;
+
+/** Names whose model the frontend holds, or knows does not exist. */
+function knownNames(): string[] {
+  const names: string[] = [];
+  for (const [name, path] of assetCache) {
+    if (path === null || modelCache.has(path)) names.push(name);
+  }
+  return names;
+}
+
+/** A cell batch arrived: the models and names ride into the same caches the
+ *  per-entity path fills, so the loader finds them already there. */
+function applyCellBatch(batch: DecodedBatch): void {
+  let anchor: [number, number, number] | null = null;
+  for (const cell of batch.cells) {
+    const part = cell.parts[0];
+    if (part && part.columns.length > 0) {
+      anchor = [part.columns.x(0), part.columns.y(0), part.columns.z(0)];
+      break;
+    }
+  }
+  for (const asset of batch.assets) assetCache.set(asset.name, asset.path);
+  for (const [path, model] of batch.models) modelCache.set(path, model, anchor);
+  perf.gauge("cell batch models", batch.models.size);
+  perf.gauge("cell batch (MB)", Math.round(batch.bytes / 1048576));
+}
+
+const cellStreamer = new CellStreamer({
+  fetch: worldIndexCells,
+  known: knownNames,
+  onBatch: applyCellBatch,
+  onError: (cause) => reportCellError(cause),
+});
+
 /** Model reads already on their way, by path, so two entities sharing a model
  *  that are both out at once share one `world_model` call. */
 const modelInFlight = new Map<string, Promise<WorldModel>>();
@@ -203,6 +252,11 @@ export function World(): React.JSX.Element {
   const [checkedGroups, setCheckedGroups] = useState<ReadonlySet<string>>(new Set());
   const [pages, setPages] = useState<Readonly<Record<string, YmapListingPage>>>({});
   const [placed, setPlaced] = useState<readonly WorldMap[]>([]);
+  /** The backend index's partition of the base game, once built. */
+  const [grid, setGrid] = useState<CellGrid | null>(baseGrid);
+  // Re-render when the held cells change.
+  useSyncExternalStore(cellStreamer.subscribe, cellStreamer.getVersion);
+  const cellEntries = cellStreamer.entries();
   const [busy, setBusy] = useState(false);
   /** A load with a known count, for the progress bar. */
   const [progress, setProgress] = useState<{
@@ -237,12 +291,15 @@ export function World(): React.JSX.Element {
   // caches are module-level so they survive a tab switch: re-entering World
   // re-streams without re-resolving names or re-decoding geometry.
   const pending = useRef(new Set<string>());
+  /** Where the camera was at the last streaming pass, and which way it went. */
+  const lastCamera = useRef<[number, number] | null>(null);
+  const lastHeading = useRef<Heading | null>(null);
   /** The camera's world position, written by the canvas every frame. */
   /** Where the camera is and which way it faces, written by the canvas each
    *  frame. The streamer reads both: the position bounds what is a candidate,
    *  the direction decides which candidates the batch takes first. */
   const cameraRef = useRef<CameraPose>({ position: null, forward: null });
-  /** Base maps are loaded once per mount, not every time status re-resolves. */
+  /** The base index is built once per mount, not every time status re-resolves. */
   const autoLoadedBase = useRef(false);
 
   useEffect(() => {
@@ -256,6 +313,9 @@ export function World(): React.JSX.Element {
           modelCache.clear();
           geometryStore.clear();
           clearWorldCaches();
+          baseGrid = null;
+          cellStreamer.setGrid(null);
+          setGrid(null);
         }
         modelTierReady = openModelTier(loaded.gameOpen ? loaded.installStamp : null).catch(
           () => undefined,
@@ -309,43 +369,28 @@ export function World(): React.JSX.Element {
     }
   }, []);
 
-  /** Load every base-game map, the world the install ships. Runs once per
-   *  mount so the world is never an empty grid; the reads are batched and the
-   *  canvas rebuilds once, not per map. */
-  const loadBaseMaps = useCallback(async () => {
+  /** Index the base game, the world the install ships, in the backend. Runs
+   *  once per mount so the world is never an empty grid. Nothing but the
+   *  partition comes back: the placements stay in Rust and arrive a cell at a
+   *  time around the camera. */
+  const loadBaseIndex = useCallback(async () => {
+    if (baseGrid) {
+      setGrid(baseGrid);
+      cellStreamer.setGrid(baseGrid);
+      return;
+    }
     setBusy(true);
+    setProgress({ done: 0, total: 0, label: "Indexing base maps" });
     try {
-      const maps = await worldMapsInGroup("base");
-      const all: WorldMap[] = [];
-      setProgress({ done: 0, total: maps.length, label: "Loading base maps" });
-      // Chunks bound concurrency so hundreds of parses do not all start at
-      // once; the single `setPlaced` below means the canvas rebuilds once.
-      for (let i = 0; i < maps.length; i += LOAD_BATCH) {
-        const chunk = maps.slice(i, i + LOAD_BATCH);
-        // oxlint-disable-next-line no-await-in-loop
-        const results = await Promise.allSettled(chunk.map((m) => worldMap(m.path)));
-        const done = results.filter((r) => r.status === "fulfilled").length;
-        for (const result of results) {
-          if (result.status === "fulfilled") all.push(result.value);
-        }
-        setProgress((current) =>
-          current ? { ...current, done: current.done + done } : current,
-        );
-      }
-      // Deduplicated through a set, not `next.some(...)`: the base group is
-      // 4,601 maps, and a linear scan per map is ten million path comparisons
-      // to add a list that is already distinct.
-      setPlaced((current) => {
-        const seen = new Set(current.map((m) => m.path));
-        const next = [...current];
-        for (const map of all) {
-          if (seen.has(map.path)) continue;
-          seen.add(map.path);
-          next.push(map);
-        }
-        return next;
-      });
-      setError(null);
+      const built = await worldIndexBuild("base");
+      baseGrid = built;
+      setGrid(built);
+      cellStreamer.setGrid(built);
+      setError(
+        built.failed > 0
+          ? `${built.failed} of ${built.maps + built.failed} base maps could not be read`
+          : null,
+      );
     } catch (cause) {
       setError(String(cause));
     } finally {
@@ -375,13 +420,13 @@ export function World(): React.JSX.Element {
     }
   }, []);
 
-  // A game folder is open: fill the world with the base game maps, so entering
-  // World is never an empty grid. Once per mount; the demo stays for no-folder.
+  // A game folder is open: index the base game, so entering World is never an
+  // empty grid. Once per mount; the demo stays for no-folder.
   useEffect(() => {
     if (!status?.gameOpen || autoLoadedBase.current) return;
     autoLoadedBase.current = true;
-    void loadBaseMaps();
-  }, [status?.gameOpen, loadBaseMaps]);
+    void loadBaseIndex();
+  }, [status?.gameOpen, loadBaseIndex]);
 
   const deselect = useCallback(() => setSelected(null), []);
 
@@ -455,7 +500,8 @@ export function World(): React.JSX.Element {
         },
         rank !== undefined,
       );
-      if (loaded) {
+      // The cell may have been evicted while the model was on its way.
+      if (loaded && placementHeld(mapKey, entity.index)) {
         modelCache.touch(loaded.modelPath, entity.position);
         geometryStore.add({ mapKey, entity, ...loaded });
       }
@@ -605,9 +651,18 @@ export function World(): React.JSX.Element {
     }));
   }, [demo, placed]);
 
+  /** Every map the scan sees: the cells held around the camera, and the maps
+   *  placed one by one. The canvas draws markers for the latter only. */
+  const allEntries = useMemo(
+    () => (cellEntries.length > 0 ? [...cellEntries, ...entries] : entries),
+    [cellEntries, entries],
+  );
+
   const totalPlaced = useMemo(
-    () => entries.reduce((sum, entry) => sum + entry.placements.length, 0),
-    [entries],
+    () =>
+      (grid?.placements ?? 0) +
+      entries.reduce((sum, entry) => sum + entry.placements.length, 0),
+    [grid, entries],
   );
 
   /**
@@ -616,9 +671,10 @@ export function World(): React.JSX.Element {
    * a streaming candidate. See `placementIndex.ts` for why the scans it
    * replaces could not stay: the ones below run per frame while a gizmo drags.
    */
-  const index = useMemo(() => createPlacementIndex(entries), [entries]);
+  const index = useMemo(() => createPlacementIndex(allEntries), [allEntries]);
+  placementHeld = (mapKey, entityIndex) => index.placement(mapKey, entityIndex) !== undefined;
 
-  const selectedPlacement: { entry: (typeof entries)[number]; placement: Placed } | null =
+  const selectedPlacement: { entry: (typeof allEntries)[number]; placement: Placed } | null =
     useMemo(() => {
       if (!selected) return null;
       const entry = index.entry(selected.mapKey);
@@ -634,14 +690,16 @@ export function World(): React.JSX.Element {
   // The scheduler's view of the placed maps: each one's declared streaming box
   // and its entities. The demo has no assets to stream, so it stays out.
   const regionEntries: readonly RegionEntry[] = useMemo(
-    () =>
-      placed.map((map) => ({
+    () => [
+      ...cellEntries,
+      ...placed.map((map) => ({
         key: map.path,
         extentsMin: map.extentsMin,
         extentsMax: map.extentsMax,
         placements: map.entities,
       })),
-    [placed],
+    ],
+    [cellEntries, placed],
   );
 
   // Two probes that say where a slow IPC call spends its time. `world_asset`
@@ -690,7 +748,15 @@ export function World(): React.JSX.Element {
     [regionEntries],
   );
 
-  const hexModel = useHexModel(regionEntries, geometry, hexSettings, hexView || hexScene);
+  const backendGrid = useMemo(() => (grid ? adaptiveGridOf(grid) : null), [grid]);
+  const frame = useMemo(() => (grid ? gridBounds(grid) : null), [grid]);
+  const hexModel = useHexModel(
+    regionEntries,
+    geometry,
+    hexSettings,
+    hexView || hexScene,
+    backendGrid,
+  );
   useEffect(() => {
     hexSource.current = hexScene ? (cam) => overlayCells(hexModel, cam) : null;
     return () => {
@@ -708,8 +774,30 @@ export function World(): React.JSX.Element {
     if (!streaming || !status?.gameOpen) return;
     const interval = window.setInterval(async () => {
       const cam = cameraRef.current.position;
-      if (!cam || regionEntries.length === 0) return;
+      if (!cam) return;
       const cameraGta = worldToGta(cam);
+      // Which cells to hold comes first: it decides what the scan below can see.
+      // Cells that left the working set take their geometry with them.
+      const look = cameraRef.current.forward;
+      const lookXY: Heading | null = look
+        ? [worldToGta(look)[0], worldToGta(look)[1]]
+        : null;
+      const here: [number, number] = [cameraGta[0], cameraGta[1]];
+      const heading = travelHeading(lastCamera.current, here, lookXY, lastHeading.current);
+      lastCamera.current = here;
+      lastHeading.current = heading;
+      const leftBehind = perf.measure("cell pass", () =>
+        cellStreamer.update(here[0], here[1], heading),
+      );
+      if (leftBehind.length > 0) {
+        geometryStore.removeMany(leftBehind.map((row) => keyFor(row.mapKey, row.entityIndex)));
+      }
+      const cells = cellStreamer.stats();
+      perf.gauge("cells held", cells.cells);
+      perf.gauge("cell placements held", cells.placements);
+      perf.gauge("cells pending", cells.pending);
+      perf.gauge("cell working set reach (m)", Math.round(cells.reach));
+      if (regionEntries.length === 0) return;
       const loadedKeys = new Set(
         geometryStore.all().map((g) => keyFor(g.mapKey, g.entity.index)),
       );
@@ -771,6 +859,18 @@ export function World(): React.JSX.Element {
     }, STREAM_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [streaming, status?.gameOpen, regionEntries, regionByKey, index, loadEntity]);
+
+  // The working set's placement budget is the Hex view's slider.
+  useEffect(() => {
+    cellStreamer.setBudget(hexSettings.budget);
+  }, [hexSettings.budget]);
+
+  useEffect(() => {
+    reportCellError = (cause) => setError(String(cause));
+    return () => {
+      reportCellError = () => {};
+    };
+  }, []);
 
   // The model cache's budget follows the machine's available memory (#6).
   useEffect(() => {
@@ -1029,6 +1129,7 @@ export function World(): React.JSX.Element {
               )}
 
               <Section title={`Placed (${totalPlaced.toLocaleString()})`}>
+                {grid && <CellPanel grid={grid} stats={cellStreamer.stats()} />}
                 <PlacedList
                   entries={entries}
                   selectedKey={selected?.mapKey ?? null}
@@ -1190,6 +1291,7 @@ export function World(): React.JSX.Element {
           </div>
           <Canvas
             entries={entries}
+            baseFrame={frame}
             index={index}
             geometry={geometry}
             cameraRef={cameraRef}
@@ -1372,6 +1474,8 @@ type HexSource = (camGta: readonly [number, number, number]) => OverlayCell[];
 
 type CanvasProps = {
   entries: readonly CanvasEntry[];
+  /** Where to frame the camera when no placed map says: the base index's footprint. */
+  baseFrame: { readonly center: [number, number, number]; readonly radius: number } | null;
   /** `entries`, keyed for constant-time lookup. Built by the parent so the
    *  canvas, the selection panel and the streamer all read one index. */
   index: PlacementIndex<CanvasEntry>;
@@ -1475,6 +1579,7 @@ type GizmoAxis = {
  */
 function Canvas({
   entries,
+  baseFrame,
   index,
   geometry,
   cameraRef,
@@ -1574,7 +1679,10 @@ function Canvas({
     // The placed content decides how big the grid is: a map a few thousand
     // units across still sits on a grid that covers it. The cell size stays
     // constant (10 units) while the total grows with the content's radius.
-    const { center, radius } = boundsOfColumns(entries.map((entry) => entry.placements));
+    const { center, radius } =
+      entries.length === 0 && baseFrame
+        ? baseFrame
+        : boundsOfColumns(entries.map((entry) => entry.placements));
     const gridSize = Math.max(400, Math.ceil((radius * 2.4) / 100) * 100);
     const grid = new THREE.GridHelper(
       gridSize,
@@ -2341,7 +2449,7 @@ function Canvas({
     // `cameraRef` is a stable ref owned by the parent; writing its `position`
     // here is how the streamer reads the camera, not a reactive dependency.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, shadowed, onSelect]);
+  }, [entries, baseFrame, shadowed, onSelect]);
 
   // Streamed geometry: sync only the loads that changed into the geometry
   // group. Building every loaded model's meshes from scratch on each pass made
@@ -2474,7 +2582,7 @@ function Canvas({
     return () => cancelAnimationFrame(frame);
     // `entries` is in the deps because the setup effect tears the geometry
     // group down when the placed maps change; this effect must repopulate it.
-  }, [geometry, entries, shadowed, syncTick]);
+  }, [geometry, entries, baseFrame, shadowed, syncTick]);
 
   // Apply the selection to the outline without rebuilding the scene.
   useEffect(() => {
@@ -2512,7 +2620,7 @@ function Canvas({
   return (
     <div className="relative min-h-0 flex-1">
       <div ref={host} className="min-h-0 h-full bg-surface-0" />
-      {totalCount(entries) === 0 && !busy && (
+      {totalCount(entries) === 0 && !baseFrame && !busy && (
         <p className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-ink-dim">
           The world is empty. Place a map to fill it.
         </p>

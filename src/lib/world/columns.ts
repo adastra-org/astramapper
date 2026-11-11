@@ -159,6 +159,11 @@ export class PlacementColumns {
     return this.byEntity!.size;
   }
 
+  /** The arrays and tables this is laid over, for building from several of them. */
+  get raw(): ColumnSource {
+    return this.source;
+  }
+
   /** One row as a `Placed`: the only place an object is made. */
   at(row: number): Placed {
     const s = this.source;
@@ -192,6 +197,110 @@ export class PlacementColumns {
     const row = this.rowOf(entityIndex);
     return row < 0 ? undefined : this.at(row);
   }
+}
+
+/**
+ * One set of columns from several, rows in the order given.
+ *
+ * What a map is when its placements arrive a cell at a time: each cell's part
+ * of it is its own `PlacementColumns`, and the streamer wants the map whole.
+ * The name and LOD tables are rebuilt, because the parts come from different
+ * replies and so number their names differently; a name is the same name when
+ * its hash is, as in `columnsFromPlaced`.
+ *
+ * Copies every row once. Nothing about the parts is kept, so they can be
+ * dropped as soon as this returns.
+ */
+export function mergeColumns(parts: readonly PlacementColumns[]): PlacementColumns {
+  if (parts.length === 1) return parts[0]!;
+  let count = 0;
+  for (const part of parts) count += part.length;
+
+  const names: string[] = [];
+  const nameHashes: number[] = [];
+  const nameClasses: number[] = [];
+  const lodLevels: string[] = [];
+  const nameSlotOf = new Map<string, number>();
+  const lodSlotOf = new Map<string, number>();
+
+  const indexes = new Uint32Array(count);
+  const nameSlots = new Uint32Array(count);
+  const flags = new Uint8Array(count);
+  const positions = new Float32Array(count * 3);
+  const rotations = new Float32Array(count * 4);
+  const scaleXy = new Float32Array(count);
+  const scaleZ = new Float32Array(count);
+  const parents = new Int32Array(count);
+  const lodSlots = new Uint16Array(count);
+  const lodDists = new Float32Array(count);
+  const children = new Uint32Array(count);
+
+  let at = 0;
+  for (const part of parts) {
+    const src = part.raw;
+    // This part's slots, translated once per distinct name rather than per row.
+    const nameMap = new Uint32Array(src.names.length);
+    for (let slot = 0; slot < src.names.length; slot += 1) {
+      const name = src.names[slot]!;
+      const hash = src.nameHashes[slot] ?? 0;
+      const key = `${hash}:${name}`;
+      let merged = nameSlotOf.get(key);
+      if (merged === undefined) {
+        merged = names.length;
+        names.push(name);
+        nameHashes.push(hash);
+        nameClasses.push(src.nameClasses?.[slot] ?? 0);
+        nameSlotOf.set(key, merged);
+      }
+      nameMap[slot] = merged;
+    }
+    const lodMap = new Uint16Array(src.lodLevels.length);
+    for (let slot = 0; slot < src.lodLevels.length; slot += 1) {
+      const label = src.lodLevels[slot]!;
+      let merged = lodSlotOf.get(label);
+      if (merged === undefined) {
+        merged = lodLevels.length;
+        lodLevels.push(label);
+        lodSlotOf.set(label, merged);
+      }
+      lodMap[slot] = merged;
+    }
+
+    const n = part.length;
+    indexes.set(src.indexes.subarray(0, n), at);
+    flags.set(src.flags.subarray(0, n), at);
+    positions.set(src.positions.subarray(0, n * 3), at * 3);
+    rotations.set(src.rotations.subarray(0, n * 4), at * 4);
+    scaleXy.set(src.scaleXy.subarray(0, n), at);
+    scaleZ.set(src.scaleZ.subarray(0, n), at);
+    parents.set(src.parents.subarray(0, n), at);
+    lodDists.set(src.lodDists.subarray(0, n), at);
+    children.set(src.children.subarray(0, n), at);
+    for (let row = 0; row < n; row += 1) {
+      nameSlots[at + row] = nameMap[src.nameSlots[row]!]!;
+      lodSlots[at + row] = lodMap[src.lodSlots[row]!]!;
+    }
+    at += n;
+  }
+
+  return new PlacementColumns({
+    count,
+    indexes,
+    nameSlots,
+    flags,
+    positions,
+    rotations,
+    scaleXy,
+    scaleZ,
+    parents,
+    lodSlots,
+    lodDists,
+    children,
+    names,
+    nameHashes,
+    nameClasses,
+    lodLevels,
+  });
 }
 
 /** Columns from a list of `Placed`: the demo world, and tests. */

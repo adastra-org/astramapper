@@ -36,8 +36,16 @@ Long-term items are GitHub issues in this repo and on the Ad Astra Roadmap.
 - [~] Hex view in the real-time 3D scene. Implemented as an overlay of the cells
   the loader would hold; not yet checked in the app.
 - [~] Cells variable by zone (large in the countryside, small in the city).
-  Adaptive mode prototyped, defaults still to choose from real density (#4).
-- [ ] Zone streaming on hex cells in the backend (#3).
+  The backend index (`cells.rs`) uses the same adaptive partition as the Hex
+  view, and its defaults (finest 100 m, split above 1,000, budget 50,000) were
+  chosen from the real base game's density, measured with the gate (#4). Not yet
+  flown in the running app.
+- [~] Zone streaming on hex cells in the backend (#3). `world_index_build` /
+  `world_index_cells` serve a cell's placements and its models in one reply, and
+  the frontend holds only the working set plus a prefetch ring along the travel
+  direction. Verified by cargo tests, TS tests and the gate against the base game;
+  the fly-across-the-map check (no spike while cells stream in and out) is still
+  to do in the app.
 - [ ] Dynamic memory budget with SSD offload (#6).
 - [ ] Persistent cache and precompile in onboarding (#7).
 

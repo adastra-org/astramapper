@@ -47,7 +47,7 @@ export const DEFAULT_HEX_SETTINGS: HexSettings = {
   size: 250,
   radius: 4,
   fine: 100,
-  threshold: 2000,
+  threshold: 1000,
   budget: 50_000,
 };
 
@@ -63,6 +63,12 @@ export type HexModel = {
   /** Uniform cells, with the resident tally on them. */
   readonly uniform: ReadonlyMap<number, HexCell> | null;
   readonly adaptive: AdaptiveGrid | null;
+  /**
+   * The adaptive grid is the backend index's own partition, so cell size and
+   * threshold are what it was built with and the sliders for them do nothing.
+   * Only the budget is live: it is what the streamer holds.
+   */
+  readonly backend: boolean;
 };
 
 type Placements = { readonly placements: PlacementColumns };
@@ -77,6 +83,8 @@ export function useHexModel(
   geometry: readonly GeometryLoad[],
   settings: HexSettings,
   enabled: boolean,
+  /** The backend index's partition, when there is one: it replaces the local build. */
+  backendGrid: AdaptiveGrid | null = null,
 ): HexModel {
   const { mode, size, fine, threshold } = settings;
 
@@ -89,6 +97,7 @@ export function useHexModel(
   );
   const adaptiveBase = useMemo(() => {
     if (!enabled || mode !== "adaptive") return null;
+    if (backendGrid) return backendGrid;
     const started = performance.now();
     let total = 0;
     for (const entry of entries) total += entry.placements.length;
@@ -108,7 +117,7 @@ export function useHexModel(
     const grid = buildAdaptive(xs, ys, zs, adaptiveSizes(fine), threshold);
     perf.record("hex build (adaptive)", performance.now() - started);
     return grid;
-  }, [enabled, mode, entries, fine, threshold]);
+  }, [enabled, mode, entries, fine, threshold, backendGrid]);
 
   // The resident tally is recounted whenever the loaded set changes.
   const uniform = useMemo(() => {
@@ -131,7 +140,11 @@ export function useHexModel(
     return adaptiveBase;
   }, [adaptiveBase, geometry]);
 
-  return useMemo(() => ({ settings, uniform, adaptive }), [settings, uniform, adaptive]);
+  const backend = backendGrid !== null;
+  return useMemo(
+    () => ({ settings, uniform, adaptive, backend }),
+    [settings, uniform, adaptive, backend],
+  );
 }
 
 /** One cell as the 3D overlay draws it. */
