@@ -34,6 +34,7 @@ import {
 import { preloadableCount, preloadTargets } from "../lib/world/preload";
 import { BakePanel } from "./world/BakePanel";
 import { HexView } from "./world/HexView";
+import { InstancedModels } from "./world/instancedModels";
 import { PlacedList } from "./world/PlacedList";
 import {
   DEFAULT_HEX_SETTINGS,
@@ -1425,12 +1426,16 @@ function boxSlotOf(map: BoxMap | undefined, entityIndex: number): BoxSlot | unde
   return mesh ? { mesh, slot: map.slot[row]! } : undefined;
 }
 
-/** The LOD-swap state for one loaded entity. */
+/**
+ * The LOD-swap state for one loaded entity. Its meshes are not here: it is an
+ * instance in the `InstancedModels` pools of its model, under `key`.
+ */
 type LoadedGeometry = {
-  readonly holder: THREE.Group;
-  /** The model whose shared geometry this holder's meshes draw. */
+  readonly key: string;
+  /** The model whose shared geometry this entity's instances draw. */
   readonly model: WorldModel;
-  readonly lodGroups: readonly THREE.Mesh[][];
+  /** How many LOD bundles the model has. */
+  readonly lodCount: number;
   readonly lodDist: number;
   readonly positionGta: readonly [number, number, number];
   /** Which entity this is, so a raycast hit and an unload can name it without
@@ -1438,13 +1443,10 @@ type LoadedGeometry = {
   readonly mapKey: string;
   readonly entityIndex: number;
   /**
-   * The LOD bundle currently visible, or -1 before the first pass.
+   * The LOD bundle currently drawn, or -1 before the first pass.
    *
-   * Kept so the per-frame swap only touches meshes when the band actually
-   * changes. Writing `visible` on every mesh of every bundle of every loaded
-   * entity, every frame, is hundreds of thousands of property writes a second
-   * once a preload has filled the world — for a value that is almost always
-   * the one already there.
+   * Kept so the per-frame swap only moves the instance between pools when the
+   * band actually changes, which is almost never between two frames.
    */
   band: number;
 };
@@ -1493,6 +1495,10 @@ function Canvas({
   /** Map key → entity index → the instanced mesh and slot holding its marker. */
   const boxByMap = useRef(new Map<string, BoxMap>());
   const loadedState = useRef(new Map<string, LoadedGeometry>());
+  /** Every resident entity's instance in the per-model instanced meshes. */
+  const instanced = useRef<InstancedModels | null>(null);
+  /** The edit last written into the instanced meshes, per key, to write only changes. */
+  const appliedEdits = useRef(new Map<string, TransformEdit>());
   const lodUpdate = useRef<((cameraWorld: THREE.Vector3) => void) | null>(null);
   /** Bumped to run the geometry sync again when it left models for a later frame. */
   const [syncTick, setSyncTick] = useState(0);
@@ -1536,6 +1542,7 @@ function Canvas({
     const geometryGroupObject = new THREE.Group();
     world.add(geometryGroupObject);
     geometryGroup.current = geometryGroupObject;
+    instanced.current = new InstancedModels(geometryGroupObject, shadowed);
 
     // The hex cells the loader would hold, drawn on the ground in the same
     // game-space group as the models. Drawn over everything (no depth test), or
@@ -2102,27 +2109,11 @@ function Canvas({
           };
         }
       }
-      // Straight off the loaded set, and only the LOD bundle on screen. The
-      // flat list this replaces had to be rebuilt from a full traverse every
-      // time anything loaded; a click is rare enough to pay for itself here.
-      // Testing only the visible band is also the correct behaviour — a hidden
-      // LOD used to be selectable through the one being drawn.
-      for (const loaded of loadedState.current.values()) {
-        const meshes = loaded.lodGroups[loaded.band];
-        if (!meshes) continue;
-        for (const mesh of meshes) {
-          const hits = raycaster.intersectObject(mesh, false);
-          const first = hits[0];
-          if (!first) continue;
-          if (!best || first.distance < best.distance) {
-            best = {
-              mapKey: loaded.mapKey,
-              entityIndex: loaded.entityIndex,
-              distance: first.distance,
-            };
-          }
-        }
-      }
+      // Instanced meshes: the hit's instance id resolves to its entity, and only
+      // the LOD bundle on screen is tested (a hidden one used to be selectable
+      // through the one being drawn).
+      const instanceHit = instanced.current?.pick(raycaster);
+      if (instanceHit && (!best || instanceHit.distance < best.distance)) best = instanceHit;
       return best;
     };
 
@@ -2145,9 +2136,11 @@ function Canvas({
 
     const clock = new THREE.Clock();
     let frame = 0;
+    let ticks = 0;
     let lastFrameAt = 0;
     const tick = () => {
       frame = requestAnimationFrame(tick);
+      ticks += 1;
       // Wall clock between two `tick` entries, not the time spent inside one.
       // What matters is whether the display is keeping up, and the gap is what
       // says so — work done outside this callback still lands in it.
@@ -2211,6 +2204,15 @@ function Canvas({
       perf.gauge("geometries", renderer.info.memory.geometries);
       perf.gauge("textures", renderer.info.memory.textures);
       perf.gauge("resident models", loadedState.current.size);
+      // The instanced meshes are what the models cost in draw calls: one per
+      // model, LOD bundle and part, not one per entity. Walking every pool is
+      // not free, so it is sampled, not per frame.
+      if (ticks % 15 === 0 && instanced.current) {
+        const stats = instanced.current.stats();
+        perf.gauge("instanced meshes drawn", stats.drawn);
+        perf.gauge("instanced meshes", stats.meshes);
+        perf.gauge("instances drawn", stats.instances);
+      }
       // The whole callback in JS. `frame` is the wall gap between callbacks and
       // `render` only the submit call: if this is small while `frame` is large,
       // the time is outside our JS (GPU back-pressure, compositing); if it is
@@ -2218,20 +2220,22 @@ function Canvas({
       perf.record("tick js", performance.now() - now);
     };
 
-    /** Lay every live edit onto its box instance or geometry holder. */
+    /**
+     * Lay every live edit onto its marker instance or its model instance.
+     *
+     * A model instance is rewritten only when its edit object changed (edits
+     * are immutable, so identity says so), because every write re-uploads the
+     * pool's matrix buffer. An edit that went away puts the entity back on its
+     * placement. A marker is still rewritten every frame, as it always was.
+     */
     const applyEdits = (): void => {
+      const models = instanced.current;
+      const applied = appliedEdits.current;
       for (const [key, edit] of editsRef.current) {
-        const loaded = loadedState.current.get(key);
-        if (loaded) {
-          loaded.holder.position.set(edit.position[0], edit.position[1], edit.position[2]);
-          loaded.holder.quaternion.set(
-            edit.rotation[0],
-            edit.rotation[1],
-            edit.rotation[2],
-            edit.rotation[3],
-          );
-          const [sx, sy, sz] = placementScale(edit.scaleXy, edit.scaleZ);
-          loaded.holder.scale.set(sx, sy, sz);
+        if (models?.has(key)) {
+          if (applied.get(key) === edit) continue;
+          applied.set(key, edit);
+          models.setMatrix(key, editMatrix(edit));
         } else {
           // Not loaded, so the edit rides on the marker box instead. Only this
           // branch needs the key taken apart, and only for entities under edit.
@@ -2239,6 +2243,14 @@ function Canvas({
           if (!target) continue;
           setInstanceTransform(boxSlotOf(boxByMap.current.get(target.mapKey), target.entityIndex), edit);
         }
+      }
+      if (applied.size === 0) return;
+      for (const key of applied.keys()) {
+        if (editsRef.current.has(key)) continue;
+        applied.delete(key);
+        const target = parseKey(key);
+        const base = target && indexRef.current.placement(target.mapKey, target.entityIndex);
+        if (base) models?.setMatrix(key, editMatrix(editOf(base)));
       }
     };
 
@@ -2290,13 +2302,17 @@ function Canvas({
       renderer.domElement.removeEventListener("wheel", onWheel);
       renderer.domElement.removeEventListener("click", onClick);
       renderer.domElement.removeEventListener("dblclick", onDoubleClick);
+      instanced.current?.dispose();
+      instanced.current = null;
+      appliedEdits.current = new Map();
       disposeObject3D(geometryGroupObject);
       hexLines.geometry.dispose();
       (hexLines.material as THREE.Material).dispose();
       disposeObject3D(gizmo);
-      // `disposeObject3D` just freed every shared buffer; forget them so the
-      // rebuild that follows makes fresh ones instead of reusing dead entries.
-      sharedModels.clear();
+      // The instanced meshes only borrowed the shared buffers, so free those
+      // here and forget them: the rebuild that follows makes fresh ones instead
+      // of reusing dead entries.
+      disposeAllShared();
       worldGroup.current = null;
       geometryGroup.current = null;
       highlight.current = null;
@@ -2345,11 +2361,9 @@ function Canvas({
     // and a profile does not.
     const syncStarted = performance.now();
 
+    const models = instanced.current;
+    if (!models) return;
     const cameraWorld = new THREE.Vector3();
-    const matrix = new THREE.Matrix4();
-    const position = new THREE.Vector3();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3();
 
     const previous = loadedState.current;
     const next = new Map<string, LoadedGeometry>();
@@ -2379,29 +2393,12 @@ function Canvas({
         continue;
       }
       built += 1;
-      const holder = new THREE.Group();
-      position.set(load.entity.position[0], load.entity.position[1], load.entity.position[2]);
-      quaternion.set(
-        load.entity.rotation[0],
-        load.entity.rotation[1],
-        load.entity.rotation[2],
-        load.entity.rotation[3],
-      );
-      const [sx, sy, sz] = placementScale(load.entity.scaleXy, load.entity.scaleZ);
-      scale.set(sx, sy, sz);
-      matrix.compose(position, quaternion, scale);
-      holder.applyMatrix4(matrix);
-      holder.updateMatrixWorld();
-
-      const lodGroups = buildLodMeshes(load, shadowed);
-      for (const meshes of lodGroups) {
-        for (const mesh of meshes) holder.add(mesh);
-      }
-      group.add(holder);
+      const lods = acquireShared(load.model).lods;
+      models.add(key, load.mapKey, load.entity.index, lods, editMatrix(load.entity));
       next.set(key, {
-        holder,
+        key,
         model: load.model,
-        lodGroups,
+        lodCount: lods.length,
         lodDist: load.entity.lodDist,
         positionGta: load.entity.position,
         mapKey: load.mapKey,
@@ -2411,7 +2408,7 @@ function Canvas({
 
       // The entity now has real geometry; its box marker must step aside. A
       // model that produced no geometry keeps its marker rather than vanishing.
-      if (lodGroups.length > 0) {
+      if (lods.length > 0) {
         setInstanceScale(boxSlotOf(boxByMap.current.get(load.mapKey), load.entity.index), 0);
       }
     }
@@ -2426,10 +2423,10 @@ function Canvas({
     if (carried !== previous.size) {
       for (const [key, loaded] of previous) {
         if (next.has(key)) continue;
-        // The meshes only borrow their geometry and material, so detaching
-        // them is not disposing them: the last entity of a model to go does.
-        loaded.holder.clear();
-        group.remove(loaded.holder);
+        // Leaving the pools is not disposing the geometry and material they
+        // share: the last entity of a model to go does that.
+        models.remove(key);
+        appliedEdits.current.delete(key);
         releaseShared(loaded.model);
         const placement = indexRef.current.placement(loaded.mapKey, loaded.entityIndex);
         if (placement) {
@@ -2446,21 +2443,18 @@ function Canvas({
       cameraWorld.copy(cameraPosition);
       const [cx, cy, cz] = worldToGta([cameraWorld.x, cameraWorld.y, cameraWorld.z]);
       for (const loaded of next.values()) {
-        const { lodGroups, lodDist, positionGta } = loaded;
+        const { lodCount, lodDist, positionGta } = loaded;
         const dist = Math.hypot(
           positionGta[0] - cx,
           positionGta[1] - cy,
           positionGta[2] - cz,
         );
-        const band = lodBandForDistance(dist, lodDist, lodGroups.length);
-        // A distance check per entity per frame is cheap; writing `visible` on
-        // every mesh of every bundle is not, and the band a model is in almost
-        // never changes between two frames.
+        const band = lodBandForDistance(dist, lodDist, lodCount);
+        // A distance check per entity per frame is cheap; moving an instance
+        // between pools is not, and the band an entity is in almost never
+        // changes between two frames.
         if (band === loaded.band) continue;
-        for (let i = 0; i < lodGroups.length; i += 1) {
-          const visible = i === band;
-          for (const mesh of lodGroups[i]) mesh.visible = visible;
-        }
+        models.setBand(loaded.key, band);
         loaded.band = band;
       }
     };
@@ -2618,17 +2612,39 @@ function buildSharedParts(
   return parts;
 }
 
-/** The three.js meshes for one load's LODs, one array per bundle. */
-function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
-  const shared = acquireShared(load.model);
-  return shared.lods.map((parts) =>
-    parts.map((part) => {
-      const mesh = new THREE.Mesh(part.geometry, part.material);
-      mesh.castShadow = shadowed;
-      mesh.receiveShadow = shadowed;
-      return mesh;
-    }),
-  );
+/** Free every shared geometry and material, and forget them. */
+function disposeAllShared(): void {
+  for (const shared of sharedModels.values()) {
+    for (const lod of shared.lods) {
+      for (const part of lod) {
+        part.geometry.dispose();
+        part.material.dispose();
+      }
+    }
+  }
+  sharedModels.clear();
+}
+
+const editScratch = {
+  matrix: new THREE.Matrix4(),
+  position: new THREE.Vector3(),
+  quaternion: new THREE.Quaternion(),
+  scale: new THREE.Vector3(),
+};
+
+/** The game-space matrix for a transform: a placement's, or an edit's. The result is reused. */
+function editMatrix(t: {
+  readonly position: readonly [number, number, number];
+  readonly rotation: readonly [number, number, number, number];
+  readonly scaleXy: number;
+  readonly scaleZ: number;
+}): THREE.Matrix4 {
+  const { matrix, position, quaternion, scale } = editScratch;
+  position.set(t.position[0], t.position[1], t.position[2]);
+  quaternion.set(t.rotation[0], t.rotation[1], t.rotation[2], t.rotation[3]);
+  const [sx, sy, sz] = placementScale(t.scaleXy, t.scaleZ);
+  scale.set(sx, sy, sz);
+  return matrix.compose(position, quaternion, scale);
 }
 
 /**

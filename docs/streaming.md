@@ -29,6 +29,8 @@ The zone-based redesign lives in [hex-streaming.md](hex-streaming.md).
    frame, so a burst of arrivals is not one upload spike.
 6. **Shared geometry.** `BufferGeometry` and material are built once per model
    and shared by every entity of it, refcounted, freed with the last entity.
+7. **Instanced drawing** (v0.1.5, `src/components/world/instancedModels.ts`).
+   One `InstancedMesh` per model, LOD bundle and part; see below.
 
 ## Range LODs and the view (#1, v0.1.4)
 
@@ -128,4 +130,47 @@ The heap is not under the 300 MB target: `modelCache` keeps every model fetched
   applied per cell (needs the cell index, #3). Not measured against the base
   game yet: with strict tiers, structures wait for every terrain piece map-wide.
 - #9 Phase classification is by name tokens.
-- #10 One draw call per entity (1,000-4,600 in the city).
+- #10 Instanced per model, LOD bundle and part (v0.1.5), see below. Not yet
+  measured against the base game in the app.
+
+## Instanced models (#10)
+
+An entity is no longer a `Group` of `Mesh`es but an *instance* in the pools of
+its model. A pool is one `InstancedMesh` for one shared part.
+
+- **Draw calls** are one per (model, drawn bundle, part) with entities in it,
+  not one per entity. F3: `draw calls`, `instanced meshes drawn`,
+  `instanced meshes`, `instances drawn` (sampled every 15 frames).
+- **Slots** (`src/lib/world/instanceSlots.ts`) are dense, `0..count-1`. Removing
+  swaps the last live slot into the hole, so nothing drawn is a hole. A free
+  list would leave holes that still cost vertex work (parked as zero scale).
+- **Capacity** starts at 4, doubles when full, halves when under a quarter full
+  (hysteresis). Resizing makes a new `InstancedMesh` over the same shared
+  geometry and material: only the matrices are re-uploaded.
+- **Band swap** moves the entity from the old bundle's pools to the new one's;
+  pools are kept while any entity of the model is resident, so it is a slot move,
+  not a mesh build. An entity not yet banded is drawn by none.
+- **Picking** raycasts the drawn pools; `instanceId` -> slot owner -> entity.
+- **Edits** rewrite the entity's slot, only when the edit object changed. The
+  matrix is stored per entity, so an edit survives a band swap and a reload; an
+  edit that goes away puts the entity back on its placement.
+- **Culling** is per pool by bounding sphere: grown on add/move, rebuilt after
+  as many removals/moves as instances (amortised constant). A stale sphere is
+  only too big. Trade-off: a pool spread over the whole map is rarely culled, so
+  triangles drawn rise while draw calls fall.
+
+Measured in a browser harness (`scripts/instancing-harness/`, run `bun run dev`
+and open `/scripts/instancing-harness/index.html`): 4,600 entities, 273 models,
+two bundles of two parts, random over 2 km, software-rendered WebGL, camera
+overhead.
+
+| | per-entity meshes | instanced |
+|---|---|---|
+| draw calls | 7,915 | 1,090 |
+| triangles | 94,980 | 110,376 |
+| render (ms, software GL) | 54.9 | 24.5 |
+
+The harness also checks picking by instance id (200 of 200), an edit moving an
+entity's pick target, a band swap of every entity, and 4,600 -> 2,300 -> 4,600
+churn (draw calls identical after). It drives `InstancedModels` directly: the
+World view itself, with real data, needs the Tauri app and has not been run.
