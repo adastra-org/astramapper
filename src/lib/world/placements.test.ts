@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
+import type { PlacementColumns } from "./columns";
 import { decodePlacements } from "./placements";
+
+/** Every row as a `Placed`, for assertions about the whole map. */
+function rowsOf(columns: PlacementColumns) {
+  return Array.from({ length: columns.length }, (_, at) => columns.at(at));
+}
 import { ENVELOPE_VERSION, Kind, readEnvelope } from "../wire";
 
 /**
@@ -158,8 +164,8 @@ describe("decodePlacements", () => {
       ),
     );
 
-    expect(map.entities).toHaveLength(1);
-    expect(map.entities[0]).toEqual({
+    expect(map.entities.length).toBe(1);
+    expect(map.entities.at(0)).toEqual({
       index: 4,
       name: "prop_b",
       nameHash: 22,
@@ -199,7 +205,7 @@ describe("decodePlacements", () => {
       ),
     );
 
-    expect(map.entities.map((e) => [e.isMlo, e.fromMlo])).toEqual([
+    expect(rowsOf(map.entities).map((e) => [e.isMlo, e.fromMlo])).toEqual([
       [false, false],
       [true, false],
       [false, true],
@@ -212,7 +218,7 @@ describe("decodePlacements", () => {
       readEnvelope(envelopeOf([row({ parentIndex: -1 }), row({ parentIndex: 3 })])),
     );
 
-    expect(map.entities.map((e) => e.parentIndex)).toEqual([-1, 3]);
+    expect(rowsOf(map.entities).map((e) => e.parentIndex)).toEqual([-1, 3]);
   });
 
   test("resolves repeated names through the table rather than repeating them", () => {
@@ -222,14 +228,14 @@ describe("decodePlacements", () => {
       ),
     );
 
-    expect(map.entities.map((e) => e.name)).toEqual(["prop_a", "prop_b", "prop_a"]);
-    expect(map.entities.map((e) => e.nameHash)).toEqual([11, 22, 11]);
+    expect(rowsOf(map.entities).map((e) => e.name)).toEqual(["prop_a", "prop_b", "prop_a"]);
+    expect(rowsOf(map.entities).map((e) => e.nameHash)).toEqual([11, 22, 11]);
   });
 
   test("an empty map decodes to no entities rather than throwing", () => {
     const map = decodePlacements(readEnvelope(envelopeOf([])));
 
-    expect(map.entities).toEqual([]);
+    expect(map.entities.length).toBe(0);
     expect(map.entityCount).toBe(0);
   });
 
@@ -243,10 +249,10 @@ describe("decodePlacements", () => {
       readEnvelope(envelopeOf([row({ nameIndex: 99, lodLevel: 99 })])),
     );
 
-    expect(map.entities).toHaveLength(1);
-    expect(map.entities[0]!.name).toBe("");
-    expect(map.entities[0]!.nameHash).toBe(0);
-    expect(map.entities[0]!.lodLevel).toBe("");
+    expect(map.entities.length).toBe(1);
+    expect(map.entities.at(0).name).toBe("");
+    expect(map.entities.at(0).nameHash).toBe(0);
+    expect(map.entities.at(0).lodLevel).toBe("");
   });
 
   test("refuses an envelope that is not a placement list", () => {

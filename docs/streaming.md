@@ -61,7 +61,10 @@ What did **not** move:
 
 ## Known limits
 
-- #2 Placements are JS objects: the dominant cost today.
+- #2 Placements are now columnar (`src/lib/world/columns.ts`): typed-array
+  views over the response buffer, a `Placed` built only on demand. The F3
+  numbers above (827 MB heap, 320 ms long tasks) are from before this change and
+  need re-measuring in a release build; #8 depends on that re-measure.
 - #8 IPC latency floor per call.
 - #5 Terrain is only loaded inside each entity's own radius, not map-wide.
 - #9 Phase classification is by name tokens.

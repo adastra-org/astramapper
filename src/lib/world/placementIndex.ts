@@ -18,25 +18,24 @@
  * problem in `PreloadTarget` and dodges it by carrying the `Placed` itself; the
  * sites that only have an index could not.
  *
- * So the lookup is built once per `entries` change and shared. It is a nested
- * map rather than one keyed by `keyFor` on purpose: a flat map would build a
- * concatenated string per placement, which at the base game's ~693,000
- * placements is 693,000 strings to hold for the lifetime of the index. The
- * nested form keys on the map path once and on a number after that.
+ * Placements are columnar (`columns.ts`), so the index holds no per-placement
+ * state at all: a map is resolved by key and an entity index by
+ * `PlacementColumns.rowOf`, which is free for an unfiltered map and builds one
+ * number-to-number table, once, for a map whose indexes are sparse. The `Placed`
+ * it returns is made on the spot for that one lookup.
  *
- * The index is a *view*, not a copy — it holds the same `Placed` objects the
- * entries do, so building one costs a map insert per placement and no
- * duplication. It is only valid for the entries it was built from; rebuild it
- * whenever they change.
+ * It is only valid for the entries it was built from; rebuild it whenever they
+ * change.
  */
 import type { Placed } from "../world";
+import type { PlacementColumns } from "./columns";
 
 /** The least an entry must be for the index to key it. Both `CanvasEntry` and
  *  `RegionEntry` satisfy it, so one index serves the renderer and the
  *  scheduler. */
 export type IndexableEntry = {
   readonly key: string;
-  readonly placements: readonly Placed[];
+  readonly placements: PlacementColumns;
 };
 
 export type PlacementIndex<E extends IndexableEntry = IndexableEntry> = {
@@ -64,7 +63,6 @@ export function createPlacementIndex<E extends IndexableEntry>(
   entries: readonly E[],
 ): PlacementIndex<E> {
   const byMap = new Map<string, E>();
-  const byIndex = new Map<string, Map<number, Placed>>();
   let placements = 0;
 
   for (const entry of entries) {
@@ -72,18 +70,12 @@ export function createPlacementIndex<E extends IndexableEntry>(
     // winners: `find` keeps the first entry, so the placements must too.
     if (byMap.has(entry.key)) continue;
     byMap.set(entry.key, entry);
-    const inMap = new Map<number, Placed>();
-    for (const placement of entry.placements) {
-      if (inMap.has(placement.index)) continue;
-      inMap.set(placement.index, placement);
-      placements += 1;
-    }
-    byIndex.set(entry.key, inMap);
+    placements += entry.placements.distinct;
   }
 
   return {
     entry: (mapKey) => byMap.get(mapKey),
-    placement: (mapKey, entityIndex) => byIndex.get(mapKey)?.get(entityIndex),
+    placement: (mapKey, entityIndex) => byMap.get(mapKey)?.placements.find(entityIndex),
     maps: byMap.size,
     placements,
   };

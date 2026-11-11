@@ -25,6 +25,7 @@ import { formatHash } from "../lib/format";
 import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
+import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
 import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
 import {
@@ -44,7 +45,7 @@ import {
 import {
   applyEdit,
   axisRotate,
-  boundsOf,
+  boundsOfColumns,
   clearWorldCaches,
   colorForLod,
   commitHistory,
@@ -558,7 +559,11 @@ export function World(): React.JSX.Element {
   // When no game folder is open, the same renderer shows the demo plaza so the
   // pipeline is visible (and testable) without the game.
   const demo = useMemo(
-    () => (status && !status.gameOpen ? demoWorld() : null),
+    () => {
+      if (!status || status.gameOpen) return null;
+      const world = demoWorld();
+      return { name: world.name, placements: columnsFromPlaced(world.placements) };
+    },
     [status],
   );
 
@@ -1329,7 +1334,7 @@ function GroupRow({
 type CanvasEntry = {
   readonly key: string;
   readonly name: string;
-  readonly placements: readonly Placed[];
+  readonly placements: PlacementColumns;
 };
 
 /** Given the camera in game coordinates, the cells the loader would hold. */
@@ -1376,6 +1381,29 @@ type BoxSlot = {
   readonly mesh: THREE.InstancedMesh;
   readonly slot: number;
 };
+
+/**
+ * One map's markers, by row, in typed arrays. A `Map<number, BoxSlot>` of one
+ * object per placement was ~100 MB of heap on its own over the base game; this
+ * is two integers per row and the entity index → row step is the columns'.
+ */
+type BoxMap = {
+  readonly columns: PlacementColumns;
+  /** Which of `meshes` holds the row's instance. */
+  readonly bucket: Uint16Array;
+  /** The instance id within that mesh. */
+  readonly slot: Uint32Array;
+  readonly meshes: THREE.InstancedMesh[];
+};
+
+/** The marker for an entity index, or `undefined`. Built on the spot. */
+function boxSlotOf(map: BoxMap | undefined, entityIndex: number): BoxSlot | undefined {
+  if (!map) return undefined;
+  const row = map.columns.rowOf(entityIndex);
+  if (row < 0) return undefined;
+  const mesh = map.meshes[map.bucket[row]!];
+  return mesh ? { mesh, slot: map.slot[row]! } : undefined;
+}
 
 /** The LOD-swap state for one loaded entity. */
 type LoadedGeometry = {
@@ -1443,7 +1471,7 @@ function Canvas({
   const geometryGroup = useRef<THREE.Group | null>(null);
   const highlight = useRef<THREE.LineSegments | null>(null);
   /** Map key → entity index → the instanced mesh and slot holding its marker. */
-  const boxByMap = useRef(new Map<string, Map<number, BoxSlot>>());
+  const boxByMap = useRef(new Map<string, BoxMap>());
   const loadedState = useRef(new Map<string, LoadedGeometry>());
   const lodUpdate = useRef<((cameraWorld: THREE.Vector3) => void) | null>(null);
   /** Bumped to run the geometry sync again when it left models for a later frame. */
@@ -1510,7 +1538,7 @@ function Canvas({
     // The placed content decides how big the grid is: a map a few thousand
     // units across still sits on a grid that covers it. The cell size stays
     // constant (10 units) while the total grows with the content's radius.
-    const { center, radius } = boundsOf(entries.flatMap((entry) => entry.placements));
+    const { center, radius } = boundsOfColumns(entries.map((entry) => entry.placements));
     const gridSize = Math.max(400, Math.ceil((radius * 2.4) / 100) * 100);
     const grid = new THREE.GridHelper(
       gridSize,
@@ -1535,53 +1563,72 @@ function Canvas({
     highlight.current = outline;
 
     const unitGeometry = new THREE.BoxGeometry(1, 1, 1);
-    const boxMeshes: { mesh: THREE.InstancedMesh; mapKey: string; indexes: number[] }[] = [];
-    const boxes = new Map<string, Map<number, BoxSlot>>();
+    const boxMeshes: {
+      mesh: THREE.InstancedMesh;
+      mapKey: string;
+      columns: PlacementColumns;
+      rows: Uint32Array;
+    }[] = [];
+    const boxes = new Map<string, BoxMap>();
 
     // One InstancedMesh per map-and-colour bucket. Three.js gives instanced
     // meshes a single material, so buckets are how the LOD colours show; the
     // parallel `indexes` list maps each instance back to its entity for the
     // raycast, and `boxes` maps it the other way for the marker updates.
     for (const entry of entries) {
-      const byColour = new Map<number, Placed[]>();
-      for (const placement of entry.placements) {
-        const colour = colorForLod(placement.lodLevel, placement.isMlo);
-        const bucket = byColour.get(colour) ?? [];
-        bucket.push(placement);
-        byColour.set(colour, bucket);
+      const cols = entry.placements;
+      const byColour = new Map<number, number[]>();
+      for (let row = 0; row < cols.length; row += 1) {
+        const colour = colorForLod(cols.lodLevel(row), cols.isMlo(row));
+        const bucket = byColour.get(colour);
+        if (bucket) bucket.push(row);
+        else byColour.set(colour, [row]);
       }
-      const slots = new Map<number, BoxSlot>();
-      boxes.set(entry.key, slots);
-      for (const [colour, placements] of byColour) {
+      const boxMap: BoxMap = {
+        columns: cols,
+        bucket: new Uint16Array(cols.length),
+        slot: new Uint32Array(cols.length),
+        meshes: [],
+      };
+      boxes.set(entry.key, boxMap);
+      for (const [colour, rowsInBucket] of byColour) {
         const material = new THREE.MeshStandardMaterial({
           color: colour,
           roughness: 0.9,
           metalness: 0,
           side: THREE.DoubleSide,
         });
-        const mesh = new THREE.InstancedMesh(unitGeometry, material, placements.length);
+        const mesh = new THREE.InstancedMesh(unitGeometry, material, rowsInBucket.length);
         const matrix = new THREE.Matrix4();
         const position = new THREE.Vector3();
         const quaternion = new THREE.Quaternion();
         const scale = new THREE.Vector3();
-        const indexes: number[] = [];
-        for (let i = 0; i < placements.length; i += 1) {
-          const p = placements[i];
-          position.set(p.position[0], p.position[1], p.position[2]);
-          quaternion.set(p.rotation[0], p.rotation[1], p.rotation[2], p.rotation[3]);
-          const [sx, sy, sz] = placementScale(p.scaleXy, p.scaleZ);
+        const rows = Uint32Array.from(rowsInBucket);
+        const bucketId = boxMap.meshes.length;
+        boxMap.meshes.push(mesh);
+        for (let i = 0; i < rows.length; i += 1) {
+          const row = rows[i]!;
+          position.set(cols.x(row), cols.y(row), cols.z(row));
+          const r = row * 4;
+          quaternion.set(
+            cols.rotations[r]!,
+            cols.rotations[r + 1]!,
+            cols.rotations[r + 2]!,
+            cols.rotations[r + 3]!,
+          );
+          const [sx, sy, sz] = placementScale(cols.scaleXy(row), cols.scaleZ(row));
           scale.set(sx, sy, sz);
           matrix.compose(position, quaternion, scale);
           mesh.setMatrixAt(i, matrix);
-          indexes.push(p.index);
-          slots.set(p.index, { mesh, slot: i });
+          boxMap.bucket[row] = bucketId;
+          boxMap.slot[row] = i;
         }
         mesh.instanceMatrix.needsUpdate = true;
         mesh.castShadow = shadowed;
         mesh.receiveShadow = shadowed;
         mesh.computeBoundingSphere();
         world.add(mesh);
-        boxMeshes.push({ mesh, mapKey: entry.key, indexes });
+        boxMeshes.push({ mesh, mapKey: entry.key, columns: cols, rows });
       }
     }
     boxByMap.current = boxes;
@@ -2022,13 +2069,17 @@ function Canvas({
       pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       let best: Hit | null = null;
-      for (const { mesh, mapKey, indexes } of boxMeshes) {
+      for (const { mesh, mapKey, columns, rows } of boxMeshes) {
         const hits = raycaster.intersectObject(mesh, false);
         const first = hits[0];
         if (!first) continue;
         if (first.instanceId === undefined) continue;
         if (!best || first.distance < best.distance) {
-          best = { mapKey, entityIndex: indexes[first.instanceId], distance: first.distance };
+          best = {
+            mapKey,
+            entityIndex: columns.entityIndex(rows[first.instanceId]!),
+            distance: first.distance,
+          };
         }
       }
       // Straight off the loaded set, and only the LOD bundle on screen. The
@@ -2161,7 +2212,7 @@ function Canvas({
           // branch needs the key taken apart, and only for entities under edit.
           const target = parseKey(key);
           if (!target) continue;
-          setInstanceTransform(boxByMap.current.get(target.mapKey)?.get(target.entityIndex), edit);
+          setInstanceTransform(boxSlotOf(boxByMap.current.get(target.mapKey), target.entityIndex), edit);
         }
       }
     };
@@ -2336,7 +2387,7 @@ function Canvas({
       // The entity now has real geometry; its box marker must step aside. A
       // model that produced no geometry keeps its marker rather than vanishing.
       if (lodGroups.length > 0) {
-        setInstanceScale(boxByMap.current.get(load.mapKey)?.get(load.entity.index), 0);
+        setInstanceScale(boxSlotOf(boxByMap.current.get(load.mapKey), load.entity.index), 0);
       }
     }
 
@@ -2358,7 +2409,7 @@ function Canvas({
         const placement = indexRef.current.placement(loaded.mapKey, loaded.entityIndex);
         if (placement) {
           setInstanceTransform(
-            boxByMap.current.get(loaded.mapKey)?.get(loaded.entityIndex),
+            boxSlotOf(boxByMap.current.get(loaded.mapKey), loaded.entityIndex),
             placement,
           );
         }

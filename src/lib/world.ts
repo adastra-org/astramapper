@@ -9,6 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import * as perf from "./perf";
+import type { PlacementColumns } from "./world/columns";
 import { decodePlacements } from "./world/placements";
 import { asFloat32, asUint16, asUint32, Kind, readEnvelope, splitMips } from "./wire";
 
@@ -74,7 +75,8 @@ export type WorldMap = {
   readonly mloEntities: number;
   readonly extentsMin: readonly [number, number, number];
   readonly extentsMax: readonly [number, number, number];
-  readonly entities: readonly Placed[];
+  /** Columnar, not one object per entity: see `world/columns.ts`. */
+  readonly entities: PlacementColumns;
   /** How many interior entities were expanded out of the map's MLO instances. */
   readonly mloExpanded: number;
 };
@@ -589,22 +591,24 @@ export function lodBandForDistance(
  */
 export function nearestCandidates(
   cameraGta: readonly [number, number, number],
-  entries: readonly { key: string; placements: readonly Placed[] }[],
+  entries: readonly { key: string; placements: PlacementColumns }[],
   excluded: ReadonlySet<string>,
   radius: number,
   limit: number,
 ): readonly { mapKey: string; entityIndex: number; distance: number }[] {
   const candidates: { mapKey: string; entityIndex: number; distance: number }[] = [];
   for (const entry of entries) {
-    for (const placement of entry.placements) {
-      const key = keyFor(entry.key, placement.index);
+    const cols = entry.placements;
+    for (let row = 0; row < cols.length; row += 1) {
+      const entityIndex = cols.entityIndex(row);
+      const key = keyFor(entry.key, entityIndex);
       if (excluded.has(key)) continue;
-      const dx = placement.position[0] - cameraGta[0];
-      const dy = placement.position[1] - cameraGta[1];
-      const dz = placement.position[2] - cameraGta[2];
+      const dx = cols.x(row) - cameraGta[0];
+      const dy = cols.y(row) - cameraGta[1];
+      const dz = cols.z(row) - cameraGta[2];
       const distance = Math.hypot(dx, dy, dz);
       if (distance <= radius) {
-        candidates.push({ mapKey: entry.key, entityIndex: placement.index, distance });
+        candidates.push({ mapKey: entry.key, entityIndex, distance });
       }
     }
   }
@@ -617,7 +621,7 @@ export type RegionEntry = {
   readonly key: string;
   readonly extentsMin: readonly [number, number, number];
   readonly extentsMax: readonly [number, number, number];
-  readonly placements: readonly Placed[];
+  readonly placements: PlacementColumns;
 };
 
 /** How far out an entity's geometry streams, by its placement LOD tier.
@@ -625,8 +629,13 @@ export type RegionEntry = {
  *  camera, not just a handful of nearby models — the LOD swap keeps the far
  *  ones cheap. */
 export function entityStreamRadius(entity: Placed): number {
-  const base = Math.max(entity.lodDist, 50);
-  switch (entity.lodLevel) {
+  return streamRadiusOf(entity.lodDist, entity.lodLevel);
+}
+
+/** `entityStreamRadius` from the two fields it reads, for a scan over columns. */
+export function streamRadiusOf(lodDist: number, lodLevel: string): number {
+  const base = Math.max(lodDist, 50);
+  switch (lodLevel) {
     case "ORPHAN_HD":
       return base * 4;
     case "HD":
@@ -758,23 +767,26 @@ export function streamingDecision(
       continue;
     }
 
-    for (const placement of entry.placements) {
-      const dx = placement.position[0] - cameraGta[0];
-      const dy = placement.position[1] - cameraGta[1];
-      const dz = placement.position[2] - cameraGta[2];
+    const cols = entry.placements;
+    for (let row = 0; row < cols.length; row += 1) {
+      const entityIndex = cols.entityIndex(row);
+      const dx = cols.x(row) - cameraGta[0];
+      const dy = cols.y(row) - cameraGta[1];
+      const dz = cols.z(row) - cameraGta[2];
       const distanceSq = dx * dx + dy * dy + dz * dz;
-      const radius = entityStreamRadius(placement);
+      const lodLevel = cols.lodLevel(row);
+      const radius = streamRadiusOf(cols.lodDist(row), lodLevel);
 
-      if (loadedHere?.has(placement.index)) {
+      if (loadedHere?.has(entityIndex)) {
         const drop = radius * 1.5;
-        if (distanceSq > drop * drop) unload.push(keyFor(entry.key, placement.index));
+        if (distanceSq > drop * drop) unload.push(keyFor(entry.key, entityIndex));
         continue;
       }
       if (distanceSq > radius * radius) continue;
-      if (pendingHere?.has(placement.index)) continue;
+      if (pendingHere?.has(entityIndex)) continue;
 
       const distance = Math.sqrt(distanceSq);
-      const penalty = streamPenalty(placement);
+      const penalty = streamPenaltyOf(cols.name(row), lodLevel);
       // The view only ever adds to the rank, so distance plus penalty is a floor
       // on it: anything whose floor already loses to the worst candidate kept
       // cannot win, and skips the cone test.
@@ -794,7 +806,7 @@ export function streamingDecision(
       const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + penalty;
       insertCandidate(
         best,
-        { mapKey: entry.key, entityIndex: placement.index, distance, inView, rank },
+        { mapKey: entry.key, entityIndex, distance, inView, rank },
         batchLimit,
       );
     }
@@ -891,13 +903,18 @@ function classifyName(name: string): number {
  * matches wrongly only loads its entity in the wrong order; nothing is dropped.
  */
 export function streamPenalty(entity: Placed): number {
-  let byName = namePenalty.get(entity.name);
+  return streamPenaltyOf(entity.name, entity.lodLevel);
+}
+
+/** `streamPenalty` from the two fields it reads, for a scan over columns. */
+export function streamPenaltyOf(name: string, lodLevel: string): number {
+  let byName = namePenalty.get(name);
   if (byName === undefined) {
-    byName = classifyName(entity.name);
-    namePenalty.set(entity.name, byName);
+    byName = classifyName(name);
+    namePenalty.set(name, byName);
   }
   if (byName >= 0) return byName;
-  return entity.lodLevel === "ORPHAN_HD" || entity.lodLevel === "HD"
+  return lodLevel === "ORPHAN_HD" || lodLevel === "HD"
     ? STREAM_PHASE_PENALTY.structure
     : STREAM_PHASE_PENALTY.farLod;
 }
@@ -1014,6 +1031,35 @@ export function colorForLod(lodLevel: string, isMlo: boolean): number {
   }
 }
 
+/** `boundsOf` over placed maps' columns, without materializing a placement. */
+export function boundsOfColumns(
+  sets: readonly PlacementColumns[],
+): ReturnType<typeof boundsOf> {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  let any = false;
+  for (const cols of sets) {
+    for (let row = 0; row < cols.length; row += 1) {
+      any = true;
+      const x = cols.x(row);
+      const y = cols.y(row);
+      const z = cols.z(row);
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (z < minZ) minZ = z;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+      if (z > maxZ) maxZ = z;
+    }
+  }
+  if (!any) return { min: [0, 0, 0], max: [0, 0, 0], center: [0, 0, 0], radius: 1 };
+  return finishBounds(minX, minY, minZ, maxX, maxY, maxZ);
+}
+
 /** Axis-aligned bounds of a set of placed entities, for framing the camera. */
 export function boundsOf(
   placements: readonly { position: readonly [number, number, number] }[],
@@ -1035,6 +1081,17 @@ export function boundsOf(
     maxY = Math.max(maxY, position[1]);
     maxZ = Math.max(maxZ, position[2]);
   }
+  return finishBounds(minX, minY, minZ, maxX, maxY, maxZ);
+}
+
+function finishBounds(
+  minX: number,
+  minY: number,
+  minZ: number,
+  maxX: number,
+  maxY: number,
+  maxZ: number,
+): ReturnType<typeof boundsOf> {
   const min: [number, number, number] = [minX, minY, minZ];
   const max: [number, number, number] = [maxX, maxY, maxZ];
   const center: [number, number, number] = [

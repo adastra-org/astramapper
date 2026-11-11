@@ -9,6 +9,7 @@
  * Distances are in the X/Y plane. Height does not pick a cell — a camera above
  * a building is still in that building's cell.
  */
+import type { PlacementColumns } from "./columns";
 
 export type Hex = { readonly q: number; readonly r: number };
 
@@ -118,6 +119,25 @@ export function binInto(
   }
 }
 
+/** `binInto` over a map's columns, without materializing a placement. */
+export function binColumns(
+  cells: Map<number, HexCell>,
+  cols: PlacementColumns,
+  size: number,
+): void {
+  for (let row = 0; row < cols.length; row += 1) {
+    const { q, r } = worldToHex(cols.x(row), cols.y(row), size);
+    const key = hexKey(q, r);
+    let cell = cells.get(key);
+    if (!cell) {
+      cell = { q, r, count: 0, loaded: 0, zSum: 0 };
+      cells.set(key, cell);
+    }
+    cell.count += 1;
+    cell.zSum += cols.z(row);
+  }
+}
+
 /** Average height of a cell's placements, for drawing on the ground it covers. */
 export function cellMeanZ(cell: { readonly count: number; readonly zSum: number }): number {
   return cell.count > 0 ? cell.zSum / cell.count : 0;
@@ -125,11 +145,11 @@ export function cellMeanZ(cell: { readonly count: number; readonly zSum: number 
 
 /** Placements per cell for every placed map. */
 export function binPlacements(
-  entries: readonly { readonly placements: readonly Positioned[] }[],
+  entries: readonly { readonly placements: PlacementColumns }[],
   size: number,
 ): Map<number, HexCell> {
   const cells = new Map<number, HexCell>();
-  for (const entry of entries) binInto(cells, entry.placements, size, "count");
+  for (const entry of entries) binColumns(cells, entry.placements, size);
   return cells;
 }
 

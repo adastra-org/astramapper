@@ -40,40 +40,64 @@ export function preloadTargets(
   cap: number,
 ): readonly PreloadTarget[] {
   if (cap <= 0) return [];
-  const targets: PreloadTarget[] = [];
 
-  for (const entry of entries) {
-    for (const placement of entry.placements) {
-      if (!isLoadable(placement)) continue;
-      if (excluded.has(keyFor(entry.key, placement.index))) continue;
-      targets.push({
-        mapKey: entry.key,
-        entity: placement,
-        distance: cameraGta === null ? 0 : distanceTo(placement, cameraGta),
-      });
+  // Candidates are (entry, row, distance) in parallel typed arrays, not one
+  // object each: a preload considers every placement in the world, and the
+  // columns exist to avoid exactly that many allocations.
+  let total = 0;
+  for (const entry of entries) total += entry.placements.length;
+  const entryAt = new Uint32Array(total);
+  const rowAt = new Uint32Array(total);
+  const distances = new Float64Array(total);
+  let count = 0;
+
+  for (let e = 0; e < entries.length; e += 1) {
+    const entry = entries[e]!;
+    const cols = entry.placements;
+    for (let row = 0; row < cols.length; row += 1) {
+      if (!isLoadableName(cols.name(row))) continue;
+      if (excluded.has(keyFor(entry.key, cols.entityIndex(row)))) continue;
+      entryAt[count] = e;
+      rowAt[count] = row;
+      distances[count] =
+        cameraGta === null
+          ? 0
+          : Math.hypot(
+              cols.x(row) - cameraGta[0],
+              cols.y(row) - cameraGta[1],
+              cols.z(row) - cameraGta[2],
+            );
+      count += 1;
     }
   }
 
-  // A stable sort, so two entities at the same distance keep placement order
-  // and a preload run twice loads the same things in the same order.
-  targets.sort((a, b) => a.distance - b.distance);
-  return targets.slice(0, cap);
+  // Typed-array sort is stable, so two entities at the same distance keep
+  // placement order and a preload run twice loads the same things in the same
+  // order.
+  const order = new Uint32Array(count);
+  for (let i = 0; i < count; i += 1) order[i] = i;
+  order.sort((a, b) => distances[a]! - distances[b]!);
+
+  const targets: PreloadTarget[] = [];
+  for (let i = 0; i < Math.min(count, cap); i += 1) {
+    const at = order[i]!;
+    const entry = entries[entryAt[at]!]!;
+    targets.push({
+      mapKey: entry.key,
+      entity: entry.placements.at(rowAt[at]!),
+      distance: distances[at]!,
+    });
+  }
+  return targets;
 }
 
 /** Whether an entity has a model that could be loaded at all. */
 export function isLoadable(placement: Placed): boolean {
-  return !placement.name.startsWith("hash_");
+  return isLoadableName(placement.name);
 }
 
-function distanceTo(
-  placement: Placed,
-  cameraGta: readonly [number, number, number],
-): number {
-  return Math.hypot(
-    placement.position[0] - cameraGta[0],
-    placement.position[1] - cameraGta[1],
-    placement.position[2] - cameraGta[2],
-  );
+function isLoadableName(name: string): boolean {
+  return !name.startsWith("hash_");
 }
 
 /**
@@ -86,8 +110,9 @@ function distanceTo(
 export function preloadableCount(entries: readonly RegionEntry[]): number {
   let total = 0;
   for (const entry of entries) {
-    for (const placement of entry.placements) {
-      if (isLoadable(placement)) total += 1;
+    const cols = entry.placements;
+    for (let row = 0; row < cols.length; row += 1) {
+      if (isLoadableName(cols.name(row))) total += 1;
     }
   }
   return total;

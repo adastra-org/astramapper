@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { createPlacementIndex, EMPTY_PLACEMENT_INDEX } from "./placementIndex";
 import type { Placed } from "../world";
+import { columnsFromPlaced } from "./columns";
 
 function placement(index: number, name = `prop_${index}`): Placed {
   return {
@@ -24,8 +25,8 @@ function placement(index: number, name = `prop_${index}`): Placed {
 describe("createPlacementIndex", () => {
   test("resolves a placement by its map and file index", () => {
     const index = createPlacementIndex([
-      { key: "a.ymap", placements: [placement(0), placement(7)] },
-      { key: "b.ymap", placements: [placement(7, "other")] },
+      { key: "a.ymap", placements: columnsFromPlaced([placement(0), placement(7)]) },
+      { key: "b.ymap", placements: columnsFromPlaced([placement(7, "other")]) },
     ]);
 
     expect(index.placement("a.ymap", 7)?.name).toBe("prop_7");
@@ -38,7 +39,7 @@ describe("createPlacementIndex", () => {
     // The entity indexes are sparse and out of order, which is what a filtered
     // or MLO-expanded map looks like. Position 0 holds index 12.
     const index = createPlacementIndex([
-      { key: "a.ymap", placements: [placement(12), placement(3), placement(40)] },
+      { key: "a.ymap", placements: columnsFromPlaced([placement(12), placement(3), placement(40)]) },
     ]);
 
     expect(index.placement("a.ymap", 12)?.index).toBe(12);
@@ -47,7 +48,7 @@ describe("createPlacementIndex", () => {
   });
 
   test("hands back the entry itself, not a copy", () => {
-    const entry = { key: "a.ymap", name: "downtown", placements: [placement(0)] };
+    const entry = { key: "a.ymap", name: "downtown", placements: columnsFromPlaced([placement(0)]) };
     const index = createPlacementIndex([entry]);
 
     expect(index.entry("a.ymap")).toBe(entry);
@@ -55,23 +56,23 @@ describe("createPlacementIndex", () => {
     expect(index.entry("missing.ymap")).toBeUndefined();
   });
 
-  test("shares the placement objects rather than cloning them", () => {
+  test("builds the placement from the columns, with every field intact", () => {
     const only = placement(5);
-    const index = createPlacementIndex([{ key: "a.ymap", placements: [only] }]);
+    const index = createPlacementIndex([{ key: "a.ymap", placements: columnsFromPlaced([only]) }]);
 
-    expect(index.placement("a.ymap", 5)).toBe(only);
+    expect(index.placement("a.ymap", 5)).toEqual(only);
   });
 
   test("a missing map resolves to undefined rather than throwing", () => {
-    const index = createPlacementIndex([{ key: "a.ymap", placements: [placement(0)] }]);
+    const index = createPlacementIndex([{ key: "a.ymap", placements: columnsFromPlaced([placement(0)]) }]);
 
     expect(index.placement("gone.ymap", 0)).toBeUndefined();
   });
 
   test("a duplicate keeps the first, the way find did", () => {
     const index = createPlacementIndex([
-      { key: "a.ymap", placements: [placement(1, "first"), placement(1, "second")] },
-      { key: "a.ymap", placements: [placement(1, "third")] },
+      { key: "a.ymap", placements: columnsFromPlaced([placement(1, "first"), placement(1, "second")]) },
+      { key: "a.ymap", placements: columnsFromPlaced([placement(1, "third")]) },
     ]);
 
     expect(index.placement("a.ymap", 1)?.name).toBe("first");
