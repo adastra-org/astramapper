@@ -18,6 +18,8 @@ import {
   popHistory,
   serializeProject,
   streamingDecision,
+  streamPenalty,
+  STREAM_PHASE_PENALTY,
   STREAM_VIEW_COS_HALF_ANGLE,
   worldToGta,
   type Placed,
@@ -380,7 +382,51 @@ describe("entityStreamRadius", () => {
   });
 });
 
+describe("streamPenalty", () => {
+  const penalty = (name: string, lodLevel = "HD") =>
+    streamPenalty({ ...entryFixture, name, lodLevel });
+
+  test("orders terrain, structures, decals, vegetation, then coarse LOD", () => {
+    const order = [
+      penalty("cs1_01_terrain_a"),
+      penalty("prop_building_01"),
+      penalty("v_decal_road_02"),
+      penalty("prop_tree_oak_01"),
+      penalty("prop_building_01", "SLOD2"),
+    ];
+    expect(order).toEqual([
+      STREAM_PHASE_PENALTY.terrain,
+      STREAM_PHASE_PENALTY.structure,
+      STREAM_PHASE_PENALTY.decal,
+      STREAM_PHASE_PENALTY.vegetation,
+      STREAM_PHASE_PENALTY.farLod,
+    ]);
+  });
+
+  test("matches whole name tokens, not substrings", () => {
+    // `powerplant` and `terrace` contain plant / ter but are neither.
+    expect(penalty("prop_powerplant_01")).toBe(STREAM_PHASE_PENALTY.structure);
+    expect(penalty("prop_terrace_01")).toBe(STREAM_PHASE_PENALTY.structure);
+  });
+});
+
 describe("streamingDecision", () => {
+  test("phases are strict tiers: all terrain, then structures, then vegetation, whatever the distance", () => {
+    const entries = [
+      regionEntryOf("m1", [
+        placedAtXy("prop_building_01", 0, 50, 0),
+        placedAtXy("prop_tree_oak_01", 1, 10, 0),
+        placedAtXy("prop_building_02", 2, 400, 0),
+        placedAtXy("terrain_a", 3, 90, 0),
+      ]),
+    ];
+    const { load } = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4);
+    const names = load.map((c) => c.entityIndex);
+    // terrain first although it is farther than the tree; the tree last
+    // although it is nearer than the far building.
+    expect(names).toEqual([3, 0, 2, 1]);
+  });
+
   const region = (
     key: string,
     placements: Placed[],

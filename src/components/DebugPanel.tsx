@@ -20,7 +20,7 @@
  * torn down with the panel.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Gauge, RotateCcw, X } from "lucide-react";
+import { Check, Copy, Gauge, RotateCcw, X } from "lucide-react";
 
 import { formatBytes } from "../lib/format";
 import * as perf from "../lib/perf";
@@ -34,6 +34,7 @@ export function DebugPanel({ onClose }: { onClose: () => void }): React.JSX.Elem
   const [gauges, setGauges] = useState<perf.GaugeReport[]>([]);
   const [fps, setFps] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,6 +69,19 @@ export function DebugPanel({ onClose }: { onClose: () => void }): React.JSX.Elem
     setGauges([]);
   }, []);
 
+  // Copy the whole report as plain text, so it can be pasted without a screenshot.
+  // A failed clipboard write (no permission, no focus) leaves the button unchanged.
+  const copy = useCallback(() => {
+    const text = reportText(fps, gauges, frontend, backend, error);
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => undefined);
+  }, [fps, gauges, frontend, backend, error]);
+
   return (
     <aside className="pointer-events-auto absolute right-3 top-3 z-20 flex max-h-[calc(100%-1.5rem)] w-[34rem] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden rounded-lg border border-edge bg-surface-1/95 shadow-xl backdrop-blur">
       <header className="flex items-center gap-2 border-b border-edge px-3 py-2">
@@ -77,6 +91,14 @@ export function DebugPanel({ onClose }: { onClose: () => void }): React.JSX.Elem
           <span className="text-xs tabular-nums text-ink-dim">{fps.toFixed(0)} fps</span>
         )}
         <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={copy}
+            title="Copy the whole report as text"
+            className="rounded p-1 text-ink-dim hover:bg-surface-2 hover:text-ink"
+          >
+            {copied ? <Check className="size-4" /> : <Copy className="size-4" />}
+          </button>
           <button
             type="button"
             onClick={clear}
@@ -169,6 +191,42 @@ function SpanTable({
       </table>
     </section>
   );
+}
+
+/** The report as tab-separated text: gauges, then each span table. */
+function reportText(
+  fps: number | null,
+  gauges: readonly perf.GaugeReport[],
+  frontend: readonly perf.SpanReport[],
+  backend: readonly perf.SpanReport[],
+  error: string | null,
+): string {
+  const lines: string[] = [];
+  lines.push(`fps\t${fps === null ? "-" : fps.toFixed(0)}`);
+  lines.push("NOW");
+  for (const g of gauges) lines.push(`${g.name}\t${g.value.toLocaleString()}`);
+  const table = (title: string, rows: readonly perf.SpanReport[]): void => {
+    if (rows.length === 0) return;
+    lines.push(title);
+    lines.push("span\tn\ttotal\tp50\tp95\tmax\tbytes");
+    for (const r of rows) {
+      lines.push(
+        [
+          r.name,
+          r.calls,
+          ms(r.totalMs),
+          ms(r.p50Ms),
+          ms(r.p95Ms),
+          ms(r.maxMs),
+          r.bytes > 0 ? formatBytes(r.bytes) : "-",
+        ].join("\t"),
+      );
+    }
+  };
+  table("WEBVIEW", frontend);
+  table("BACKEND", backend);
+  if (error) lines.push(`Backend error\t${error}`);
+  return lines.join("\n");
 }
 
 /** Milliseconds at a precision that stays readable across five orders of

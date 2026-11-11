@@ -139,7 +139,9 @@ export function worldMapFile(path: string): Promise<WorldMap> {
 
 /** Resolve an archetype name to a model file, or `null` when there is none. */
 export function worldAsset(name: string): Promise<string | null> {
-  return invoke<string | null>("world_asset", { name });
+  // A reply of a few bytes: its round trip is the floor of what one IPC call
+  // costs, to read `worldModel ipc` against.
+  return perf.measureAsync("worldAsset ipc", () => invoke<string | null>("world_asset", { name }));
 }
 
 /** What the GL context can upload without the backend decoding first. */
@@ -253,12 +255,35 @@ type MetaPart = Omit<WorldPart, "positions" | "normals" | "uvs" | "indices"> & {
  * 11.60s against 2.57s over 58 real city models, for a *larger* payload. See
  * `src-tauri/src/textures.rs`.
  */
+// In-flight `world_model` invokes. Measures the queue behind the IPC, which the
+// span alone cannot separate from transport: a 1s round trip is either 1s on
+// the wire or 1 call behind 20 others, and those need different fixes.
+let worldModelInFlight = 0;
+let worldModelPeak = 0;
+
 export async function worldModel(path: string): Promise<WorldModel> {
-  const buffer = await perf.measureAsync(
-    "worldModel ipc",
-    () => invoke<ArrayBuffer>("world_model", { path }),
-    (b) => b.byteLength,
-  );
+  worldModelInFlight += 1;
+  worldModelPeak = Math.max(worldModelPeak, worldModelInFlight);
+  perf.gauge("worldModel in flight", worldModelInFlight);
+  perf.gauge("worldModel in flight (peak)", worldModelPeak);
+  let buffer: ArrayBuffer;
+  try {
+    const sent = performance.now();
+    buffer = await perf.measureAsync(
+      "worldModel ipc",
+      () => invoke<ArrayBuffer>("world_model", { path }),
+      (b) => b.byteLength,
+    );
+    // The same round trip again, split by response size. Latency that tracks
+    // bytes says to send less per model; latency that does not says the
+    // transport itself is the cost.
+    const bytes = buffer.byteLength;
+    const bucket = bytes < 256 * 1024 ? "<256 KB" : bytes < 1024 * 1024 ? "256 KB-1 MB" : ">1 MB";
+    perf.record(`worldModel ipc ${bucket}`, performance.now() - sent, bytes);
+  } finally {
+    worldModelInFlight -= 1;
+    perf.gauge("worldModel in flight", worldModelInFlight);
+  }
   const started = performance.now();
   const envelope = readEnvelope(buffer);
   if (envelope.kind !== Kind.Model) {
@@ -657,6 +682,9 @@ export type StreamCandidate = {
   readonly distance: number;
   /** Whether it fell inside the view cone. Ordering puts these first. */
   readonly inView: boolean;
+  /** What ordering actually sorts by, lower first: distance, plus the phase
+   *  penalty, plus a wall for anything outside the view cone. */
+  readonly rank: number;
 };
 
 /**
@@ -744,30 +772,157 @@ export function streamingDecision(
       }
       if (distanceSq > radius * radius) continue;
       if (pendingHere?.has(placement.index)) continue;
-      if (best.length >= batchLimit && batchLimit > 0) {
-        // Cheap reject before the square root: anything farther than the worst
-        // candidate can still win on being in view, so this only skips when the
-        // worst is in view too.
-        const worst = best[best.length - 1]!;
-        if (worst.inView && distanceSq >= worst.distance * worst.distance) continue;
-      }
 
       const distance = Math.sqrt(distanceSq);
+      const penalty = streamPenalty(placement);
+      // The view only ever adds to the rank, so distance plus penalty is a floor
+      // on it: anything whose floor already loses to the worst candidate kept
+      // cannot win, and skips the cone test.
+      if (
+        best.length >= batchLimit &&
+        batchLimit > 0 &&
+        distance + penalty >= best[best.length - 1]!.rank
+      ) {
+        continue;
+      }
       const inView =
         !view ||
         distance <= STREAM_VIEW_NEAR ||
         (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
           Math.max(distance, 1e-6) >=
           view.cosHalfAngle;
+      const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + penalty;
       insertCandidate(
         best,
-        { mapKey: entry.key, entityIndex: placement.index, distance, inView },
+        { mapKey: entry.key, entityIndex: placement.index, distance, inView, rank },
         batchLimit,
       );
     }
   }
 
   return { load: best, unload };
+}
+
+/** Added to the rank of anything outside the view cone, so it sorts after
+ *  everything inside it. Far beyond any streaming radius. */
+const STREAM_OFF_VIEW_PENALTY = 1_000_000;
+
+/**
+ * The same order `streamingDecision` fills a batch in — on screen first, then
+ * nearest after the phase penalty — as one number, lower first. For ranking
+ * requests that are already waiting, which the decision itself never sees again.
+ */
+export function streamRank(
+  cameraGta: readonly [number, number, number],
+  entity: Placed,
+  view?: StreamView | null,
+): number {
+  const dx = entity.position[0] - cameraGta[0];
+  const dy = entity.position[1] - cameraGta[1];
+  const dz = entity.position[2] - cameraGta[2];
+  const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const inView =
+    !view ||
+    distance <= STREAM_VIEW_NEAR ||
+    (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
+      Math.max(distance, 1e-6) >=
+      view.cosHalfAngle;
+  return (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + streamPenalty(entity);
+}
+
+/** `streamRank` for a candidate the decision already measured. */
+export function candidateRank(candidate: StreamCandidate): number {
+  return candidate.rank;
+}
+
+/**
+ * Gap between load phases in the rank. Far above any distance or the off-view
+ * wall (1e6), so a phase is a strict tier: nothing in a later one is ordered
+ * ahead of anything in an earlier one, whatever the distances.
+ */
+const STREAM_PHASE_STRIDE = 10_000_000;
+
+/**
+ * Load phases, in order: every terrain piece in range, then structures at full
+ * detail, decals, vegetation, and last the coarse LOD tiers. Within a phase the
+ * order is on-screen first, then nearest.
+ *
+ * Strict on purpose: with structures streaming in before the ground under them
+ * the world reads as buildings floating over a void. The cost is that a later
+ * phase waits for every earlier one in range, so a misclassified name can only
+ * delay an entity, never drop it.
+ */
+export const STREAM_PHASE_PENALTY = {
+  terrain: 0,
+  structure: STREAM_PHASE_STRIDE,
+  decal: 2 * STREAM_PHASE_STRIDE,
+  vegetation: 3 * STREAM_PHASE_STRIDE,
+  farLod: 4 * STREAM_PHASE_STRIDE,
+} as const;
+
+const TERRAIN_TOKENS = new Set(["terrain", "ter", "terr", "grnd"]);
+const DECAL_TOKENS = new Set(["decal", "decals", "dcl"]);
+const VEGETATION_TOKENS = new Set([
+  "tree", "trees", "bush", "bushes", "palm", "plant", "plants", "veg", "vegetation",
+  "grass", "cactus", "fern", "shrub", "hedge", "weed", "weeds", "flower", "flowers",
+  "reed", "reeds", "vine", "ivy", "foliage", "yucca", "agave", "sapling",
+]);
+
+/** Penalty by archetype name, or -1 when the name says nothing and the entity's
+ *  LOD tier decides. Names repeat across thousands of placements, so each is
+ *  classified once. */
+const namePenalty = new Map<string, number>();
+
+function classifyName(name: string): number {
+  const tokens = name.toLowerCase().split(/[^a-z]+/);
+  let found = -1;
+  for (const token of tokens) {
+    if (TERRAIN_TOKENS.has(token)) return STREAM_PHASE_PENALTY.terrain;
+    if (DECAL_TOKENS.has(token)) found = STREAM_PHASE_PENALTY.decal;
+    else if (VEGETATION_TOKENS.has(token) && found < 0) found = STREAM_PHASE_PENALTY.vegetation;
+  }
+  return found;
+}
+
+/**
+ * The phase penalty for one entity. Decided by name where the name is telling
+ * (terrain, decal, vegetation) and by LOD tier otherwise: HD structures are
+ * the structure phase, the coarse LOD and SLOD tiers go last. A name that
+ * matches wrongly only loads its entity in the wrong order; nothing is dropped.
+ */
+export function streamPenalty(entity: Placed): number {
+  let byName = namePenalty.get(entity.name);
+  if (byName === undefined) {
+    byName = classifyName(entity.name);
+    namePenalty.set(entity.name, byName);
+  }
+  if (byName >= 0) return byName;
+  return entity.lodLevel === "ORPHAN_HD" || entity.lodLevel === "HD"
+    ? STREAM_PHASE_PENALTY.structure
+    : STREAM_PHASE_PENALTY.farLod;
+}
+
+/**
+ * Whether `streamingDecision` would still ask for this placement from this
+ * camera: its map is in range and it is inside its own LOD-tier radius. The
+ * test a request waiting in a queue has to keep passing to stay there.
+ */
+export function stillStreamWanted(
+  cameraGta: readonly [number, number, number],
+  entry: Pick<RegionEntry, "extentsMin" | "extentsMax">,
+  placement: Placed,
+): boolean {
+  const inRange =
+    cameraGta[0] >= entry.extentsMin[0] - STREAM_REGION_MARGIN &&
+    cameraGta[0] <= entry.extentsMax[0] + STREAM_REGION_MARGIN &&
+    cameraGta[1] >= entry.extentsMin[1] - STREAM_REGION_MARGIN &&
+    cameraGta[1] <= entry.extentsMax[1] + STREAM_REGION_MARGIN;
+  if (!inRange) return false;
+  const dx = placement.position[0] - cameraGta[0];
+  const dy = placement.position[1] - cameraGta[1];
+  const dz = placement.position[2] - cameraGta[2];
+  const radius = entityStreamRadius(placement);
+  return dx * dx + dy * dy + dz * dz <= radius * radius;
 }
 
 /**
@@ -790,10 +945,9 @@ function groupKeysByMap(keys: ReadonlySet<string>): Map<string, Set<number>> {
   return byMap;
 }
 
-/** On screen before off screen, then nearest first. */
+/** Lower rank first: on screen before off screen, then phase-adjusted distance. */
 function betterCandidate(a: StreamCandidate, b: StreamCandidate): boolean {
-  if (a.inView !== b.inView) return a.inView;
-  return a.distance < b.distance;
+  return a.rank < b.rank;
 }
 
 /** Insert into a best-first list capped at `limit`, dropping the worst. */

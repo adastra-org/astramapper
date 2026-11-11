@@ -23,6 +23,7 @@ import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
 import { createGeometryStore } from "../lib/world/geometryStore";
+import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
 import {
   createPlacementIndex,
   type PlacementIndex,
@@ -47,6 +48,9 @@ import {
   projectLoad,
   projectSave,
   serializeProject,
+  candidateRank,
+  stillStreamWanted,
+  streamRank,
   streamingDecision,
   STREAM_VIEW_COS_HALF_ANGLE,
   worldAsset,
@@ -79,6 +83,8 @@ const STREAM_BATCH = 24;
 const LOAD_BATCH = 16;
 /** How often the streaming pass re-decides what is loaded. */
 const STREAM_INTERVAL_MS = 250;
+/** How many arrived models one frame builds meshes for (and so uploads). */
+const BUILD_PER_SYNC = 6;
 /** How many entities a preload starts at once. */
 const PRELOAD_BATCH = 12;
 /**
@@ -99,6 +105,31 @@ const PRELOAD_CAP = 5_000;
  */
 const assetCache = new Map<string, string | null>();
 const modelCache = new Map<string, WorldModel>();
+/** Model reads already on their way, by path, so two entities sharing a model
+ *  that are both out at once share one `world_model` call. */
+const modelInFlight = new Map<string, Promise<WorldModel>>();
+
+/**
+ * Model requests allowed out at once.
+ *
+ * Measured with F3: 30 in flight gave a 659ms median per call and 4 in flight
+ * gave 702ms, against ~1ms of backend work. The latency does not move with
+ * concurrency, so it is per-call cost, not queueing — and a lower cap just cuts
+ * throughput by the same factor (4 was ~6 models/s). The cap exists to keep the
+ * nearest model from waiting behind ones the camera has left; 12 does that and
+ * leaves the pipe full.
+ */
+const MODEL_REQUEST_LIMIT = 12;
+/** Streamed requests allowed to wait. Past it a better one evicts the worst. */
+const STREAM_QUEUE_MAX = 48;
+
+type QueuedEntity = { readonly mapKey: string; readonly entity: Placed };
+/** Waiting model loads, nearest-first, re-ranked every streaming pass. */
+const modelQueue = new RequestQueue<QueuedEntity>(MODEL_REQUEST_LIMIT, (state) => {
+  perf.gauge("model queue active", state.active);
+  perf.gauge("model queue waiting", state.waiting);
+  perf.gauge("model queue dropped", state.dropped);
+});
 /**
  * Loaded geometry, outside React for the reasons in `geometryStore.ts`: keeping
  * it in `useState` made every load O(n) three times over, which streaming hid
@@ -325,7 +356,12 @@ export function World(): React.JSX.Element {
   // Deps are empty and must stay that way: the loaded set is read from the
   // store rather than closed over, so this callback is stable and the streaming
   // interval that depends on it is not torn down every time a model arrives.
-  const loadEntity = useCallback(async (mapKey: string, entity: Placed) => {
+  //
+  // `rank` is set by the streaming pass: the request waits in `modelQueue`
+  // under that priority (lower first), and the pass may re-rank or drop it
+  // before it ever reaches the network. Without one it is a user action
+  // (Show model, preload): front of the line, never dropped.
+  const loadEntity = useCallback(async (mapKey: string, entity: Placed, rank?: number) => {
     const key = keyFor(mapKey, entity.index);
     if (geometryStore.has(key) || pending.current.has(key)) return;
     // A name the table could not resolve has no file to load.
@@ -333,25 +369,54 @@ export function World(): React.JSX.Element {
 
     pending.current.add(key);
     try {
-      let modelPath = assetCache.get(entity.name);
-      if (modelPath === undefined) {
-        modelPath = await worldAsset(entity.name);
-        assetCache.set(entity.name, modelPath);
+      // Everything already cached completes now and never takes a queue slot.
+      const knownPath = assetCache.get(entity.name);
+      if (knownPath === null) return;
+      const knownModel = knownPath ? modelCache.get(knownPath) : undefined;
+      if (knownPath && knownModel) {
+        geometryStore.add({ mapKey, entity, modelPath: knownPath, model: knownModel });
+        return;
       }
-      if (!modelPath) return;
-      let model = modelCache.get(modelPath);
-      if (!model) {
-        // Awaited here rather than in an effect so the ordering holds by
-        // construction: no model is ever asked for before the backend knows
-        // which block formats this context can take. Memoized, so every call
-        // after the first is one already-resolved promise.
-        await reportGpuCaps();
-        model = await worldModel(modelPath);
-        modelCache.set(modelPath, model);
-      }
-      geometryStore.add({ mapKey, entity, modelPath, model });
+
+      const loaded = await modelQueue.enqueue(
+        key,
+        rank ?? -1,
+        { mapKey, entity },
+        async () => {
+          let modelPath = assetCache.get(entity.name);
+          if (modelPath === undefined) {
+            modelPath = await worldAsset(entity.name);
+            assetCache.set(entity.name, modelPath);
+          }
+          if (!modelPath) return null;
+          let model = modelCache.get(modelPath);
+          if (!model) {
+            let request = modelInFlight.get(modelPath);
+            if (!request) {
+              const path = modelPath;
+              // Awaited here rather than in an effect so the ordering holds by
+              // construction: no model is ever asked for before the backend
+              // knows which block formats this context can take. Memoized, so
+              // every call after the first is one already-resolved promise.
+              request = reportGpuCaps()
+                .then(() => worldModel(path))
+                .then((fetched) => {
+                  modelCache.set(path, fetched);
+                  return fetched;
+                })
+                .finally(() => modelInFlight.delete(path));
+              modelInFlight.set(path, request);
+            }
+            model = await request;
+          }
+          return { modelPath, model };
+        },
+        rank !== undefined,
+      );
+      if (loaded) geometryStore.add({ mapKey, entity, ...loaded });
     } catch (cause) {
-      setError(String(cause));
+      // Dropped from the queue because the camera moved on: not an error.
+      if (!(cause instanceof QueueDropped)) setError(String(cause));
     } finally {
       pending.current.delete(key);
     }
@@ -530,6 +595,52 @@ export function World(): React.JSX.Element {
     [placed],
   );
 
+  // Two probes that say where a slow IPC call spends its time. `world_asset`
+  // answers in 0.00ms of backend work and still took ~600ms here, so the time
+  // is not in the command. If this ping is slow while nothing else is asked of
+  // the backend, the round trip itself is; if it is fast, something specific
+  // to loading is. The lag probe is how late a 100ms timer fires: a main
+  // thread that stalls shows up there whatever the IPC is doing.
+  useEffect(() => {
+    const ping = window.setInterval(() => {
+      void perf.measureAsync("ipc ping (world_status)", () => worldStatus()).catch(() => {});
+    }, 1000);
+    // What the JS heap holds. A heap of millions of small objects makes every
+    // major GC a stop-the-world pause of hundreds of ms, which would show as
+    // lag here and as latency on every IPC reply that lands during it.
+    const heap = window.setInterval(() => {
+      const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } })
+        .memory;
+      if (memory) perf.gauge("JS heap used (MB)", Math.round(memory.usedJSHeapSize / 1048576));
+    }, 1000);
+    let observer: PerformanceObserver | null = null;
+    try {
+      observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) perf.record("long task", entry.duration);
+      });
+      observer.observe({ entryTypes: ["longtask"] });
+    } catch {
+      // Not every WebView reports long tasks; the lag probe still runs.
+    }
+    let expected = performance.now() + 100;
+    const lag = window.setInterval(() => {
+      const now = performance.now();
+      perf.record("main thread lag", Math.max(0, now - expected));
+      expected = now + 100;
+    }, 100);
+    return () => {
+      window.clearInterval(ping);
+      window.clearInterval(lag);
+      window.clearInterval(heap);
+      observer?.disconnect();
+    };
+  }, []);
+
+  const regionByKey = useMemo(
+    () => new Map(regionEntries.map((entry) => [entry.key, entry])),
+    [regionEntries],
+  );
+
   // The streaming pass: every interval, decide what to load and unload from the
   // camera's position. The decision is pure (`streamingDecision`); the effect
   // just carries it out against the load caches and geometry state.
@@ -555,6 +666,17 @@ export function World(): React.JSX.Element {
       // second against every placement in range: when it regresses, it
       // regresses as stutter rather than as anything anyone would think to
       // profile. It was 76ms before 4.12.
+      // Before the decision, so what it drops stops counting as pending and is
+      // eligible again this very pass if it is somehow wanted. Waiting requests
+      // are re-ranked against where the camera is *now*; the ones whose
+      // placement has left streaming range are dropped before they cost an IPC.
+      perf.measure("stream requeue", () =>
+        modelQueue.reprioritize(({ data }) => {
+          const entry = regionByKey.get(data.mapKey);
+          if (!entry || !stillStreamWanted(cameraGta, entry, data.entity)) return null;
+          return streamRank(cameraGta, data.entity, view);
+        }),
+      );
       const { load, unload } = perf.measure("stream pass", () =>
         streamingDecision(
           cameraGta,
@@ -565,14 +687,23 @@ export function World(): React.JSX.Element {
           view,
         ),
       );
+      // `load` is best-first. Once the queue is full a candidate only gets in by
+      // beating the worst one waiting, so the first that cannot ends the pass.
       for (const candidate of load) {
         const entity = index.placement(candidate.mapKey, candidate.entityIndex);
-        if (entity) void loadEntity(candidate.mapKey, entity);
+        if (!entity) continue;
+        const rank = candidateRank(candidate);
+        if (modelQueue.size >= STREAM_QUEUE_MAX) {
+          const worst = modelQueue.worstDroppable();
+          if (worst === null || worst <= rank) break;
+          modelQueue.evictWorst();
+        }
+        void loadEntity(candidate.mapKey, entity, rank);
       }
       geometryStore.removeMany(unload);
     }, STREAM_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, [streaming, status?.gameOpen, regionEntries, index, loadEntity]);
+  }, [streaming, status?.gameOpen, regionEntries, regionByKey, index, loadEntity]);
 
   /** Every entity a preload could reach. Memoized because it walks every
    *  placement of every placed map, which is six figures with the base game. */
@@ -941,20 +1072,20 @@ export function World(): React.JSX.Element {
           )}
         </aside>
 
-        <Canvas
-          entries={entries}
-          index={index}
-          geometry={geometry}
-          cameraRef={cameraRef}
-          edits={edits}
-          onEdit={onEdit}
-          onEditCommit={onEditCommit}
-          gizmoMode={gizmoMode}
-          selected={selected}
-          onSelect={setSelected}
-          shadowed={totalPlaced <= SHADOW_LIMIT}
-          busy={busy}
-        />
+          <Canvas
+            entries={entries}
+            index={index}
+            geometry={geometry}
+            cameraRef={cameraRef}
+            edits={edits}
+            onEdit={onEdit}
+            onEditCommit={onEditCommit}
+            gizmoMode={gizmoMode}
+            selected={selected}
+            onSelect={setSelected}
+            shadowed={totalPlaced <= SHADOW_LIMIT}
+            busy={busy}
+          />
       </div>
     </div>
   );
@@ -1153,6 +1284,8 @@ type BoxSlot = {
 /** The LOD-swap state for one loaded entity. */
 type LoadedGeometry = {
   readonly holder: THREE.Group;
+  /** The model whose shared geometry this holder's meshes draw. */
+  readonly model: WorldModel;
   readonly lodGroups: readonly THREE.Mesh[][];
   readonly lodDist: number;
   readonly positionGta: readonly [number, number, number];
@@ -1216,6 +1349,8 @@ function Canvas({
   const boxByMap = useRef(new Map<string, Map<number, BoxSlot>>());
   const loadedState = useRef(new Map<string, LoadedGeometry>());
   const lodUpdate = useRef<((cameraWorld: THREE.Vector3) => void) | null>(null);
+  /** Bumped to run the geometry sync again when it left models for a later frame. */
+  const [syncTick, setSyncTick] = useState(0);
   /** The gizmo's world-space origin, kept for screen-space axis picking. */
   const gizmoOriginWorld = useRef<THREE.Vector3 | null>(null);
 
@@ -1869,7 +2004,10 @@ function Canvas({
       lodUpdate.current?.(camera.position);
       applyEdits();
       updateGizmo();
-      renderer.render(scene, camera);
+      // CPU time to submit the frame. Buffer and texture uploads for models
+      // that arrived since the last one happen inside this call, so a hitch
+      // that lands here is an upload stall rather than a build.
+      perf.measure("render", () => renderer.render(scene, camera));
       // What the GPU was actually asked to do this frame. Three.js resets the
       // render counters per frame, so these are read straight after it and are
       // this frame's, not a running total.
@@ -1954,6 +2092,9 @@ function Canvas({
       renderer.domElement.removeEventListener("dblclick", onDoubleClick);
       disposeObject3D(geometryGroupObject);
       disposeObject3D(gizmo);
+      // `disposeObject3D` just freed every shared buffer; forget them so the
+      // rebuild that follows makes fresh ones instead of reusing dead entries.
+      sharedModels.clear();
       worldGroup.current = null;
       geometryGroup.current = null;
       highlight.current = null;
@@ -2018,6 +2159,8 @@ function Canvas({
     // each load once is the point: the two-collection diff this replaces built
     // a key string per model twice per pass, and a pass runs every frame while
     // a preload fills the world.
+    let built = 0;
+    let deferred = false;
     for (const load of geometry) {
       const key = keyFor(load.mapKey, load.entity.index);
       const already = previous.get(key);
@@ -2026,6 +2169,14 @@ function Canvas({
         carried += 1;
         continue;
       }
+      // Every model built here is uploaded to the GPU inside the next render,
+      // so a burst of arrivals is a burst of uploads in one frame — the camera
+      // stalls while it drains. The rest wait for the next frame.
+      if (built >= BUILD_PER_SYNC) {
+        deferred = true;
+        continue;
+      }
+      built += 1;
       const holder = new THREE.Group();
       position.set(load.entity.position[0], load.entity.position[1], load.entity.position[2]);
       quaternion.set(
@@ -2047,6 +2198,7 @@ function Canvas({
       group.add(holder);
       next.set(key, {
         holder,
+        model: load.model,
         lodGroups,
         lodDist: load.entity.lodDist,
         positionGta: load.entity.position,
@@ -2072,8 +2224,11 @@ function Canvas({
     if (carried !== previous.size) {
       for (const [key, loaded] of previous) {
         if (next.has(key)) continue;
-        disposeObject3D(loaded.holder);
+        // The meshes only borrow their geometry and material, so detaching
+        // them is not disposing them: the last entity of a model to go does.
+        loaded.holder.clear();
         group.remove(loaded.holder);
+        releaseShared(loaded.model);
         const placement = indexRef.current.placement(loaded.mapKey, loaded.entityIndex);
         if (placement) {
           setInstanceTransform(
@@ -2108,9 +2263,13 @@ function Canvas({
       }
     };
     perf.record("geometry sync", performance.now() - syncStarted);
+    perf.gauge("models built (last sync)", built);
+    if (!deferred) return;
+    const frame = requestAnimationFrame(() => setSyncTick((tick) => tick + 1));
+    return () => cancelAnimationFrame(frame);
     // `entries` is in the deps because the setup effect tears the geometry
     // group down when the placed maps change; this effect must repopulate it.
-  }, [geometry, entries, shadowed]);
+  }, [geometry, entries, shadowed, syncTick]);
 
   // Apply the selection to the outline without rebuilding the scene.
   useEffect(() => {
@@ -2161,63 +2320,113 @@ function totalCount(entries: readonly CanvasEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.placements.length, 0);
 }
 
+/** One part's GPU resources, made once per model and drawn by every entity. */
+type SharedPart = { readonly geometry: THREE.BufferGeometry; readonly material: THREE.Material };
+type SharedModel = { readonly lods: readonly (readonly SharedPart[])[]; refs: number };
+
 /**
- * The three.js meshes for one load's LODs, one array per bundle. The bundle
- * with geometry is the first drawable that has any; everything else in a `.ydd`
- * or fragment is not drawn here.
+ * Geometry and material per model, not per entity.
+ *
+ * A street of a hundred identical lamp posts used to build a hundred
+ * `BufferGeometry` and a hundred materials from the same arrays, and three.js
+ * uploaded each of them: the same vertices to the GPU a hundred times, inside
+ * the render call. Now the first entity of a model builds the parts and the
+ * rest wrap them in a `Mesh`, which is a transform and nothing to upload.
+ * `refs` counts the entities drawing it so the buffers are freed with the last.
  */
+const sharedModels = new Map<WorldModel, SharedModel>();
+
+function acquireShared(model: WorldModel): SharedModel {
+  let shared = sharedModels.get(model);
+  if (!shared) {
+    // The bundle with geometry is the first drawable that has any; everything
+    // else in a `.ydd` or fragment is not drawn here.
+    const drawable = model.drawables.find((d) => d.lods.length > 0);
+    shared = {
+      lods: drawable ? drawable.lods.map((bundle) => buildSharedParts(bundle, model)) : [],
+      refs: 0,
+    };
+    sharedModels.set(model, shared);
+  }
+  shared.refs += 1;
+  return shared;
+}
+
+function releaseShared(model: WorldModel): void {
+  const shared = sharedModels.get(model);
+  if (!shared) return;
+  shared.refs -= 1;
+  if (shared.refs > 0) return;
+  for (const lod of shared.lods) {
+    for (const part of lod) {
+      part.geometry.dispose();
+      part.material.dispose();
+    }
+  }
+  sharedModels.delete(model);
+}
+
+function buildSharedParts(
+  bundle: WorldModel["drawables"][number]["lods"][number],
+  model: WorldModel,
+): SharedPart[] {
+  const parts: SharedPart[] = [];
+  for (const part of bundle.parts) {
+    if (part.positions.length === 0) continue;
+    // Every array here is a view over the IPC response, handed to three.js
+    // without a copy. `BufferAttribute` uploads it and three.js keeps the
+    // reference, which is what keeps the response buffer alive exactly as
+    // long as the meshes that need it.
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
+    if (part.normals) {
+      geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
+    }
+    if (part.uvs) {
+      geometry.setAttribute("uv", new THREE.BufferAttribute(part.uvs, 2));
+    }
+    geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
+    if (!part.normals) geometry.computeVertexNormals();
+    const material = new THREE.MeshStandardMaterial({
+      color: 0xb9c0ca,
+      roughness: 0.9,
+      metalness: 0,
+      side: THREE.DoubleSide,
+    });
+    const resolved = resolvePartTextures(part, model.textures);
+    if (resolved.diffuse) {
+      material.map = resolved.diffuse;
+      material.color.set(0xffffff);
+      material.needsUpdate = true;
+    }
+    if (resolved.normal) {
+      material.normalMap = resolved.normal;
+      // RAGE bump maps are left-handed (DirectX) tangent space: the reference
+      // shader pushes green along the bitangent, and three.js expects the
+      // OpenGL convention where it points the other way. A negative y on
+      // `normalScale` inverts the green channel in the shader, which is the
+      // same correction the Explorer's viewer makes on the CPU and the only
+      // one available when the pixels are never decoded. Without it bumps
+      // read as dents.
+      material.normalScale = new THREE.Vector2(1, -1);
+      material.needsUpdate = true;
+    }
+    parts.push({ geometry, material });
+  }
+  return parts;
+}
+
+/** The three.js meshes for one load's LODs, one array per bundle. */
 function buildLodMeshes(load: GeometryLoad, shadowed: boolean): THREE.Mesh[][] {
-  const drawable = load.model.drawables.find((d) => d.lods.length > 0);
-  if (!drawable) return [];
-  return drawable.lods.map((bundle) => {
-    const meshes: THREE.Mesh[] = [];
-    for (const part of bundle.parts) {
-      if (part.positions.length === 0) continue;
-      // Every array here is a view over the IPC response, handed to three.js
-      // without a copy. `BufferAttribute` uploads it and three.js keeps the
-      // reference, which is what keeps the response buffer alive exactly as
-      // long as the meshes that need it.
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(part.positions, 3));
-      if (part.normals) {
-        geometry.setAttribute("normal", new THREE.BufferAttribute(part.normals, 3));
-      }
-      if (part.uvs) {
-        geometry.setAttribute("uv", new THREE.BufferAttribute(part.uvs, 2));
-      }
-      geometry.setIndex(new THREE.BufferAttribute(part.indices, 1));
-      if (!part.normals) geometry.computeVertexNormals();
-      const material = new THREE.MeshStandardMaterial({
-        color: 0xb9c0ca,
-        roughness: 0.9,
-        metalness: 0,
-        side: THREE.DoubleSide,
-      });
-      const resolved = resolvePartTextures(part, load.model.textures);
-      if (resolved.diffuse) {
-        material.map = resolved.diffuse;
-        material.color.set(0xffffff);
-        material.needsUpdate = true;
-      }
-      if (resolved.normal) {
-        material.normalMap = resolved.normal;
-        // RAGE bump maps are left-handed (DirectX) tangent space: the reference
-        // shader pushes green along the bitangent, and three.js expects the
-        // OpenGL convention where it points the other way. A negative y on
-        // `normalScale` inverts the green channel in the shader, which is the
-        // same correction the Explorer's viewer makes on the CPU and the only
-        // one available when the pixels are never decoded. Without it bumps
-        // read as dents.
-        material.normalScale = new THREE.Vector2(1, -1);
-        material.needsUpdate = true;
-      }
-      const mesh = new THREE.Mesh(geometry, material);
+  const shared = acquireShared(load.model);
+  return shared.lods.map((parts) =>
+    parts.map((part) => {
+      const mesh = new THREE.Mesh(part.geometry, part.material);
       mesh.castShadow = shadowed;
       mesh.receiveShadow = shadowed;
-      meshes.push(mesh);
-    }
-    return meshes;
-  });
+      return mesh;
+    }),
+  );
 }
 
 /** The texture map for one part, resolved against the model's uploaded blocks. */
