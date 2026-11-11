@@ -48,6 +48,17 @@ opt-level = 0
 [profile.dev.package."*"]
 opt-level = 3
 
+# `cargo test` inherits the dev profile above, so every test build compiled all
+# dependencies optimized, which dominated CI time on a cold cache. Tests run on
+# small fixtures and take about a second, so build them unoptimized. `cargo run`
+# and the app keep the dev profile. Line tables keep backtraces, and skip the
+# full debuginfo that is slow to link on Windows.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+opt-level = 0
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
