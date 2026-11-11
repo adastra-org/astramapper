@@ -11,6 +11,7 @@
 | [hex-streaming.md](hex-streaming.md) | Design for loading by hex cells |
 | [debug-bridge.md](debug-bridge.md) | Read the console and F3 and drive the camera from a shell |
 | [code-mode.md](code-mode.md) | Scenario runner on the bridge: `bun scripts/bridge.ts run <scenario>` |
+| [fixes-2026-11-11-v0.3.5/](fixes-2026-11-11-v0.3.5/README.md) | Terrain, placement, trees and LOD problems seen in the app, with status |
 | [fixes-2026-11-11-v0.3.0/](fixes-2026-11-11-v0.3.0/README.md) | Zone clusters, with status |
 | [fixes-2026-11-11-v0.1.0/](fixes-2026-11-11-v0.1.0/README.md) | Corrections and improvements batch, with status |
 
