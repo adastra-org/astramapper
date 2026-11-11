@@ -10,6 +10,7 @@
 pub mod bake;
 pub mod cache;
 pub mod cells;
+pub mod clusters;
 pub mod explorer;
 pub mod perf;
 pub mod placements;
@@ -80,6 +81,7 @@ pub fn run() {
             world::world_model,
             world_index::world_index_build,
             world_index::world_index_cells,
+            world_index::world_index_cluster_measure,
             world::set_gpu_capabilities,
             world::project_save,
             world::project_load,

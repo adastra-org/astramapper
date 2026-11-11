@@ -117,6 +117,74 @@ The partition is built once per session and kept in memory (the build is the one
 slow call, ~2 s on a warm cache); it is rebuilt by `world_index_build`, not when a
 single map is placed, since only the base group is indexed.
 
+## Zone clusters (v0.3.0)
+
+Named zones (Airport, City, North...) as **sets of leaf cells**, a layer above
+the partition and not a second way of loading. They exist so memory and model
+cost can be read per zone, and so a whole zone can be asked for at once.
+
+**Regions** are drawn by hand in `src-tauri/data/zones.json`: named boxes and
+polygons in game coordinates (X east, Y north), in priority order. A leaf belongs
+to the *first* region that contains its **centre**; the leaves in none fall into a
+built-in `countryside` cluster, always present so cluster ids are stable. Every
+leaf is in exactly one cluster. A leaf straddling a border goes wholly to one
+side, so a border is accurate to the leaf size (100 m to 1.6 km). The terrain
+pseudo-cell is map-wide and is in no cluster. `clusters.rs` parses and validates
+the file (unique keys, shapes that enclose an area) and a test refuses a bad one,
+so it cannot ship broken.
+
+**Wire**: `world_index_build`'s partition envelope gains section 8 (a `u16`
+cluster index per leaf) and `clusters` in its metadata (key, name, leaves,
+placements, distinct models). A frontend without the section reads every leaf as
+in none. `world_index_cluster_measure(key)` compiles (or reads from the cache)
+every distinct model of a zone on the model pool and returns the total compiled
+bytes, **keeping none of them**; it is on demand and fills the persistent cache
+as a side effect.
+
+**Loading** is `CellStreamer.pin(key)`: the zone's leaves are asked for in the
+same batches as every other cell, nearest the camera first, after the working set
+and before the prefetch ring, and are exempt from eviction until `unpin(key)`,
+which evicts them at once (except cells the working set still wants) and returns
+their placements so the geometry goes too. The limits are the existing ones: a
+reply carries at most 48 MB of models (`REPLY_MODEL_BYTES`) and the models go
+through the model cache, which stays under its own byte budget. So pinning a zone
+holds its **placements** (columns, ~60 bytes each) and as many of its models as
+the cache budget keeps; it does not, and cannot, hold the zone's compiled
+models. The **Zones** panel (`ClusterPanel.tsx`, under the cells panel) lists
+each zone with its cells, placements, models, how much is held, **Load** /
+**Release**, and **Measure**.
+
+### Measured over the base game
+
+`zone_clusters_over_the_base_game` and `zone_cluster_model_sizes_over_the_base_game`
+in `src-tauri/tests/world_gate.rs`, defaults (100 m, split above 1,000), 1,939
+leaves, 763,321 partitioned placements. Models are distinct archetype names
+(LODs and `unresolved` names with no model file included); bytes are the compiled
+size of each distinct file once.
+
+| Zone | cells | placements | names | files | compiled | largest | measure |
+|---|---|---|---|---|---|---|---|
+| Airport | 40 | 10,996 | 2,384 | 1,443 | 3.50 GB | 33.9 MB | 11 s |
+| Port | 16 | 8,176 | 1,591 | 1,103 | 2.69 GB | 34.0 MB | 9 s |
+| City | 271 | 174,865 | 35,009 | 23,430 | 63.23 GB | 96.5 MB | 152 s |
+| Sandy Shores | 118 | 51,301 | 8,833 | 4,332 | 14.03 GB | 64.1 MB | 22 s |
+| Paleto Bay | 61 | 22,874 | 5,146 | 2,716 | 8.81 GB | 56.1 MB | 15 s |
+| North | 826 | 273,971 | 44,573 | 12,753 | 42.08 GB | 99.0 MB | 78 s |
+| South | 592 | 220,526 | 37,844 | 19,071 | 53.10 GB | 143.0 MB | 153 s |
+| Countryside | 15 | 612 | 198 | 195 | 0.82 GB | 92.7 MB | 1 s |
+
+No model failed to compile. The takeaway: **no zone's models fit in memory**, the
+smallest (Port) is 2.7 GB and City is 63 GB, so "load a whole zone" means its
+cells and placements, with models streamed under the cache budget, never its
+models at once. The numbers are the reason the cap and the budget exist. Names
+shared between zones are counted in each (the sum, 188 GB, is not the game's
+size). Countryside is only 15 edge leaves of the map (612 placements), so the
+hand-drawn regions cover the playable world.
+
+Not done: an automatic fallback (connected components of leaves by density). The
+hand-drawn regions already cover the map, and a density-based split would name
+nothing; revisit it only if DLC or custom maps need zones the file does not draw.
+
 ## Load order
 
 Per zone: **terrain, then structures at full detail (LOD0), then decals, then
@@ -210,6 +278,8 @@ work and can be used to choose the defaults against the real base game.
 3. **Backend cell index and a batched command** (#3), using the partition the Hex
    view shows (#4). Done in v0.2.1; see [the backend index](#the-backend-index-3-4).
 4. Whole-map terrain layer and per-cell phases (#5).
+   Zone clusters on top of the leaves in v0.3.0, see
+   [zone clusters](#zone-clusters-v030).
 5. Memory budget and eviction (#6); persistent cache and onboarding (#7), done.
 
 ## Open questions

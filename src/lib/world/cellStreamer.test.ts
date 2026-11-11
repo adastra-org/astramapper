@@ -29,6 +29,8 @@ function gridOf(leaves: AdaptiveCell[]): CellGrid {
     terrain: 1,
     leaves,
     splits: [],
+    clusters: [],
+    leafCluster: new Uint16Array(leaves.length),
   };
 }
 
@@ -297,5 +299,135 @@ describe("CellStreamer failures and resets", () => {
     s.setBudget(600);
     s.update(0, 0, null);
     expect(s.stats().workingCells).toBe(6);
+  });
+});
+
+describe("CellStreamer pinned zones", () => {
+  /** 30 leaves along +x; leaves 20..29 are the "far" zone, the rest the "near" one. */
+  function zoned(options: { cellsPerCall?: number; concurrency?: number } = {}) {
+    const leaves = Array.from({ length: 30 }, (_, i) => leaf(i));
+    const fake = backend();
+    const s = new CellStreamer(
+      {
+        fetch: fake.fetch,
+        known: () => [],
+        onBatch: () => {},
+        now: () => 0,
+      },
+      {
+        cellsPerCall: options.cellsPerCall ?? 50,
+        concurrency: options.concurrency ?? 1,
+        plan: { budget: 300, keepFactor: 1.4, prefetchShare: 0.4, prefetchReach: 4 },
+      },
+    );
+    s.setGrid({
+      ...gridOf(leaves),
+      clusters: [
+        { key: "near", name: "Near", leaves: 20, placements: 2000, models: 5 },
+        { key: "far", name: "Far", leaves: 10, placements: 1000, models: 2 },
+      ],
+      leafCluster: Uint16Array.from(leaves.map((_, i) => (i < 20 ? 0 : 1))),
+    });
+    return { s, fake };
+  }
+
+  const farKeys = Array.from({ length: 10 }, (_, i) => cellKey({ level: 0, q: 20 + i, r: 0 }));
+
+  test("an unknown cluster cannot be pinned", () => {
+    const { s } = zoned();
+    expect(s.pin("nowhere")).toBe(false);
+    expect(s.isPinned("nowhere")).toBe(false);
+  });
+
+  test("a pinned zone is asked for in full, far from the camera, after the working set", () => {
+    const { s, fake } = zoned();
+    expect(s.pin("far")).toBe(true);
+    s.update(0, 0, null);
+    const asked = keys(fake.calls[0]!.cells);
+    expect(asked[0]).toBe(TERRAIN_KEY);
+    // The working set is the three cells at the origin.
+    expect(asked.slice(1, 4)).toEqual([0, 1, 2].map((q) => cellKey({ level: 0, q, r: 0 })));
+    for (const key of farKeys) expect(asked).toContain(key);
+    // Nearest of the pinned ones first.
+    const at = farKeys.map((k) => asked.indexOf(k));
+    expect(at.every((v, i) => i === 0 || v > at[i - 1]!)).toBe(true);
+  });
+
+  test("the pinned leaves go out in the same small batches, never over the concurrency", () => {
+    const { s, fake } = zoned({ cellsPerCall: 3, concurrency: 2 });
+    s.pin("far");
+    s.update(0, 0, null);
+    s.update(0, 0, null);
+    expect(fake.calls).toHaveLength(2);
+    for (const call of fake.calls) expect(call.cells.length).toBeLessThanOrEqual(3);
+  });
+
+  test("a pinned zone survives the camera flying away; an unpinned one does not", async () => {
+    const { s, fake } = zoned();
+    s.pin("far");
+    s.update(0, 0, null);
+    fake.calls[0]!.resolve();
+    await tick();
+    for (const key of farKeys) expect(s.store.has(key)).toBe(true);
+
+    // Fly to the far end: the working set is there now, and the origin is behind.
+    s.update(2900, 0, null);
+    // The cell that was in the working set is gone, the pinned ones stay.
+    expect(s.store.has(cellKey({ level: 0, q: 0, r: 0 }))).toBe(false);
+    for (const key of farKeys) expect(s.store.has(key)).toBe(true);
+    expect(s.store.has(TERRAIN_KEY)).toBe(true);
+  });
+
+  test("releasing a zone evicts its cells at once and reports their placements", async () => {
+    const { s, fake } = zoned();
+    s.pin("far");
+    s.update(0, 0, null);
+    fake.calls[0]!.resolve();
+    await tick();
+
+    const dropped = s.unpin("far");
+    expect(dropped.length).toBe(10);
+    for (const key of farKeys) expect(s.store.has(key)).toBe(false);
+    // The working set's own cells are not the zone's to take away.
+    expect(s.store.has(cellKey({ level: 0, q: 0, r: 0 }))).toBe(true);
+    expect(s.store.has(TERRAIN_KEY)).toBe(true);
+    expect(s.isPinned("far")).toBe(false);
+    expect(s.unpin("far")).toEqual([]);
+  });
+
+  test("a zone that overlaps the working set keeps those cells on release", async () => {
+    const { s, fake } = zoned();
+    s.pin("near");
+    s.update(0, 0, null);
+    fake.calls[0]!.resolve();
+    await tick();
+    const inWorkingSet = cellKey({ level: 0, q: 1, r: 0 });
+    expect(s.store.has(inWorkingSet)).toBe(true);
+    s.unpin("near");
+    expect(s.store.has(inWorkingSet)).toBe(true);
+    // A cell of the zone far from the camera is not.
+    expect(s.store.has(cellKey({ level: 0, q: 15, r: 0 }))).toBe(false);
+  });
+
+  test("progress counts the leaves of each cluster that are held", async () => {
+    const { s, fake } = zoned();
+    s.pin("far");
+    s.update(0, 0, null);
+    expect(s.clusterProgress().map((p) => p.heldLeaves)).toEqual([0, 0]);
+    fake.calls[0]!.resolve();
+    await tick();
+    const [near, far] = s.clusterProgress();
+    expect(far).toMatchObject({ key: "far", heldLeaves: 10, leaves: 10, pinned: true });
+    expect(far!.heldPlacements).toBe(1000);
+    expect(near).toMatchObject({ key: "near", pinned: false });
+    expect(near!.heldLeaves).toBeGreaterThan(0);
+  });
+
+  test("a new partition forgets the pins", () => {
+    const { s } = zoned();
+    s.pin("far");
+    s.setGrid(gridOf([leaf(0)]));
+    expect(s.isPinned("far")).toBe(false);
+    expect(s.clusterProgress()).toEqual([]);
   });
 });

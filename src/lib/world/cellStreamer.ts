@@ -24,6 +24,17 @@
  *
  * A cell that fails to load is not asked for again for `RETRY_MS`, so a backend
  * error shows up once rather than four times a second.
+ *
+ * # Pinned zones
+ *
+ * `pin` holds every leaf of a zone cluster on top of the working set: the leaves
+ * are asked for in the same batches, after the working set and before the
+ * prefetch ring, and are exempt from eviction until `unpin`. It is not a second
+ * loading path, so the limits are the same ones: a reply carries at most the
+ * backend's model byte cap, and the models it does carry go through the model
+ * cache, which stays under its own byte budget whatever is pinned. What a pinned
+ * zone holds here is its placements (columns, cheap); geometry is still built
+ * around the camera only.
  */
 import {
   cellKey,
@@ -36,6 +47,8 @@ import {
 } from "./cellData";
 import { DEFAULT_PLAN, planCells, type Heading, type PlanParams } from "./cellPlan";
 import { CellStore, type CellEntry, type DroppedRow } from "./cellStore";
+import { leavesByCluster, type ClusterProgress } from "./clusters";
+import type { AdaptiveCell } from "./hexAdaptive";
 
 export type CellStreamerDeps = {
   /** Fetch cells and the models they need. `known` names are not resolved again. */
@@ -86,6 +99,14 @@ export class CellStreamer {
   /** Cells that failed, by key, with when they may be tried again. */
   private readonly failedUntil = new Map<string, number>();
   private calls = 0;
+  /** Zone clusters being held, by key: their leaves, ready to ask for. */
+  private readonly pins = new Map<string, readonly AdaptiveCell[]>();
+  /** The keys of every pinned leaf, for the eviction pass. */
+  private pinnedKeys = new Set<string>();
+  /** The leaves of each cluster of the current grid, by cluster index. */
+  private clusterLeaves: AdaptiveCell[][] = [];
+  /** What the last pass decided to keep, so `unpin` can evict without a camera. */
+  private lastKeep: ReadonlySet<string> = new Set();
   /** Guards a batch from before a `setGrid` landing in the next index. */
   private epoch = 0;
   private last = { reach: 0, working: 0, prefetch: 0 };
@@ -112,10 +133,80 @@ export class CellStreamer {
     this.grid = grid;
     this.inFlight.clear();
     this.failedUntil.clear();
+    this.pins.clear();
+    this.pinnedKeys = new Set();
+    this.lastKeep = new Set();
+    this.clusterLeaves = grid ? leavesByCluster(grid) : [];
     // Calls still out belong to the old epoch and no longer report back here.
     this.calls = 0;
     if (this.store.size > 0) this.store.clear();
     this.bump();
+  }
+
+  /**
+   * Hold every leaf of a zone cluster, in addition to the working set, until
+   * `unpin`. Returns false for a key the partition has no cluster for.
+   */
+  pin(key: string): boolean {
+    const at = this.grid?.clusters.findIndex((c) => c.key === key) ?? -1;
+    if (at < 0) return false;
+    this.pins.set(key, this.clusterLeaves[at] ?? []);
+    this.refreshPinned();
+    this.bump();
+    return true;
+  }
+
+  /**
+   * Let go of a pinned cluster. Its cells leave now, except those the working set
+   * still wants or another pin holds. Returns their placements so the caller can
+   * unload the geometry.
+   */
+  unpin(key: string): DroppedRow[] {
+    if (!this.pins.delete(key)) return [];
+    this.refreshPinned();
+    const dropped: DroppedRow[] = [];
+    for (const held of this.store.keys()) {
+      if (held === TERRAIN_KEY || this.lastKeep.has(held) || this.pinnedKeys.has(held)) continue;
+      for (const row of this.store.remove(held)) dropped.push(row);
+    }
+    this.bump();
+    return dropped;
+  }
+
+  isPinned(key: string): boolean {
+    return this.pins.has(key);
+  }
+
+  /** How much of each cluster is held, parallel to `partition.clusters`. */
+  clusterProgress(): readonly ClusterProgress[] {
+    const grid = this.grid;
+    if (!grid) return [];
+    return grid.clusters.map((info, at) => {
+      const leaves = this.clusterLeaves[at] ?? [];
+      let heldLeaves = 0;
+      let heldPlacements = 0;
+      for (const leaf of leaves) {
+        if (!this.store.has(cellKey(refOf(leaf)))) continue;
+        heldLeaves += 1;
+        heldPlacements += leaf.count;
+      }
+      return {
+        key: info.key,
+        heldLeaves,
+        leaves: leaves.length,
+        heldPlacements,
+        placements: info.placements,
+        pinned: this.pins.has(info.key),
+      };
+    });
+  }
+
+  private refreshPinned(): void {
+    const keys = new Set<string>();
+    for (const leaves of this.pins.values()) {
+      for (const leaf of leaves) keys.add(cellKey(refOf(leaf)));
+    }
+    this.pinnedKeys = keys;
   }
 
   /** How many placements the working set may hold. Takes effect on the next pass. */
@@ -155,12 +246,13 @@ export class CellStreamer {
     if (!grid) return [];
     const plan = planCells(grid.leaves, camX, camY, heading, this.params);
     this.last = { reach: plan.reach, working: plan.working.length, prefetch: plan.prefetch.length };
+    this.lastKeep = plan.keep;
 
     // Let go of what the plan no longer keeps. A cell in flight is not here yet;
     // if it is no longer wanted when it lands, the next pass drops it.
     const dropped: DroppedRow[] = [];
     for (const key of this.store.keys()) {
-      if (key === TERRAIN_KEY || plan.keep.has(key)) continue;
+      if (key === TERRAIN_KEY || plan.keep.has(key) || this.pinnedKeys.has(key)) continue;
       for (const row of this.store.remove(key)) dropped.push(row);
     }
     if (dropped.length > 0) this.bump();
@@ -177,9 +269,24 @@ export class CellStreamer {
     };
     consider(TERRAIN_CELL);
     for (const leaf of plan.working) consider(refOf(leaf));
+    for (const leaf of this.pinnedByDistance(camX, camY)) consider(refOf(leaf));
     for (const leaf of plan.prefetch) consider(refOf(leaf));
     this.dispatch(wanted);
     return dropped;
+  }
+
+  /** The pinned leaves, nearest the camera first, so a zone fills from where you are. */
+  private pinnedByDistance(camX: number, camY: number): AdaptiveCell[] {
+    if (this.pins.size === 0) return [];
+    const all: { leaf: AdaptiveCell; distance: number }[] = [];
+    for (const leaves of this.pins.values()) {
+      for (const leaf of leaves) {
+        all.push({ leaf, distance: Math.hypot(leaf.x - camX, leaf.y - camY) });
+      }
+    }
+    // oxlint-disable-next-line unicorn/no-array-sort
+    all.sort((a, b) => a.distance - b.distance);
+    return all.map((entry) => entry.leaf);
   }
 
   private dispatch(wanted: readonly CellRef[]): void {
