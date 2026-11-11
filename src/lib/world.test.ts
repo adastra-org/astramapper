@@ -18,6 +18,7 @@ import {
   placementScale,
   popHistory,
   serializeProject,
+  STREAM_VIEW_NEAR,
   stillStreamWanted,
   streamingDecision,
   streamPenalty,
@@ -655,6 +656,67 @@ describe("streamingDecision", () => {
 
       expect(decision.load).toHaveLength(1);
       expect(decision.load[0]!.inView).toBe(false);
+    });
+
+    describe("off-view radius", () => {
+      // HD at lodDist 100: radius 700, off-view cut 350, unload at 1050.
+      test("an entity behind the camera loads only inside half its radius", () => {
+        const entries = [
+          region("m1", [placedAtXy("m1", 0, -300, 0), placedAtXy("m1", 1, -500, 0)]),
+        ];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4, lookingAlongX);
+        expect(decision.load.map((c) => c.entityIndex)).toEqual([0]);
+      });
+
+      test("the same entity ahead of the camera loads out to its full radius", () => {
+        const entries = [region("m1", [placedAtXy("m1", 0, 500, 0), placedAtXy("m1", 1, 650, 0)])];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4, lookingAlongX);
+        expect(decision.load.map((c) => c.entityIndex)).toEqual([0, 1]);
+      });
+
+      test("without a view the whole sphere is a candidate", () => {
+        const entries = [region("m1", [placedAtXy("m1", 0, -500, 0)])];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4);
+        expect(decision.load.map((c) => c.entityIndex)).toEqual([0]);
+      });
+
+      test("inside the near radius is on screen whatever the angle", () => {
+        const entries = [region("m1", [placedAtXy("m1", 0, -STREAM_VIEW_NEAR + 1, 0)])];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4, lookingAlongX);
+        expect(decision.load[0]!.inView).toBe(true);
+      });
+
+      test("scales with the tier: a coarse LOD placement reaches further behind", () => {
+        const far = { ...placedAtXy("m1", 0, -600, 0), lodLevel: "LOD" }; // radius 1400, cut 700
+        const entries = [region("m1", [far])];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4, lookingAlongX);
+        expect(decision.load.map((c) => c.entityIndex)).toEqual([0]);
+      });
+
+      test("terrain behind the camera is still wanted at any distance", () => {
+        const entries = [region("m1", [placedAtXy("terrain_a", 0, -5_000, 0)])];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4, lookingAlongX);
+        expect(decision.load.map((c) => c.entityIndex)).toEqual([0]);
+      });
+
+      test("a loaded entity out of view but inside its radius is kept, not reloaded", () => {
+        const entries = [region("m1", [placedAtXy("m1", 0, -500, 0)])];
+        const decision = streamingDecision([0, 0, 0], entries, new Set(["m1:0"]), new Set(), 4, lookingAlongX);
+        expect(decision.unload).toEqual([]);
+        expect(decision.load).toEqual([]);
+      });
+
+      test("a waiting request goes stale once its entity is off view and past the cut", () => {
+        const box = { extentsMin: [0, 0, 0], extentsMax: [100, 100, 100] } as const;
+        const behindFar = placedAtXy("prop_building_01", 0, -500, 0);
+        const behindNear = placedAtXy("prop_building_01", 1, -300, 0);
+        const ahead = placedAtXy("prop_building_01", 2, 500, 0);
+        expect(stillStreamWanted([0, 0, 0], box, behindFar, lookingAlongX)).toBe(false);
+        expect(stillStreamWanted([0, 0, 0], box, behindNear, lookingAlongX)).toBe(true);
+        expect(stillStreamWanted([0, 0, 0], box, ahead, lookingAlongX)).toBe(true);
+        // Without a view the sphere alone decides, as before.
+        expect(stillStreamWanted([0, 0, 0], box, behindFar)).toBe(true);
+      });
     });
 
     /** The view decides order, never what unloads — otherwise turning the

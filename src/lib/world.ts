@@ -693,6 +693,37 @@ export const STREAM_VIEW_COS_HALF_ANGLE = Math.cos((60 * Math.PI) / 180);
  */
 export const STREAM_VIEW_NEAR = 60;
 
+/**
+ * How much of its tier radius an entity outside the view cone may load from.
+ *
+ * Out of view is not out of the sphere (turning must not find an empty world),
+ * but it is a lot less urgent: past this fraction of the radius, what is behind
+ * or beside the camera is not a candidate until it comes into view. Unloading
+ * keeps the full radius (x1.5), so a loaded entity that falls out of view stays
+ * put: the gap between 0.5 and 1.5 is the hysteresis.
+ */
+export const STREAM_OFF_VIEW_RADIUS = 0.5;
+
+/**
+ * Whether something `distance` away, at offset `(dx, dy, dz)`, counts as on
+ * screen: inside the near radius, or inside the view cone. No view means
+ * everything is.
+ */
+export function inStreamView(
+  dx: number,
+  dy: number,
+  dz: number,
+  distance: number,
+  view?: StreamView | null,
+): boolean {
+  if (!view || distance <= STREAM_VIEW_NEAR) return true;
+  return (
+    (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
+      Math.max(distance, 1e-6) >=
+    view.cosHalfAngle
+  );
+}
+
 /** One entity the pass decided to load. */
 export type StreamCandidate = {
   readonly mapKey: string;
@@ -717,13 +748,18 @@ export type StreamCandidate = {
  * # What `view` changes, and what it deliberately does not
  *
  * Given a view, the batch is filled with what is **on screen** first and only
- * then with what is behind the camera. It does not change *which* entities are
- * candidates and it does not change the unload rule — both stay the sphere they
- * were. That distinction is the whole design: culling the candidate set to the
- * frustum would mean turning around and finding nothing there, and then a
- * reload storm as the same geometry streams back in. Ordering costs nothing and
- * cannot pop, and with a batch of 24 against a sphere holding thousands, order
- * is what the user actually experiences as load speed.
+ * then with what is behind the camera, and what is off screen is only a
+ * candidate inside `STREAM_OFF_VIEW_RADIUS` of its tier radius. The unload rule
+ * does not look at the view at all: it stays the full sphere (x1.5).
+ *
+ * That split is the design. Culling the candidates to the frustum outright
+ * would mean turning around and finding nothing there, then a reload storm as
+ * the same geometry streams back in. A smaller sphere for what is off screen
+ * keeps the near side of it resident and spends no IPC or memory on the far
+ * side until it is looked at, and because loading starts at 0.5 of the radius
+ * and unloading at 1.5, an entity that drifts in and out of the cone never
+ * thrashes. Ordering still does most of the work: with a batch of 24 against a
+ * sphere holding thousands, order is what the user experiences as load speed.
  *
  * # Why this is not a collect-then-sort
  *
@@ -778,12 +814,7 @@ export function streamingDecision(
       ) {
         continue;
       }
-      const inView =
-        !view ||
-        distance <= STREAM_VIEW_NEAR ||
-        (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
-          Math.max(distance, 1e-6) >=
-          view.cosHalfAngle;
+      const inView = inStreamView(dx, dy, dz, distance, view);
       const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + STREAM_PHASE_PENALTY.terrain;
       insertCandidate(
         best,
@@ -855,12 +886,9 @@ export function streamingDecision(
       ) {
         continue;
       }
-      const inView =
-        !view ||
-        distance <= STREAM_VIEW_NEAR ||
-        (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
-          Math.max(distance, 1e-6) >=
-          view.cosHalfAngle;
+      const inView = inStreamView(dx, dy, dz, distance, view);
+      // Off view, only the inner part of the sphere is worth loading now.
+      if (!inView && distance > radius * STREAM_OFF_VIEW_RADIUS) continue;
       const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + penalty;
       insertCandidate(
         best,
@@ -891,12 +919,7 @@ export function streamRank(
   const dy = entity.position[1] - cameraGta[1];
   const dz = entity.position[2] - cameraGta[2];
   const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  const inView =
-    !view ||
-    distance <= STREAM_VIEW_NEAR ||
-    (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
-      Math.max(distance, 1e-6) >=
-      view.cosHalfAngle;
+  const inView = inStreamView(dx, dy, dz, distance, view);
   return (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + streamPenalty(entity);
 }
 
@@ -1013,13 +1036,15 @@ export function streamPenaltyOf(name: string, lodLevel: string): number {
 
 /**
  * Whether `streamingDecision` would still ask for this placement from this
- * camera: its map is in range and it is inside its own LOD-tier radius. The
- * test a request waiting in a queue has to keep passing to stay there.
+ * camera: its map is in range and it is inside its own LOD-tier radius (the
+ * reduced one when it is off view). The test a request waiting in a queue has
+ * to keep passing to stay there.
  */
 export function stillStreamWanted(
   cameraGta: readonly [number, number, number],
   entry: Pick<RegionEntry, "extentsMin" | "extentsMax">,
   placement: Placed,
+  view?: StreamView | null,
 ): boolean {
   // The ground is wanted everywhere (#5), so a waiting terrain request never
   // goes stale however far the camera has moved.
@@ -1034,7 +1059,15 @@ export function stillStreamWanted(
   const dy = placement.position[1] - cameraGta[1];
   const dz = placement.position[2] - cameraGta[2];
   const radius = entityStreamRadius(placement);
-  return dx * dx + dy * dy + dz * dz <= radius * radius;
+  const distanceSq = dx * dx + dy * dy + dz * dz;
+  if (distanceSq > radius * radius) return false;
+  // The same off-view cut as the decision, so a request for something the
+  // camera turned away from does not sit in the queue.
+  if (!view) return true;
+  const distance = Math.sqrt(distanceSq);
+  return (
+    inStreamView(dx, dy, dz, distance, view) || distance <= radius * STREAM_OFF_VIEW_RADIUS
+  );
 }
 
 /**
