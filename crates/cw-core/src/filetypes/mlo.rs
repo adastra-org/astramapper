@@ -8,8 +8,12 @@
 //! expands those local entities into world space at the instance's transform,
 //! which is the step a world view needs to show interiors as placed content.
 //!
-//! The transform mirrors the reference: `world = R * local + T` for position
-//! and `world = R_instance * R_local` for rotation — no instance scale, which
+//! The transform mirrors the reference
+//! (`YmapEntityDef(YmapEntityDef mloParent, MCEntityDef ent, int index)`):
+//! `world = R * local + T` for position and
+//! `world = R_instance * inverse(R_local)` for rotation — the interior entity's
+//! stored quaternion is inverted before the instance's is multiplied on, while
+//! the instance's own is used as stored. No instance scale, which
 //! `CreateYmapEntities` does not apply.
 
 use std::collections::HashMap;
@@ -38,6 +42,23 @@ pub struct MloWorldEntity {
     pub lod_dist: f32,
 }
 
+/// `Quaternion.Invert` as the reference applies it to a stored entity
+/// rotation: the identity stays as it is, anything else is inverted
+/// (conjugate over the squared length, so a unit quaternion is just
+/// conjugated). `[x, y, z, w]` in and out.
+pub fn invert_orientation(stored: [f32; 4]) -> [f32; 4] {
+    if stored == [0.0, 0.0, 0.0, 1.0] {
+        return stored;
+    }
+    let [x, y, z, w] = stored;
+    let length_squared = x * x + y * y + z * z + w * w;
+    if length_squared <= f32::EPSILON {
+        return stored;
+    }
+    let k = 1.0 / length_squared;
+    [-x * k, -y * k, -z * k, w * k]
+}
+
 /// Expand an MLO interior's entities into world space at an instance's
 /// transform. Pure of any archive I/O, so the transform math is unit-testable.
 pub fn expand_mlo_entities(
@@ -52,7 +73,7 @@ pub fn expand_mlo_entities(
         .map(|entry| {
             let local = Vec3::from_array(entry.entity.position);
             let world = rotation * local + translation;
-            let combined = rotation * Quat::from_array(entry.entity.rotation);
+            let combined = rotation * Quat::from_array(invert_orientation(entry.entity.rotation));
             MloWorldEntity {
                 archetype_name: entry.entity.archetype_name,
                 position: world.to_array(),
@@ -294,5 +315,39 @@ mod tests {
         let [x, y, z, w] = out[0].rotation;
         let norm = (x * x + y * y + z * z + w * w).sqrt();
         assert!((norm - 1.0).abs() < 1e-5, "norm={norm}");
+    }
+
+    /// `YmapEntityDef(YmapEntityDef mloParent, MCEntityDef ent, int index)`:
+    /// the interior entity's stored rotation is inverted
+    /// (`MloRefOrientation = Quaternion.Invert(...)`) before the instance's
+    /// orientation is multiplied on, so a lone local turn comes out reversed.
+    #[test]
+    fn interior_rotation_is_inverted_like_the_reference() {
+        let qz = [0.0, 0.0, FRAC_1_SQRT_2, FRAC_1_SQRT_2];
+        let out = expand_mlo_entities(
+            [0.0, 0.0, 0.0],
+            identity(),
+            &[interior_entity([0.0; 3], qz)],
+        );
+        let [x, y, z, w] = out[0].rotation;
+        assert!(x.abs() < 1e-5 && y.abs() < 1e-5, "{:?}", out[0].rotation);
+        assert!((z + FRAC_1_SQRT_2).abs() < 1e-5, "z={z}");
+        assert!((w - FRAC_1_SQRT_2).abs() < 1e-5, "w={w}");
+    }
+
+    /// The instance's rotation is used as stored (`Orientation` of an MLO
+    /// instance is not inverted), and a local turn that undoes it cancels out:
+    /// `inst * conj(local)` with `local == inst` is the identity.
+    #[test]
+    fn instance_rotation_is_not_inverted_and_composes_with_the_inverted_local() {
+        let qz = [0.0, 0.0, FRAC_1_SQRT_2, FRAC_1_SQRT_2];
+        let out = expand_mlo_entities([0.0; 3], qz, &[interior_entity([0.0; 3], qz)]);
+        let [x, y, z, w] = out[0].rotation;
+        assert!(
+            x.abs() < 1e-5 && y.abs() < 1e-5 && z.abs() < 1e-5,
+            "{:?}",
+            out[0].rotation
+        );
+        assert!((w - 1.0).abs() < 1e-5, "w={w}");
     }
 }
