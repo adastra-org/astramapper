@@ -101,7 +101,11 @@ impl Loaded {
             let stamps = self.manager.archive_stamps();
             let mut mixed: u64 = 0xcbf2_9ce4_8422_2325;
             for (index, archive) in self.manager.archives.iter().enumerate() {
-                if !archive.entries.iter().any(|e| e.name_lower.ends_with(".ytyp")) {
+                if !archive
+                    .entries
+                    .iter()
+                    .any(|e| e.name_lower.ends_with(".ytyp"))
+                {
                     continue;
                 }
                 let stamp = stamps.get(index).copied().unwrap_or(0);

@@ -154,7 +154,9 @@ impl Reporter {
             }
             *last = Instant::now();
         }
-        let _ = self.channel.send(self.snapshot(phase, total, bytes, budget));
+        let _ = self
+            .channel
+            .send(self.snapshot(phase, total, bytes, budget));
     }
 
     fn snapshot(&self, phase: Phase, total: usize, bytes: u64, budget: u64) -> BakeProgress {
@@ -191,7 +193,8 @@ pub fn reachable_models(
             if cancelled() {
                 break;
             }
-            let Ok(map) = crate::world::read_world_map(&path, keys, manager, Some(mlo), Some(names))
+            let Ok(map) =
+                crate::world::read_world_map(&path, keys, manager, Some(mlo), Some(names))
             else {
                 continue;
             };

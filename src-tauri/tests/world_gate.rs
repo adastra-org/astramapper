@@ -298,8 +298,7 @@ fn the_placement_envelope_round_trips_a_real_map() {
             assert_eq!(scale_z[at], entity.scale_z, "{where_}: scaleZ");
             assert_eq!(parents[at], entity.parent_index, "{where_}: parentIndex");
             assert_eq!(
-                table_lods[lod_slots[at] as usize],
-                entity.lod_level,
+                table_lods[lod_slots[at] as usize], entity.lod_level,
                 "{where_}: lodLevel"
             );
             assert_eq!(lod_dist[at], entity.lod_dist, "{where_}: lodDist");
@@ -403,8 +402,7 @@ fn streams_an_entitys_archetype_to_real_geometry() {
         "resolved a non-model path: {model_path}"
     );
 
-    let preview =
-        read_world_model(&model_path, &keys, &manager, None).expect("read the model");
+    let preview = read_world_model(&model_path, &keys, &manager, None).expect("read the model");
     assert!(
         !preview.drawables.is_empty(),
         "{model_path} read no drawables"
@@ -605,7 +603,8 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
     let mut total_parts = 0usize;
     // Which block formats real placed geometry actually uses, printed below.
     // The shader work needs this to know what it has to handle.
-    let mut by_format: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut by_format: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
 
     for model in &models {
         let started = Instant::now();
@@ -637,7 +636,8 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
 
         let view = EnvelopeView::read(&blob).expect("the envelope reads back");
         assert_eq!(view.kind, Kind::Model);
-        let meta: serde_json::Value = serde_json::from_str(view.meta).expect("the metadata is JSON");
+        let meta: serde_json::Value =
+            serde_json::from_str(view.meta).expect("the metadata is JSON");
         let textures = meta["textures"].as_array().expect("textures");
 
         // Geometry: the envelope's sections must carry byte for byte what the
@@ -716,7 +716,10 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
         }
 
         let mut a: Vec<u64> = png.textures.iter().map(|t| t.hash as u64).collect();
-        let mut b: Vec<u64> = textures.iter().map(|t| t["hash"].as_u64().unwrap()).collect();
+        let mut b: Vec<u64> = textures
+            .iter()
+            .map(|t| t["hash"].as_u64().unwrap())
+            .collect();
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b, "{model} resolved a different texture set");
@@ -795,10 +798,7 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
         "{compared} placed models, {mips} mip levels ({fallbacks} textures fell back to rgba8)"
     );
     println!("  {narrowed_parts}/{total_parts} parts index fewer than 65,536 vertices");
-    println!(
-        "  json+base64  {png_time:.2?}  {:.1} MB",
-        mb(png_bytes)
-    );
+    println!("  json+base64  {png_time:.2?}  {:.1} MB", mb(png_bytes));
     println!(
         "  envelope     {block_time:.2?}  {:.1} MB  ({:.0}x cpu, {:.2}x wire)",
         mb(block_bytes),
@@ -807,7 +807,10 @@ fn the_block_path_resolves_the_same_textures_as_the_png_path() {
     );
     let total: usize = by_format.values().sum();
     for (format, count) in &by_format {
-        println!("  {format:6} {count:5}  {:.1}%", 100.0 * *count as f64 / total as f64);
+        println!(
+            "  {format:6} {count:5}  {:.1}%",
+            100.0 * *count as f64 / total as f64
+        );
     }
 }
 

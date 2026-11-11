@@ -24,7 +24,9 @@ use cw_core::filetypes::{
 };
 use cw_core::image;
 use cw_core::mesh::MeshBundle;
-use cw_core::meta::{read_meta as read_metadata, AssetType, LodLevel, Meta, MetaFile, MetaNode, PriorityLevel};
+use cw_core::meta::{
+    read_meta as read_metadata, AssetType, LodLevel, Meta, MetaFile, MetaNode, PriorityLevel,
+};
 use cw_core::resources::{
     read_bounds as read_collision_bounds, read_clips as read_clip_dictionary, read_drawables,
     read_named_drawables, read_named_fragments, read_textures, Drawable, Texture,
@@ -188,8 +190,13 @@ pub fn open_entry(
         });
 
     let awc_key = loaded.keys.awc_key;
-    let (viewer_name, viewers, note) =
-        choose_viewer(file_kind, &entry.name_lower, &data, resource.as_ref(), &awc_key);
+    let (viewer_name, viewers, note) = choose_viewer(
+        file_kind,
+        &entry.name_lower,
+        &data,
+        resource.as_ref(),
+        &awc_key,
+    );
 
     let info = EntryInfo {
         path: entry.path.clone(),
@@ -463,13 +470,17 @@ fn choose_viewer(
         FileKind::Particle if !readable_as_text => {
             Some("particle dictionaries embed drawables, but Particle.cs is not ported yet".into())
         }
-        FileKind::AudioMetadata if !readable_as_text => {
-            Some("RelFile.cs, which names and sequences the waves in the .awc files, is not ported yet".into())
-        }
+        FileKind::AudioMetadata if !readable_as_text => Some(
+            "RelFile.cs, which names and sequences the waves in the .awc files, is not ported yet"
+                .into(),
+        ),
         FileKind::Clip | FileKind::Nav | FileKind::Bounds if !readable_as_text => {
             // `.yed`, `.yfd`, `.yld` and `.ypdb` land here: they are animation
             // files but not clip dictionaries, and each needs its own reader.
-            Some(format!("no {} parser yet, so this opens as bytes", kind.label()))
+            Some(format!(
+                "no {} parser yet, so this opens as bytes",
+                kind.label()
+            ))
         }
         _ => None,
     };
@@ -515,7 +526,10 @@ pub fn read_gxt2(viewer: State<'_, ViewerState>) -> Result<Gxt2Preview, String> 
         entries: file
             .entries
             .into_iter()
-            .map(|e| Gxt2Entry { hash: e.hash, text: e.text })
+            .map(|e| Gxt2Entry {
+                hash: e.hash,
+                text: e.text,
+            })
             .collect(),
     })
 }
@@ -559,8 +573,10 @@ pub fn read_model(
         .ok_or("this file is not a resource, so it has no geometry")?;
 
     let named = match open.info.file_kind {
-        FileKind::Fragment => read_named_fragments(open.info.file_kind, &open.data, resource.system_size)
-            .map_err(|e| format!("could not read the geometry: {e}"))?,
+        FileKind::Fragment => {
+            read_named_fragments(open.info.file_kind, &open.data, resource.system_size)
+                .map_err(|e| format!("could not read the geometry: {e}"))?
+        }
         _ => read_named_drawables(open.info.file_kind, &open.data, resource.system_size)
             .map_err(|e| format!("could not read the geometry: {e}"))?,
     };
@@ -1439,7 +1455,10 @@ pub fn read_map(viewer: State<'_, ViewerState>) -> Result<MapPreview, String> {
 
     let name_lower = open.info.name.to_ascii_lowercase();
     if !name_lower.ends_with(".ymap") && !name_lower.ends_with(".ytyp") {
-        return Err(format!("{} is not a placement or archetype dictionary", open.info.name));
+        return Err(format!(
+            "{} is not a placement or archetype dictionary",
+            open.info.name
+        ));
     }
 
     let system_size = open.info.resource.as_ref().map(|r| r.system_size);
@@ -1522,7 +1541,11 @@ fn build_ymap_preview(meta: &Meta) -> Option<MapPreview> {
 /// One entity, and its subtree. `entities` is the flat list the hierarchy
 /// indices point into; the borrow is immutable for the whole build, so indexing
 /// is safe.
-fn build_map_entity(index: usize, entity: &cw_core::filetypes::Entity, entities: &[cw_core::filetypes::Entity]) -> MapEntity {
+fn build_map_entity(
+    index: usize,
+    entity: &cw_core::filetypes::Entity,
+    entities: &[cw_core::filetypes::Entity],
+) -> MapEntity {
     MapEntity {
         index,
         name: hash_string(entity.def.archetype_name),
@@ -1575,12 +1598,16 @@ fn build_ytyp_preview(meta: &Meta) -> Option<MapPreview> {
 }
 
 fn build_ytyp_archetype(index: usize, archetype: &Archetype) -> YtypArchetype {
-    let (kind, base, time_flags, mlo): (&'static str, &cw_core::filetypes::BaseArchetype, Option<u32>, Option<&MloArchetype>) =
-        match archetype {
-            Archetype::Base(base) => ("base", base, None, None),
-            Archetype::Time(time) => ("time", &time.base, Some(time.time_flags), None),
-            Archetype::Mlo(mlo) => ("mlo", &mlo.base, None, Some(mlo)),
-        };
+    let (kind, base, time_flags, mlo): (
+        &'static str,
+        &cw_core::filetypes::BaseArchetype,
+        Option<u32>,
+        Option<&MloArchetype>,
+    ) = match archetype {
+        Archetype::Base(base) => ("base", base, None, None),
+        Archetype::Time(time) => ("time", &time.base, Some(time.time_flags), None),
+        Archetype::Mlo(mlo) => ("mlo", &mlo.base, None, Some(mlo)),
+    };
 
     YtypArchetype {
         index,
@@ -2147,7 +2174,11 @@ mod tests {
         put_u16(&mut d, 0x4C, 3); // block count
 
         put_u32(&mut d, 0x300, cw_core::filetypes::names::C_MAP_TYPES);
-        put_u32(&mut d, 0x320, cw_core::filetypes::names::C_BASE_ARCHETYPE_DEF);
+        put_u32(
+            &mut d,
+            0x320,
+            cw_core::filetypes::names::C_BASE_ARCHETYPE_DEF,
+        );
 
         // Block 1: CMapTypes, payload at 0x700.
         put_u32(&mut d, 0x500, cw_core::filetypes::names::C_MAP_TYPES);
@@ -2158,7 +2189,11 @@ mod tests {
         put_u32(&mut d, 0x514, 8);
         put_u64(&mut d, 0x518, addr(0x740));
         // Block 3: CBaseArchetypeDef, payload at 0x760.
-        put_u32(&mut d, 0x520, cw_core::filetypes::names::C_BASE_ARCHETYPE_DEF);
+        put_u32(
+            &mut d,
+            0x520,
+            cw_core::filetypes::names::C_BASE_ARCHETYPE_DEF,
+        );
         put_u32(&mut d, 0x524, 144);
         put_u64(&mut d, 0x528, addr(0x760));
 

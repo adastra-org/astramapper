@@ -142,10 +142,7 @@ pub fn encode(map: &WorldMap) -> Result<Vec<u8>, String> {
             Some(level) => *level,
             None => {
                 let level = u16::try_from(lod_levels.len()).map_err(|_| {
-                    format!(
-                        "{} carries more than 65,535 distinct LOD levels",
-                        map.path
-                    )
+                    format!("{} carries more than 65,535 distinct LOD levels", map.path)
                 })?;
                 lod_levels.push(lod_level.as_str());
                 lod_index.insert(lod_level.as_str(), level);

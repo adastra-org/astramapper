@@ -84,9 +84,7 @@ fn table() -> &'static Mutex<HashMap<&'static str, Entry>> {
 
 fn echoing() -> bool {
     static ECHO: OnceLock<bool> = OnceLock::new();
-    *ECHO.get_or_init(|| {
-        std::env::var("ASTRAMAPPER_PERF").is_ok_and(|v| v != "0" && !v.is_empty())
-    })
+    *ECHO.get_or_init(|| std::env::var("ASTRAMAPPER_PERF").is_ok_and(|v| v != "0" && !v.is_empty()))
 }
 
 /// Record one completed span.
@@ -97,7 +95,10 @@ fn echoing() -> bool {
 pub fn record(name: &'static str, elapsed: Duration, bytes: u64) {
     if echoing() {
         if bytes > 0 {
-            eprintln!("[perf] {name} {:.2}ms {bytes}B", elapsed.as_secs_f64() * 1000.0);
+            eprintln!(
+                "[perf] {name} {:.2}ms {bytes}B",
+                elapsed.as_secs_f64() * 1000.0
+            );
         } else {
             eprintln!("[perf] {name} {:.2}ms", elapsed.as_secs_f64() * 1000.0);
         }
@@ -142,7 +143,10 @@ pub struct Timer {
 
 impl Timer {
     pub fn start(name: &'static str) -> Self {
-        Self { name, started: Instant::now() }
+        Self {
+            name,
+            started: Instant::now(),
+        }
     }
 
     /// Record and consume. Dropping without calling this records nothing, on
@@ -277,7 +281,10 @@ mod tests {
             record("test.accumulates", Duration::from_millis(10), 3);
         }
         let rows = report();
-        let row = rows.iter().find(|r| r.name == "test.accumulates").expect("row");
+        let row = rows
+            .iter()
+            .find(|r| r.name == "test.accumulates")
+            .expect("row");
         assert_eq!(row.calls, 5);
         assert_eq!(row.bytes, 15);
         assert!((row.total_ms - 50.0).abs() < 0.001);
@@ -296,7 +303,10 @@ mod tests {
         record("test.extremes", Duration::from_millis(99), 0);
 
         let rows = report();
-        let row = rows.iter().find(|r| r.name == "test.extremes").expect("row");
+        let row = rows
+            .iter()
+            .find(|r| r.name == "test.extremes")
+            .expect("row");
         assert_eq!(row.calls, WINDOW as u64 + 2);
         assert!((row.min_ms - 1.0).abs() < 0.001, "min survives the window");
         assert!((row.max_ms - 99.0).abs() < 0.001);
@@ -323,7 +333,10 @@ mod tests {
             record("test.percentiles", Duration::from_millis(value), 0);
         }
         let rows = report();
-        let row = rows.iter().find(|r| r.name == "test.percentiles").expect("row");
+        let row = rows
+            .iter()
+            .find(|r| r.name == "test.percentiles")
+            .expect("row");
         assert!((row.p50_ms - 50.0).abs() < 0.001, "p50 was {}", row.p50_ms);
         assert!((row.p95_ms - 95.0).abs() < 0.001, "p95 was {}", row.p95_ms);
     }
