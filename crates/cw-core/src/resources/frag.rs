@@ -440,7 +440,7 @@ impl FragWindow {
         if item_data_byte_length != 0 {
             let _shatter_map_row_offsets = r.read_u16s_at(r.position(), item_data_count)?;
             for _ in 0..item_data_count {
-                let _row = read_shatter_map_row(r)?;
+                read_shatter_map_row(r)?;
             }
         }
 

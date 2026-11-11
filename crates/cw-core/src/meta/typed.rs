@@ -86,7 +86,7 @@ impl Default for Array {
 }
 
 /// The 8-byte data block pointer `OccludeModel` and friends use.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DataBlockPointer {
     pub pointer: u64,
@@ -103,12 +103,6 @@ impl DataBlockPointer {
 
     pub fn pointer_data_offset(&self) -> usize {
         ((self.pointer >> 12) & 0xFFFFF) as usize
-    }
-}
-
-impl Default for DataBlockPointer {
-    fn default() -> Self {
-        Self { pointer: 0 }
     }
 }
 
@@ -331,9 +325,7 @@ pub fn convert_data_array<T: Decode>(
         }
         for i in 0..item_count {
             let offset = (item_offset + i) * item_size;
-            let Some(item) = decode::<T>(&b.data, offset) else {
-                return None;
-            };
+            let item = decode::<T>(&b.data, offset)?;
             items.push(item);
         }
         item_offset = 0;

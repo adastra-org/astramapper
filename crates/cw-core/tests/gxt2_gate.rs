@@ -84,7 +84,7 @@ fn agrees_with_the_reference_gxt2_reader() {
         entries += got.entries.len();
     }
 
-    assert!(files.len() > 0, "the oracle should list some .gxt2 files");
+    assert!(!files.is_empty(), "the oracle should list some .gxt2 files");
     println!(
         "{} .gxt2 files agree with the reference, {entries} entries",
         files.len()

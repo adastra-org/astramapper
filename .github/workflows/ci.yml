@@ -23,8 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned on purpose. With `@stable` alone the runner silently floats to
+      # whatever stable is current, so a clippy release that adds a lint fails
+      # PRs that touch no Rust at all. Bump the version deliberately.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.99.0"
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
@@ -32,8 +36,12 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
 
+      # `chunks_exact_to_as_chunks` (new in clippy 1.99) fires ~40 times across
+      # cw-core's byte parsers, all of it code that predates the lint. Porting
+      # those loops to `as_chunks` is its own refactor: until it lands the lint
+      # is allowed here rather than left failing every PR.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::chunks_exact_to_as_chunks
 
       # cw-core's round-trip tests that need a real GTA V install are marked
       # #[ignore], so this stays green on a machine without the game.
