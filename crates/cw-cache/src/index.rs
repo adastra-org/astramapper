@@ -101,8 +101,7 @@ impl Index {
     pub fn drop_unbacked(&mut self, pack_len: impl Fn(u32) -> Option<u64>) -> usize {
         let before = self.records.len();
         self.records.retain(|_, record| {
-            pack_len(record.pack)
-                .is_some_and(|len| record.offset + record.length as u64 <= len)
+            pack_len(record.pack).is_some_and(|len| record.offset + record.length as u64 <= len)
         });
         before - self.records.len()
     }
@@ -294,7 +293,10 @@ mod tests {
         compact(&scratch.0, &mut index).expect("compact");
 
         assert!(!scratch.0.join("index.log").exists(), "journal is gone");
-        assert_eq!(index.journal_len, 0, "and so is the reason to compact again");
+        assert_eq!(
+            index.journal_len, 0,
+            "and so is the reason to compact again"
+        );
         let reloaded = Index::load(&scratch.0).expect("load");
         assert_eq!(reloaded.records.len(), 2);
         assert_eq!(reloaded.journal_len, 0);
@@ -317,7 +319,11 @@ mod tests {
     #[test]
     fn drops_records_whose_bytes_are_not_in_the_pack() {
         let mut index = Index::default();
-        for r in [record(1, 0, 0, 10), record(2, 0, 90, 20), record(3, 5, 0, 4)] {
+        for r in [
+            record(1, 0, 0, 10),
+            record(2, 0, 90, 20),
+            record(3, 5, 0, 4),
+        ] {
             index.records.insert(r.key, r);
         }
         // Pack 0 is 100 bytes long; pack 5 does not exist.
@@ -330,7 +336,11 @@ mod tests {
     #[test]
     fn dropping_a_pack_drops_only_its_records() {
         let mut index = Index::default();
-        for r in [record(1, 0, 0, 10), record(2, 1, 0, 20), record(3, 0, 10, 4)] {
+        for r in [
+            record(1, 0, 0, 10),
+            record(2, 1, 0, 20),
+            record(3, 0, 10, 4),
+        ] {
             index.records.insert(r.key, r);
         }
         assert_eq!(index.drop_pack(0), 2);

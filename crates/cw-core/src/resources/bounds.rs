@@ -142,7 +142,9 @@ impl Bounds {
     pub fn has_geometry(&self) -> bool {
         match &self.data {
             BoundsData::Geometry(g) => !g.vertices.is_empty() || !g.polygons.is_empty(),
-            BoundsData::Bvh(g) => !g.geometry.vertices.is_empty() || !g.geometry.polygons.is_empty(),
+            BoundsData::Bvh(g) => {
+                !g.geometry.vertices.is_empty() || !g.geometry.polygons.is_empty()
+            }
             _ => false,
         }
     }
@@ -279,7 +281,8 @@ impl BoundGeometry {
         let polygons_pointer = r.read_u64()?;
         let quantum = r.read_vec3()?;
         let _unknown_9ch = r.read_f32()?;
-        let center_geom = r.read_vec3()?;        let _unknown_ach = r.read_f32()?;
+        let center_geom = r.read_vec3()?;
+        let _unknown_ach = r.read_f32()?;
         let vertices_pointer = r.read_u64()?;
         let vertex_colours_pointer = r.read_u64()?;
         let octants_pointer = r.read_u64()?;
@@ -326,11 +329,18 @@ impl BoundGeometry {
 
         let vertex_colours = r
             .read_bytes_at(vertex_colours_pointer, vertices_count * 4)
-            .map(|bytes| bytes.unwrap_or_default().chunks_exact(4).map(colour).collect())
+            .map(|bytes| {
+                bytes
+                    .unwrap_or_default()
+                    .chunks_exact(4)
+                    .map(colour)
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let octants = r
-            .at(octants_pointer, |r| BoundGeomOctants::read(r, octant_items_pointer))?;
+        let octants = r.at(octants_pointer, |r| {
+            BoundGeomOctants::read(r, octant_items_pointer)
+        })?;
 
         // Materials are padded to four on the way in so the reader never sees
         // a short block, then truncated back to the declared count. The
@@ -352,7 +362,13 @@ impl BoundGeometry {
 
         let material_colours = r
             .read_bytes_at(material_colours_pointer, material_colours_count * 4)
-            .map(|bytes| bytes.unwrap_or_default().chunks_exact(4).map(colour).collect())
+            .map(|bytes| {
+                bytes
+                    .unwrap_or_default()
+                    .chunks_exact(4)
+                    .map(colour)
+                    .collect()
+            })
             .unwrap_or_default();
 
         let polygon_material_indices = r
@@ -449,8 +465,10 @@ impl BoundComposite {
             .collect::<Result<Vec<_>>>()?;
         let children: Vec<Bounds> = children.into_iter().flatten().collect();
 
-        let children_transformation1 = read_matrix_array(r, children_transformation1_pointer, count)?;
-        let children_transformation2 = read_matrix_array(r, children_transformation2_pointer, count)?;
+        let children_transformation1 =
+            read_matrix_array(r, children_transformation1_pointer, count)?;
+        let children_transformation2 =
+            read_matrix_array(r, children_transformation2_pointer, count)?;
         let children_bounding_boxes = read_aabb_array(r, children_bounding_boxes_pointer, count)?;
         let children_flags1 = read_flag_array(r, children_flags1_pointer, count)?;
         let children_flags2 = read_flag_array(r, children_flags2_pointer, count)?;
@@ -484,7 +502,7 @@ pub struct Bvh {
 
 impl Bvh {
     /// Read a `BVH` block at the cursor.
-    pub     fn read(r: &mut ResourceReader<'_>) -> Result<Self> {
+    pub fn read(r: &mut ResourceReader<'_>) -> Result<Self> {
         // `Nodes` is a `ResourceSimpleList64b_s` — the "b" variant, with 32-bit
         // count and capacity and no trailing pad, and it is read by *capacity*.
         let nodes_pointer = r.read_u64()?;
@@ -744,7 +762,8 @@ fn read_polygons(
         let kind = first & 7;
         let poly = match kind {
             0 => {
-                let s = |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
+                let s =
+                    |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
                 let f = |i: usize| {
                     f32::from_le_bytes([
                         data[offset + i * 4],
@@ -760,7 +779,8 @@ fn read_polygons(
                 })
             }
             1 => {
-                let s = |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
+                let s =
+                    |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
                 let f = |i: usize| {
                     f32::from_le_bytes([
                         data[offset + i * 4],
@@ -775,7 +795,8 @@ fn read_polygons(
                 })
             }
             2 => {
-                let s = |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
+                let s =
+                    |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
                 let f = |i: usize| {
                     f32::from_le_bytes([
                         data[offset + i * 4],
@@ -791,15 +812,15 @@ fn read_polygons(
                 })
             }
             3 => {
-                let s = |i: usize| {
-                    i16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]])
-                };
+                let s =
+                    |i: usize| i16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
                 BoundPolygon::Box(BoundPolygonBox {
                     box_indices: [s(2), s(3), s(4), s(5)],
                 })
             }
             4 => {
-                let s = |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
+                let s =
+                    |i: usize| u16::from_le_bytes([data[offset + i * 2], data[offset + i * 2 + 1]]);
                 let f = |i: usize| {
                     f32::from_le_bytes([
                         data[offset + i * 4],
@@ -934,11 +955,7 @@ impl Bounds {
                 for (i, child) in c.children.iter().enumerate() {
                     let matrix = matrix_for(c, i);
                     let child_transform = transform.compose(&matrix.affine());
-                    child.walk_triangles(
-                        &child_transform,
-                        &format!("{path}.{i}"),
-                        out,
-                    );
+                    child.walk_triangles(&child_transform, &format!("{path}.{i}"), out);
                 }
             }
             BoundsData::Primitive => {}
@@ -1004,11 +1021,7 @@ fn push_triangle_part(
             ]);
             positions.extend_from_slice(&world);
         }
-        indices.extend_from_slice(&[
-            base as u32,
-            (base + 1) as u32,
-            (base + 2) as u32,
-        ]);
+        indices.extend_from_slice(&[base as u32, (base + 1) as u32, (base + 2) as u32]);
     }
 
     if indices.is_empty() {
@@ -1036,7 +1049,8 @@ fn read_matrix_array(
     Ok(bytes
         .chunks_exact(64)
         .map(|c| {
-            let f = |i: usize| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
+            let f =
+                |i: usize| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
             Matrix4F {
                 column1: [f(0), f(1), f(2), f(3)],
                 column2: [f(4), f(5), f(6), f(7)],
@@ -1048,7 +1062,11 @@ fn read_matrix_array(
 }
 
 /// An `AABB_s` array: each entry is two `Vector4`s.
-fn read_aabb_array(r: &mut ResourceReader<'_>, pointer: u64, count: usize) -> Result<Vec<[f32; 8]>> {
+fn read_aabb_array(
+    r: &mut ResourceReader<'_>,
+    pointer: u64,
+    count: usize,
+) -> Result<Vec<[f32; 8]>> {
     let count = count.min(MAX_ELEMENTS);
     let Some(bytes) = r.read_bytes_at(pointer, count * 32)? else {
         return Ok(Vec::new());
@@ -1056,24 +1074,31 @@ fn read_aabb_array(r: &mut ResourceReader<'_>, pointer: u64, count: usize) -> Re
     Ok(bytes
         .chunks_exact(32)
         .map(|c| {
-            let f = |i: usize| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
+            let f =
+                |i: usize| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
             std::array::from_fn(f)
         })
         .collect())
 }
 
 /// A `BoundCompositeChildrenFlags` array: each entry is two `u32` flag words.
-fn read_flag_array(r: &mut ResourceReader<'_>, pointer: u64, count: usize) -> Result<Vec<[u32; 2]>> {
+fn read_flag_array(
+    r: &mut ResourceReader<'_>,
+    pointer: u64,
+    count: usize,
+) -> Result<Vec<[u32; 2]>> {
     let count = count.min(MAX_ELEMENTS);
     let Some(bytes) = r.read_bytes_at(pointer, count * 8)? else {
         return Ok(Vec::new());
     };
     Ok(bytes
         .chunks_exact(8)
-        .map(|c| [
-            u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-            u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-        ])
+        .map(|c| {
+            [
+                u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+            ]
+        })
         .collect())
 }
 
@@ -1241,11 +1266,7 @@ mod tests {
                 vertex_indices: [0, 1, 2],
                 edge_indices: [0xFFFF; 3],
             })],
-            vertices: vec![
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0],
-            ],
+            vertices: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
             center_geom: [100.0, 0.0, 0.0],
             quantum: [1.0, 1.0, 1.0],
             vertex_colours: vec![],

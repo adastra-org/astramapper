@@ -159,11 +159,21 @@ fn i16_at(data: &[u8], offset: usize) -> i16 {
 }
 
 fn u32_at(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn i32_at(data: &[u8], offset: usize) -> i32 {
-    i32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    i32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn f32_at(data: &[u8], offset: usize) -> f32 {
@@ -171,7 +181,11 @@ fn f32_at(data: &[u8], offset: usize) -> f32 {
 }
 
 fn vec3_at(data: &[u8], offset: usize) -> [f32; 3] {
-    [f32_at(data, offset), f32_at(data, offset + 4), f32_at(data, offset + 8)]
+    [
+        f32_at(data, offset),
+        f32_at(data, offset + 4),
+        f32_at(data, offset + 8),
+    ]
 }
 
 fn vec4_at(data: &[u8], offset: usize) -> [f32; 4] {
@@ -186,7 +200,9 @@ fn vec4_at(data: &[u8], offset: usize) -> [f32; 4] {
 fn array_at(data: &[u8], offset: usize) -> Array {
     Array {
         pointer: u64::from_le_bytes(
-            data[offset..offset + 8].try_into().expect("array pointer is 8 bytes"),
+            data[offset..offset + 8]
+                .try_into()
+                .expect("array pointer is 8 bytes"),
         ),
         count: u16_at(data, offset + 8),
         capacity: u16_at(data, offset + 10),
@@ -197,7 +213,9 @@ fn array_at(data: &[u8], offset: usize) -> Array {
 fn data_block_pointer_at(data: &[u8], offset: usize) -> DataBlockPointer {
     DataBlockPointer {
         pointer: u64::from_le_bytes(
-            data[offset..offset + 8].try_into().expect("data block pointer is 8 bytes"),
+            data[offset..offset + 8]
+                .try_into()
+                .expect("data block pointer is 8 bytes"),
         ),
     }
 }
@@ -222,7 +240,9 @@ pub fn get_pointer_array(meta: &Meta, array: &Array) -> Option<Vec<MetaPointer>>
             break;
         }
         let raw = u64::from_le_bytes(
-            block.data[offset..offset + 8].try_into().expect("pointer is 8 bytes"),
+            block.data[offset..offset + 8]
+                .try_into()
+                .expect("pointer is 8 bytes"),
         );
         ptrs.push(MetaPointer::unpack(raw));
     }
@@ -246,7 +266,11 @@ pub fn get_typed_data<T: Decode>(meta: &Meta, name: u32) -> Option<T> {
 /// `GetTypedPointerArray<T>` in the reference — the "bad hack just for ymap
 /// entities" that filters a shared pointer array by the target's structure
 /// type, because `CEntityDef` and `CMloInstanceDef` sit in the same array.
-pub fn get_typed_pointer_array<T: Decode>(meta: &Meta, name: u32, ptrs: &[MetaPointer]) -> Option<Vec<T>> {
+pub fn get_typed_pointer_array<T: Decode>(
+    meta: &Meta,
+    name: u32,
+    ptrs: &[MetaPointer],
+) -> Option<Vec<T>> {
     let mut items = Vec::new();
     for ptr in ptrs {
         let Some(block) = meta.block(ptr.block_id) else {
@@ -326,11 +350,7 @@ pub fn convert_data_array<T: Decode>(
 
 /// Read a structure-pointer array, filtering each target by its structure.
 /// `ConvertDataArray<T>` for the `Array_StructurePointer` shape.
-pub fn convert_data_array_ptr<T: Decode>(
-    meta: &Meta,
-    name: u32,
-    array: &Array,
-) -> Option<Vec<T>> {
+pub fn convert_data_array_ptr<T: Decode>(meta: &Meta, name: u32, array: &Array) -> Option<Vec<T>> {
     if array.count == 0 {
         return None;
     }

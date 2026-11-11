@@ -16,10 +16,11 @@ use serde::Serialize;
 
 use crate::meta::typed::{
     convert_data_array, convert_data_array_ptr, decode_at, get_pointer_array, get_string,
-    get_strings, get_typed_data, get_uint_array, get_vec4_array, AssetType, BaseArchetypeDef,
-    CompositeEntityType, EntityDef, MloArchetypeDef, MloEntitySet, MloPortalDef, MloRoomDef,
-    MloTimeCycleModifier, TimeArchetypeDef, Array, MapTypes,
-};use crate::meta::Meta;
+    get_strings, get_typed_data, get_uint_array, get_vec4_array, Array, AssetType,
+    BaseArchetypeDef, CompositeEntityType, EntityDef, MapTypes, MloArchetypeDef, MloEntitySet,
+    MloPortalDef, MloRoomDef, MloTimeCycleModifier, TimeArchetypeDef,
+};
+use crate::meta::Meta;
 use crate::Result;
 
 use super::names;
@@ -264,9 +265,13 @@ pub fn read_ytyp(meta: &Meta) -> Result<YtypFile> {
     }
 
     let extensions = get_extensions(meta, &map_types.extensions);
-    let composite_entity_types =
-        convert_data_array::<CompositeEntityType>(meta, names::C_COMPOSITE_ENTITY_TYPE, map_types.composite_entity_types.pointer, map_types.composite_entity_types.count as u32)
-            .unwrap_or_default();
+    let composite_entity_types = convert_data_array::<CompositeEntityType>(
+        meta,
+        names::C_COMPOSITE_ENTITY_TYPE,
+        map_types.composite_entity_types.pointer,
+        map_types.composite_entity_types.count as u32,
+    )
+    .unwrap_or_default();
 
     let strings = get_strings(meta).unwrap_or_default();
 
@@ -291,17 +296,25 @@ fn load_mlo_children(
     Vec<MloTimeCycleModifier>,
 ) {
     let mut entities = Vec::new();
-    if let Some(defs) = convert_data_array_ptr::<EntityDef>(meta, names::C_ENTITY_DEF, &def.mlo.entities) {
+    if let Some(defs) =
+        convert_data_array_ptr::<EntityDef>(meta, names::C_ENTITY_DEF, &def.mlo.entities)
+    {
         for ent in defs {
             let extensions = get_extensions(meta, &ent.extensions);
-            entities.push(MloEntity { entity: ent, extensions });
+            entities.push(MloEntity {
+                entity: ent,
+                extensions,
+            });
         }
     }
 
     let mut rooms = Vec::new();
-    if let Some(defs) =
-        convert_data_array::<MloRoomDef>(meta, names::C_MLO_ROOM_DEF, def.mlo.rooms.pointer, def.mlo.rooms.count as u32)
-    {
+    if let Some(defs) = convert_data_array::<MloRoomDef>(
+        meta,
+        names::C_MLO_ROOM_DEF,
+        def.mlo.rooms.pointer,
+        def.mlo.rooms.count as u32,
+    ) {
         for room in defs {
             let name = get_string(meta, &room.name);
             let attached_objects = get_uint_array(meta, &room.attached_objects).unwrap_or_default();
@@ -322,12 +335,16 @@ fn load_mlo_children(
     }
 
     let mut portals = Vec::new();
-    if let Some(defs) =
-        convert_data_array::<MloPortalDef>(meta, names::C_MLO_PORTAL_DEF, def.mlo.portals.pointer, def.mlo.portals.count as u32)
-    {
+    if let Some(defs) = convert_data_array::<MloPortalDef>(
+        meta,
+        names::C_MLO_PORTAL_DEF,
+        def.mlo.portals.pointer,
+        def.mlo.portals.count as u32,
+    ) {
         for portal in defs {
             let corners = get_vec4_array(meta, &portal.corners).unwrap_or_default();
-            let attached_objects = get_uint_array(meta, &portal.attached_objects).unwrap_or_default();
+            let attached_objects =
+                get_uint_array(meta, &portal.attached_objects).unwrap_or_default();
             portals.push(MloPortal {
                 room_from: portal.room_from,
                 room_to: portal.room_to,
@@ -342,9 +359,12 @@ fn load_mlo_children(
     }
 
     let mut entity_sets = Vec::new();
-    if let Some(defs) =
-        convert_data_array::<MloEntitySet>(meta, names::C_MLO_ENTITY_SET, def.mlo.entity_sets.pointer, def.mlo.entity_sets.count as u32)
-    {
+    if let Some(defs) = convert_data_array::<MloEntitySet>(
+        meta,
+        names::C_MLO_ENTITY_SET,
+        def.mlo.entity_sets.pointer,
+        def.mlo.entity_sets.count as u32,
+    ) {
         for set in defs {
             let locations = get_uint_array(meta, &set.locations).unwrap_or_default();
             let entities =
@@ -358,9 +378,13 @@ fn load_mlo_children(
         }
     }
 
-    let time_cycle_modifiers =
-        convert_data_array::<MloTimeCycleModifier>(meta, names::C_MLO_TIME_CYCLE_MODIFIER, def.mlo.time_cycle_modifiers.pointer, def.mlo.time_cycle_modifiers.count as u32)
-            .unwrap_or_default();
+    let time_cycle_modifiers = convert_data_array::<MloTimeCycleModifier>(
+        meta,
+        names::C_MLO_TIME_CYCLE_MODIFIER,
+        def.mlo.time_cycle_modifiers.pointer,
+        def.mlo.time_cycle_modifiers.count as u32,
+    )
+    .unwrap_or_default();
 
     (entities, rooms, portals, entity_sets, time_cycle_modifiers)
 }
@@ -398,7 +422,11 @@ pub fn get_extensions(meta: &Meta, array: &Array) -> Vec<Extension> {
             continue;
         }
         // Every extension carries its name hash at 8 and offset position at 16.
-        let Some(name) = block.data.get(8..12).map(|b| u32::from_le_bytes(b.try_into().unwrap())) else {
+        let Some(name) = block
+            .data
+            .get(8..12)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        else {
             continue;
         };
         let Some(off) = block.data.get(16..28) else {

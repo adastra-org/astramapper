@@ -57,11 +57,7 @@ fn check_shader(s: &cw_core::resources::ShaderFx, expected: &Value, at: &str) {
     );
 
     let params = expected["params"].as_array().expect("params");
-    assert_eq!(
-        s.parameters.len(),
-        params.len(),
-        "{at}: parameter count"
-    );
+    assert_eq!(s.parameters.len(), params.len(), "{at}: parameter count");
     for (i, (p, want)) in s.parameters.iter().zip(params).enumerate() {
         let at = format!("{at}.param{i}");
         assert_eq!(
@@ -103,7 +99,10 @@ fn check_drawable(d: &cw_core::resources::Drawable, expected: &Value, at: &str) 
     }
 
     // The embedded texture dictionary, when the reference carries one.
-    match (&d.texture_dictionary, expected["textureDictionary"].as_object()) {
+    match (
+        &d.texture_dictionary,
+        expected["textureDictionary"].as_object(),
+    ) {
         (Some(dict), Some(want)) => {
             let count = want["count"].as_u64().expect("dictionary count");
             assert_eq!(dict.hashes.len(), count as usize, "{at}: dictionary count");
@@ -145,8 +144,8 @@ fn agrees_with_the_reference_shader_reader() {
         );
         return;
     };
-    let oracle: Value = serde_json::from_str(raw.trim_start_matches('\u{FEFF}'))
-        .expect("parse the shader oracle");
+    let oracle: Value =
+        serde_json::from_str(raw.trim_start_matches('\u{FEFF}')).expect("parse the shader oracle");
 
     let keys = load_keys();
     let manager = scan(&keys);
@@ -170,12 +169,9 @@ fn agrees_with_the_reference_shader_reader() {
             .extract(entry_ref, &keys)
             .unwrap_or_else(|e| panic!("{path}: extract failed: {e}"));
 
-        let named = read_named_drawables(
-            FileKind::from_name(&entry.name_lower),
-            &data,
-            system_size,
-        )
-        .unwrap_or_else(|e| panic!("{path}: parse failed: {e}"));
+        let named =
+            read_named_drawables(FileKind::from_name(&entry.name_lower), &data, system_size)
+                .unwrap_or_else(|e| panic!("{path}: parse failed: {e}"));
 
         let expected = file["drawables"].as_array().expect("drawables");
         assert_eq!(
@@ -184,15 +180,14 @@ fn agrees_with_the_reference_shader_reader() {
             "{path}: drawable count differs from the oracle"
         );
         for (i, (named, want)) in named.iter().zip(expected).enumerate() {
-            check_drawable(
-                &named.drawable,
-                want,
-                &format!("{path}.drawable{i}"),
-            );
+            check_drawable(&named.drawable, want, &format!("{path}.drawable{i}"));
         }
 
         drawables += named.len();
-        shaders += named.iter().map(|n| n.drawable.shaders.len()).sum::<usize>();
+        shaders += named
+            .iter()
+            .map(|n| n.drawable.shaders.len())
+            .sum::<usize>();
         parameters += named
             .iter()
             .flat_map(|n| &n.drawable.shaders)
@@ -232,17 +227,26 @@ fn every_drawable_in_the_install_reads_shader_parameters() {
             }
         }
     }
-    assert!(!paths.is_empty(), "the install should contain .ydr/.ydd files");
+    assert!(
+        !paths.is_empty(),
+        "the install should contain .ydr/.ydd files"
+    );
 
     let mut parsed = 0usize;
     let mut with_parameters = 0usize;
     let mut failed = 0usize;
 
     for path in &paths {
-        let Some(entry_ref) = manager.find(path) else { continue };
+        let Some(entry_ref) = manager.find(path) else {
+            continue;
+        };
         let entry = manager.entry(entry_ref);
-        let Some((system_size, _)) = entry.resource_segments() else { continue };
-        let Ok(data) = manager.extract(entry_ref, &keys) else { continue };
+        let Some((system_size, _)) = entry.resource_segments() else {
+            continue;
+        };
+        let Ok(data) = manager.extract(entry_ref, &keys) else {
+            continue;
+        };
         let Ok(named) =
             read_named_drawables(FileKind::from_name(&entry.name_lower), &data, system_size)
         else {

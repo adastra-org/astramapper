@@ -98,8 +98,8 @@ impl FileKind {
             "xml" | "meta" | "txt" | "ini" | "cfg" | "sps" | "nametable" | "log" | "csv"
             | "shop" | "list" | "html" | "json" | "lua" | "js" | "vsh" | "fsh" => Text,
 
-            "dat" | "gfx" | "fxc" | "cut" | "bik" | "wav" | "asi" | "dll" | "exe"
-            | "bin" | "cache" | "zip" | "oiv" => Data,
+            "dat" | "gfx" | "fxc" | "cut" | "bik" | "wav" | "asi" | "dll" | "exe" | "bin"
+            | "cache" | "zip" | "oiv" => Data,
 
             _ => Unknown,
         }
@@ -135,7 +135,10 @@ impl FileKind {
     /// drawables, reached through `Frag.cs`; `Particle` embeds drawables too,
     /// but behind `Particle.cs`, which is not ported.
     pub fn has_model(self) -> bool {
-        matches!(self, FileKind::Model | FileKind::ModelDictionary | FileKind::Fragment)
+        matches!(
+            self,
+            FileKind::Model | FileKind::ModelDictionary | FileKind::Fragment
+        )
     }
 
     /// Whether a texture preview is possible today. Only `.ytd` — a `.ydr` and

@@ -21,7 +21,8 @@ fn main() {
 
     let folder =
         PathBuf::from(std::env::var("ASTRAMAPPER_GTA_PATH").unwrap_or(DEFAULT_GTA_PATH.into()));
-    let keys = GtaKeys::from_exe(&std::fs::read(folder.join("GTA5.exe")).expect("exe")).expect("keys");
+    let keys =
+        GtaKeys::from_exe(&std::fs::read(folder.join("GTA5.exe")).expect("exe")).expect("keys");
     let manager = RpfManager::scan(&folder, &keys).expect("scan");
     let wanted = gen_hash(&texture);
 

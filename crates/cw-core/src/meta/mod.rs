@@ -41,9 +41,9 @@ pub use typed::{
     get_typed_pointer_array, get_uint_array, get_vec4_array, Array, AssetType, BaseArchetypeDef,
     BlockDesc, BoxOccluder, CarGen, CompositeEntityType, DataBlockPointer, Decode, DistantLodLight,
     EntityDef, GrassInstanceData, GrassInstanceListDef, InstancedMapData, LodLevel, LodLight,
-    MapData, MloArchetypeDef, MloEntitySet, MloInstanceDef, MloPortalDef, MloRoomDef,
+    MapData, MapTypes, MloArchetypeDef, MloEntitySet, MloInstanceDef, MloPortalDef, MloRoomDef,
     MloTimeCycleModifier, OccludeModel, PriorityLevel, SpdAabb, TimeArchetypeDef,
-    TimeCycleModifier, MapTypes,
+    TimeCycleModifier,
 };
 
 use crate::filetype::FileKind;

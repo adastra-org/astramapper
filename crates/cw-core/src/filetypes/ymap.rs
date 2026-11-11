@@ -122,22 +122,39 @@ pub fn read_ymap(meta: &Meta) -> Result<YmapFile> {
         });
     };
 
-    let physics_dictionaries = get_hash_array(meta, &map_data.physics_dictionaries).unwrap_or_default();
+    let physics_dictionaries =
+        get_hash_array(meta, &map_data.physics_dictionaries).unwrap_or_default();
     let strings = get_strings(meta).unwrap_or_default();
 
     let (entities, root_entities, mlo_entities) = ensure_entities(meta, &map_data.entities);
-    let time_cycle_modifiers =
-        convert_data_array::<TimeCycleModifier>(meta, names::C_TIME_CYCLE_MODIFIER, map_data.time_cycle_modifiers.pointer, map_data.time_cycle_modifiers.count as u32)
-            .unwrap_or_default();
-    let car_generators =
-        convert_data_array::<CarGen>(meta, names::C_CAR_GEN, map_data.car_generators.pointer, map_data.car_generators.count as u32)
-            .unwrap_or_default();
-    let box_occluders =
-        convert_data_array::<BoxOccluder>(meta, names::BOX_OCCLUDER, map_data.box_occluders.pointer, map_data.box_occluders.count as u32)
-            .unwrap_or_default();
-    let occlude_models =
-        convert_data_array::<OccludeModel>(meta, names::OCCLUDE_MODEL, map_data.occlude_models.pointer, map_data.occlude_models.count as u32)
-            .unwrap_or_default();
+    let time_cycle_modifiers = convert_data_array::<TimeCycleModifier>(
+        meta,
+        names::C_TIME_CYCLE_MODIFIER,
+        map_data.time_cycle_modifiers.pointer,
+        map_data.time_cycle_modifiers.count as u32,
+    )
+    .unwrap_or_default();
+    let car_generators = convert_data_array::<CarGen>(
+        meta,
+        names::C_CAR_GEN,
+        map_data.car_generators.pointer,
+        map_data.car_generators.count as u32,
+    )
+    .unwrap_or_default();
+    let box_occluders = convert_data_array::<BoxOccluder>(
+        meta,
+        names::BOX_OCCLUDER,
+        map_data.box_occluders.pointer,
+        map_data.box_occluders.count as u32,
+    )
+    .unwrap_or_default();
+    let occlude_models = convert_data_array::<OccludeModel>(
+        meta,
+        names::OCCLUDE_MODEL,
+        map_data.occlude_models.pointer,
+        map_data.occlude_models.count as u32,
+    )
+    .unwrap_or_default();
 
     let lod_lights = ensure_lod_lights(meta, &map_data.lod_lights_soa);
     let distant_lod_lights = ensure_distant_lod_lights(meta, &map_data.distant_lod_lights_soa);
@@ -181,8 +198,7 @@ fn ensure_entities(meta: &Meta, entities: &Array) -> (Vec<Entity>, Vec<usize>, V
         return (Vec::new(), Vec::new(), Vec::new());
     };
 
-    let entity_defs =
-        get_typed_pointer_array::<EntityDef>(meta, names::C_ENTITY_DEF, &eptrs);
+    let entity_defs = get_typed_pointer_array::<EntityDef>(meta, names::C_ENTITY_DEF, &eptrs);
     let mlo_defs =
         get_typed_pointer_array::<MloInstanceDef>(meta, names::C_MLO_INSTANCE_DEF, &eptrs);
 
@@ -380,7 +396,7 @@ mod tests {
         put_f32(&mut d, 0x760 + 40, 3.0);
         put_i32(&mut d, 0x760 + 72, -1); // parentIndex root
         put_i32(&mut d, 0x760 + 84, 1); // lodLevel LOD
-        // Entity 1: child, at offset 128.
+                                        // Entity 1: child, at offset 128.
         let c = 0x760 + 128;
         put_u32(&mut d, c + 8, 0xBBBB);
         put_i32(&mut d, c + 72, 0); // parentIndex -> entity 0

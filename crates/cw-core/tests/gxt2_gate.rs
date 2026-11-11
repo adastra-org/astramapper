@@ -68,18 +68,18 @@ fn agrees_with_the_reference_gxt2_reader() {
         let got = Gxt2File::read(&data).unwrap_or_else(|e| panic!("{path}: parse failed: {e}"));
 
         let want_entries = file["entries"].as_array().expect("entries");
-        assert_eq!(
-            got.entries.len(),
-            want_entries.len(),
-            "{path}: entry count"
-        );
+        assert_eq!(got.entries.len(), want_entries.len(), "{path}: entry count");
         for (i, (g, w)) in got.entries.iter().zip(want_entries).enumerate() {
             assert_eq!(
                 g.hash,
                 w["hash"].as_u64().expect("hash") as u32,
                 "{path}[{i}]: hash"
             );
-            assert_eq!(g.text, w["text"].as_str().expect("text"), "{path}[{i}]: text");
+            assert_eq!(
+                g.text,
+                w["text"].as_str().expect("text"),
+                "{path}[{i}]: text"
+            );
         }
         entries += got.entries.len();
     }
@@ -134,10 +134,11 @@ fn every_gxt2_round_trips() {
         }
     }
 
-    assert!(total > 1000, "the install should contain thousands of .gxt2 files");
+    assert!(
+        total > 1000,
+        "the install should contain thousands of .gxt2 files"
+    );
     assert_eq!(total, parsed, "every .gxt2 should parse");
     assert_eq!(total, roundtripped, "every .gxt2 should round-trip");
-    println!(
-        "{total} .gxt2 files parse and round-trip byte for byte, {entries} entries"
-    );
+    println!("{total} .gxt2 files parse and round-trip byte for byte, {entries} entries");
 }
