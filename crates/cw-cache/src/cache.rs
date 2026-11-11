@@ -513,7 +513,9 @@ mod tests {
     fn stores_and_reads_back_within_one_session() {
         let scratch = Scratch::new("round-trip");
         let cache = scratch.open(1);
-        cache.put(key(1), Kind::Model, b"compiled model").expect("put");
+        cache
+            .put(key(1), Kind::Model, b"compiled model")
+            .expect("put");
         assert_eq!(cache.get(key(1)).as_deref(), Some(&b"compiled model"[..]));
     }
 
@@ -546,10 +548,16 @@ mod tests {
         let scratch = Scratch::new("install");
         {
             let cache = scratch.open(7);
-            cache.put(key(1), Kind::Model, b"from install seven").expect("put");
+            cache
+                .put(key(1), Kind::Model, b"from install seven")
+                .expect("put");
         }
         let cache = scratch.open(8);
-        assert_eq!(cache.get(key(1)), None, "another install must not be served");
+        assert_eq!(
+            cache.get(key(1)),
+            None,
+            "another install must not be served"
+        );
         assert_eq!(cache.stats().records, 0);
         assert_eq!(cache.stats().bytes, 0);
     }
@@ -636,8 +644,13 @@ mod tests {
         }
         // Opening maps the pack at its current length; this write extends it.
         let cache = scratch.open(1);
-        cache.put(key(2), Kind::Model, b"after the mapping").expect("put");
-        assert_eq!(cache.get(key(2)).as_deref(), Some(&b"after the mapping"[..]));
+        cache
+            .put(key(2), Kind::Model, b"after the mapping")
+            .expect("put");
+        assert_eq!(
+            cache.get(key(2)).as_deref(),
+            Some(&b"after the mapping"[..])
+        );
         assert_eq!(cache.get(key(1)).as_deref(), Some(&b"before"[..]));
     }
 
@@ -649,7 +662,9 @@ mod tests {
         {
             let cache = scratch.open(1);
             cache.put(key(1), Kind::Model, b"intact").expect("put");
-            cache.put(key(2), Kind::Model, b"lost to a kill").expect("put");
+            cache
+                .put(key(2), Kind::Model, b"lost to a kill")
+                .expect("put");
         }
         // Roll the pack back to before the second write, leaving its journal
         // entry in place.
@@ -674,7 +689,9 @@ mod tests {
         assert_eq!(cache.stats().records, 0);
         assert_eq!(cache.stats().bytes, 0);
 
-        cache.put(key(2), Kind::Model, b"after clearing").expect("put");
+        cache
+            .put(key(2), Kind::Model, b"after clearing")
+            .expect("put");
         assert_eq!(cache.get(key(2)).as_deref(), Some(&b"after clearing"[..]));
     }
 
@@ -691,7 +708,11 @@ mod tests {
 
         let cache = scratch.open(1);
         for n in 0..50 {
-            assert_eq!(cache.get(key(n)).as_deref(), Some(&[n as u8; 32][..]), "{n}");
+            assert_eq!(
+                cache.get(key(n)).as_deref(),
+                Some(&[n as u8; 32][..]),
+                "{n}"
+            );
         }
     }
 
@@ -742,13 +763,18 @@ mod tests {
     fn eviction_never_takes_the_pinned_pack() {
         let scratch = Scratch::new("pinned");
         let cache = Cache::open(&scratch.0, 1, MIN_BUDGET).expect("open");
-        cache.put(key(1), Kind::Index, b"the archive index").expect("put");
+        cache
+            .put(key(1), Kind::Index, b"the archive index")
+            .expect("put");
         {
             let mut state = cache.write_state();
             state.bytes = MIN_BUDGET * 4;
             cache.evict(&mut state, 0);
         }
-        assert_eq!(cache.get(key(1)).as_deref(), Some(&b"the archive index"[..]));
+        assert_eq!(
+            cache.get(key(1)).as_deref(),
+            Some(&b"the archive index"[..])
+        );
     }
 
     #[test]

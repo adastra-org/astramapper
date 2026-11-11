@@ -12,8 +12,8 @@ pub mod cache;
 pub mod explorer;
 pub mod perf;
 pub mod placements;
-pub mod viewer;
 pub mod textures;
+pub mod viewer;
 pub mod world;
 
 use serde::Serialize;

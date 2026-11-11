@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { columnsFromPlaced } from "./columns";
 import {
   binPlacements,
   hexCenter,
@@ -11,7 +12,21 @@ import {
   worldToHex,
 } from "./hex";
 
-const at = (x: number, y: number) => ({ position: [x, y, 0] as const });
+const at = (x: number, y: number) => ({
+  index: 0,
+  name: "x",
+  nameHash: 0,
+  isMlo: false,
+  fromMlo: false,
+  position: [x, y, 0] as [number, number, number],
+  rotation: [0, 0, 0, 1] as [number, number, number, number],
+  scaleXy: 1,
+  scaleZ: 1,
+  parentIndex: -1,
+  lodLevel: "HD",
+  lodDist: 100,
+  children: 0,
+});
 
 describe("hex maths", () => {
   test("a cell's centre maps back to the same cell", () => {
@@ -64,7 +79,10 @@ describe("hex maths", () => {
 describe("binning", () => {
   test("counts placements per cell across entries", () => {
     const cells = binPlacements(
-      [{ placements: [at(0, 0), at(10, 10), at(2000, 0)] }, { placements: [at(5, -5)] }],
+      [
+        { placements: columnsFromPlaced([at(0, 0), at(10, 10), at(2000, 0)]) },
+        { placements: columnsFromPlaced([at(5, -5)]) },
+      ],
       250,
     );
     const origin = cells.get(hexKey(0, 0));
@@ -74,7 +92,11 @@ describe("binning", () => {
 
   test("stats say how much a disk would hold against the whole", () => {
     const cells = binPlacements(
-      [{ placements: [at(0, 0), at(5, 5), at(3000, 0), at(-3000, 0), at(0, 3000)] }],
+      [
+        {
+          placements: columnsFromPlaced([at(0, 0), at(5, 5), at(3000, 0), at(-3000, 0), at(0, 3000)]),
+        },
+      ],
       250,
     );
     const stats = hexStats(cells, { q: 0, r: 0 }, 2);

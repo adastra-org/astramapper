@@ -9,21 +9,21 @@
  * takes to read the maps in the first place. Most of those bytes are the
  * thirteen field *names*, repeated once per entity.
  *
- * # What this side still pays
+ * # What this side holds
  *
- * The columns arrive as views over the response buffer, but `Placed` is an
- * object with tuple fields and the whole renderer reads it that way, so the
- * decode below materializes one object per placement. That is deliberate and it
- * is the remaining cost: the win here is deleting the 201.5 MB of text and the
- * parse over it, not the object graph, which only a columnar `Placed` would
- * remove and which would touch every reader in `World.tsx`.
+ * The columns arrive as views over the response buffer and stay that way:
+ * `PlacementColumns` (see `columns.ts`) reads them by row and builds a `Placed`
+ * only for the few entities something touches. Materializing one object per
+ * placement used to hold 827 MB of JS heap and pause the main thread ~300 ms
+ * per collection.
  *
  * Section order is the contract with the encoder and is documented there. This
  * module names the indices once, at the top, rather than spelling them into the
  * decode.
  */
 import { asFloat32, asInt32, asUint16, asUint32, Kind, type Envelope } from "../wire";
-import type { Placed, WorldMap } from "../world";
+import type { WorldMap } from "../world";
+import { PlacementColumns } from "./columns";
 
 /** Section indices, in the order `placements::encode` pushes them. */
 const SECTION = {
@@ -39,11 +39,6 @@ const SECTION = {
   lodDist: 9,
   children: 10,
 } as const;
-
-/** Bit 0 of the flags column. */
-const FLAG_IS_MLO = 1;
-/** Bit 1 of the flags column. */
-const FLAG_FROM_MLO = 2;
 
 /** The metadata the encoder writes, before the columns are laid over it. */
 type PlacementMeta = {
@@ -113,30 +108,23 @@ export function decodePlacements(envelope: Envelope): WorldMap {
     throw new Error(`the placement envelope declares ${count} entities but a column is shorter`);
   }
 
-  // Sized up front rather than grown: this runs 763,716 times for the base
-  // game, and a dense array assigned by index beats a repeatedly reallocated one.
-  const entities: Placed[] = Array.from({ length: count });
-  for (let at = 0; at < count; at += 1) {
-    const slot = nameIndexes[at]!;
-    const flag = flags[at]!;
-    const p = at * 3;
-    const r = at * 4;
-    entities[at] = {
-      index: indexes[at]!,
-      name: meta.names[slot] ?? "",
-      nameHash: meta.nameHashes[slot] ?? 0,
-      isMlo: (flag & FLAG_IS_MLO) !== 0,
-      fromMlo: (flag & FLAG_FROM_MLO) !== 0,
-      position: [positions[p]!, positions[p + 1]!, positions[p + 2]!],
-      rotation: [rotations[r]!, rotations[r + 1]!, rotations[r + 2]!, rotations[r + 3]!],
-      scaleXy: scaleXy[at]!,
-      scaleZ: scaleZ[at]!,
-      parentIndex: parents[at]!,
-      lodLevel: meta.lodLevels[lodLevels[at]!] ?? "",
-      lodDist: lodDists[at]!,
-      children: children[at]!,
-    };
-  }
+  const entities = new PlacementColumns({
+    count,
+    indexes,
+    nameSlots: nameIndexes,
+    flags,
+    positions,
+    rotations,
+    scaleXy,
+    scaleZ,
+    parents,
+    lodSlots: lodLevels,
+    lodDists,
+    children,
+    names: meta.names,
+    nameHashes: meta.nameHashes,
+    lodLevels: meta.lodLevels,
+  });
 
   return {
     path: meta.path,

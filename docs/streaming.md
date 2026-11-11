@@ -49,7 +49,29 @@ What did **not** move:
   and every collection pauses the main thread. This, not the GPU (`render` p50
   5.6 ms), is what freezes the camera. See #2.
 
+## After the columnar placements and the memoized list
+
+The ~0.7 s per call was the main thread being busy, not the IPC. `World`
+re-renders on every geometry store change, and the sidebar rendered one row per
+placed map inline (4,601 with the base game): one ~350 ms task per batch of
+models, while `tick js` stayed ~16 ms. The list is now `PlacedList`
+(memoized). Release build, F3, a long flight over the base game:
+
+| | before (heap fix only) | after |
+|---|---|---|
+| `fps` | 34 | 108 |
+| `frame` p50 / p95 | 29 / 403 ms | 9.3 / 18 ms |
+| `long task` p50 | 351 ms | 52 ms |
+| `ipc ping` p50 | 749 ms | 128 ms |
+| `worldModel ipc` p50 | 684 ms | 129 ms |
+| `JS heap used` | 685 MB | 922 MB (longer run, no eviction) |
+
+The heap is not under the 300 MB target: `modelCache` keeps every model fetched
+(598 MB over the wire in this run). That is #6.
+
 ## F3 probes
+
+- `tick js` (the whole frame callback), `tick lod update`.
 
 - `worldModel ipc`, split by response size; `worldAsset ipc` (a tiny reply, the
   floor of one call); `ipc ping (world_status)` once a second.
@@ -61,8 +83,11 @@ What did **not** move:
 
 ## Known limits
 
-- #2 Placements are JS objects: the dominant cost today.
-- #8 IPC latency floor per call.
+- #2 Placements are columnar (`src/lib/world/columns.ts`): typed-array views
+  over the response buffer, a `Placed` built only on demand. Done.
+- #8 IPC latency: the ~0.7 s floor was the main thread, not the IPC (see below).
+  What is left (~130 ms p50) is worth one more look.
+- #6 `modelCache` never evicts: the heap grows with every model fetched.
 - #5 Terrain is only loaded inside each entity's own radius, not map-wide.
 - #9 Phase classification is by name tokens.
 - #10 One draw call per entity (1,000-4,600 in the city).

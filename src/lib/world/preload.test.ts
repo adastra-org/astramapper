@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { isLoadable, preloadableCount, preloadTargets } from "./preload";
 import type { Placed, RegionEntry } from "../world";
+import { columnsFromPlaced } from "./columns";
 
 function placement(index: number, over: Partial<Placed> = {}): Placed {
   return {
@@ -23,7 +24,7 @@ function placement(index: number, over: Partial<Placed> = {}): Placed {
 }
 
 function region(key: string, placements: readonly Placed[]): RegionEntry {
-  return { key, extentsMin: [0, 0, 0], extentsMax: [1000, 1000, 1000], placements };
+  return { key, extentsMin: [0, 0, 0], extentsMax: [1000, 1000, 1000], placements: columnsFromPlaced(placements) };
 }
 
 const entries = [

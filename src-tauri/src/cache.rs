@@ -26,7 +26,10 @@ use crate::textures::GpuCaps;
 /// `None` when the platform will not name one, which costs the cache and
 /// nothing else.
 pub fn assets_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
-    app.path().app_cache_dir().ok().map(|dir| dir.join("assets"))
+    app.path()
+        .app_cache_dir()
+        .ok()
+        .map(|dir| dir.join("assets"))
 }
 
 /// What identifies the install these artifacts were compiled from.
@@ -131,7 +134,9 @@ pub fn cache_stats(game: State<'_, GameState>) -> Result<Option<WireCacheStats>,
 pub fn cache_clear(game: State<'_, GameState>) -> Result<(), String> {
     let loaded = game.loaded()?;
     match &loaded.cache {
-        Some(cache) => cache.clear().map_err(|e| format!("could not clear the cache: {e}")),
+        Some(cache) => cache
+            .clear()
+            .map_err(|e| format!("could not clear the cache: {e}")),
         None => Ok(()),
     }
 }

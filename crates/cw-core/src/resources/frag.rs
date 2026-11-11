@@ -101,10 +101,8 @@ impl FragType {
         let drawable_array_names =
             read_drawable_array_names(r, drawable_array_names_pointer, drawable_array_count)?;
         let bone_transforms = r.at(bone_transforms_pointer, FragBoneTransforms::read)?;
-        let glass_windows =
-            read_glass_windows(r, glass_windows_pointer, glass_windows_count)?;
-        let physics_lod_group =
-            r.at(physics_lod_group_pointer, FragPhysicsLODGroup::read)?;
+        let glass_windows = read_glass_windows(r, glass_windows_pointer, glass_windows_count)?;
+        let physics_lod_group = r.at(physics_lod_group_pointer, FragPhysicsLODGroup::read)?;
         let drawable_cloth = r.at(drawable_cloth_pointer, FragDrawable::read)?;
         let vehicle_glass_windows =
             r.at(vehicle_glass_windows_pointer, FragVehicleGlassWindows::read)?;
@@ -139,9 +137,11 @@ impl FragType {
         out.extend(self.drawable_array.iter());
         if let Some(group) = &self.physics_lod_group {
             for lod in group.all_lods() {
-                out.extend(lod.children.iter().flat_map(|c| {
-                    c.drawable1.iter().chain(c.drawable2.iter())
-                }));
+                out.extend(
+                    lod.children
+                        .iter()
+                        .flat_map(|c| c.drawable1.iter().chain(c.drawable2.iter())),
+                );
             }
         }
         out
@@ -254,9 +254,7 @@ fn read_glass_windows(
     if pointer == 0 {
         return Ok(Vec::new());
     }
-    let pointers = r
-        .read_u64s_at(pointer, count as usize)?
-        .unwrap_or_default();
+    let pointers = r.read_u64s_at(pointer, count as usize)?.unwrap_or_default();
     let mut out = Vec::with_capacity(pointers.len());
     for p in pointers {
         if let Some(w) = r.at(p, FragGlassWindow::read)? {
@@ -442,7 +440,7 @@ impl FragWindow {
         if item_data_byte_length != 0 {
             let _shatter_map_row_offsets = r.read_u16s_at(r.position(), item_data_count)?;
             for _ in 0..item_data_count {
-                let _row = read_shatter_map_row(r)?;
+                read_shatter_map_row(r)?;
             }
         }
 
@@ -906,7 +904,12 @@ mod tests {
         put_u32(&mut data, 0x00, 0x40_5E_36_00); // vft
         put_u32(&mut data, 0x04, 1);
         // BoundingSphereCenter at 0x20 (12 bytes), radius at 0x2C.
-        data[0x20..0x2C].copy_from_slice(&[1.0f32, 2.0, 3.0].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>());
+        data[0x20..0x2C].copy_from_slice(
+            &[1.0f32, 2.0, 3.0]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        );
         data[0x2C..0x30].copy_from_slice(&4.0f32.to_le_bytes());
         // NamePointer at 0x58.
         put_u64(&mut data, 0x58, addr(0x400));

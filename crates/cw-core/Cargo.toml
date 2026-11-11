@@ -8,6 +8,9 @@ repository.workspace = true
 
 # This crate must never depend on tauri. It stays plain-`cargo test`-able and
 # reusable from a CLI or another frontend.
+[lints]
+workspace = true
+
 [dependencies]
 binrw.workspace = true
 glam.workspace = true

@@ -117,7 +117,10 @@ fn reads_every_ytyp_in_the_install() {
                 // The known truncated-payload class — same handful of
                 // destruction archives that break the `.ytd` and `.ycd`
                 // readers. See `docs/formats.md`.
-                truncated.push(format!("{path}: {} of {system_size} bytes ({e})", data.len()));
+                truncated.push(format!(
+                    "{path}: {} of {system_size} bytes ({e})",
+                    data.len()
+                ));
                 continue;
             }
             Err(e) => {
@@ -215,7 +218,10 @@ fn reads_every_ymap_in_the_install() {
         let ymap = match read_ymap(&meta) {
             Ok(ymap) => ymap,
             Err(e) if data.len() < system_size => {
-                truncated.push(format!("{path}: {} of {system_size} bytes ({e})", data.len()));
+                truncated.push(format!(
+                    "{path}: {} of {system_size} bytes ({e})",
+                    data.len()
+                ));
                 continue;
             }
             Err(e) => {
@@ -312,7 +318,12 @@ fn agrees_with_the_reference_ytyp_reader() {
             "{path}: archetype count"
         );
 
-        for (i, (got, want)) in ytyp.archetypes.iter().zip(file["archetypes"].as_array().unwrap()).enumerate() {
+        for (i, (got, want)) in ytyp
+            .archetypes
+            .iter()
+            .zip(file["archetypes"].as_array().unwrap())
+            .enumerate()
+        {
             archetypes_checked += 1;
             let at = format!("{path}.archetype{i}");
 
@@ -320,17 +331,31 @@ fn agrees_with_the_reference_ytyp_reader() {
                 cw_core::filetypes::ytyp::Archetype::Base(a) => {
                     (a.name, a.asset_name, a.asset_type.raw() as u32, a.hash())
                 }
-                cw_core::filetypes::ytyp::Archetype::Time(a) => {
-                    (a.base.name, a.base.asset_name, a.base.asset_type.raw() as u32, a.base.hash())
-                }
-                cw_core::filetypes::ytyp::Archetype::Mlo(a) => {
-                    (a.base.name, a.base.asset_name, a.base.asset_type.raw() as u32, a.base.hash())
-                }
+                cw_core::filetypes::ytyp::Archetype::Time(a) => (
+                    a.base.name,
+                    a.base.asset_name,
+                    a.base.asset_type.raw() as u32,
+                    a.base.hash(),
+                ),
+                cw_core::filetypes::ytyp::Archetype::Mlo(a) => (
+                    a.base.name,
+                    a.base.asset_name,
+                    a.base.asset_type.raw() as u32,
+                    a.base.hash(),
+                ),
             };
             assert_eq!(name, want["name"].as_u64().unwrap() as u32, "{at}: name");
-            assert_eq!(asset_name, want["assetName"].as_u64().unwrap() as u32, "{at}: assetName");
+            assert_eq!(
+                asset_name,
+                want["assetName"].as_u64().unwrap() as u32,
+                "{at}: assetName"
+            );
             assert_eq!(hash, want["hash"].as_u64().unwrap() as u32, "{at}: hash");
-            assert_eq!(asset_type, want["assetType"].as_u64().unwrap() as u32, "{at}: assetType");
+            assert_eq!(
+                asset_type,
+                want["assetType"].as_u64().unwrap() as u32,
+                "{at}: assetType"
+            );
             assert_eq!(
                 want["kind"].as_str().unwrap(),
                 match got {
@@ -354,7 +379,10 @@ fn agrees_with_the_reference_ytyp_reader() {
         }
     }
 
-    println!("{} .ytyp files, {archetypes_checked} archetypes match the reference", files.len());
+    println!(
+        "{} .ytyp files, {archetypes_checked} archetypes match the reference",
+        files.len()
+    );
 }
 
 /// Compare the typed `.ymap` reader against `fixtures/ymap_oracle.json`.
@@ -393,9 +421,21 @@ fn agrees_with_the_reference_ymap_reader() {
         };
         let ymap = read_ymap(&meta).unwrap_or_else(|e| panic!("{path}: {e}"));
 
-        assert_eq!(ymap.name, file["name"].as_u64().unwrap() as u32, "{path}: name");
-        assert_eq!(ymap.parent, file["parent"].as_u64().unwrap() as u32, "{path}: parent");
-        assert_eq!(ymap.flags, file["flags"].as_u64().unwrap() as u32, "{path}: flags");
+        assert_eq!(
+            ymap.name,
+            file["name"].as_u64().unwrap() as u32,
+            "{path}: name"
+        );
+        assert_eq!(
+            ymap.parent,
+            file["parent"].as_u64().unwrap() as u32,
+            "{path}: parent"
+        );
+        assert_eq!(
+            ymap.flags,
+            file["flags"].as_u64().unwrap() as u32,
+            "{path}: flags"
+        );
         assert_eq!(
             ymap.entities.len(),
             file["entities"].as_array().unwrap().len(),
@@ -426,11 +466,28 @@ fn agrees_with_the_reference_ymap_reader() {
                 "{at}: archetypeName"
             );
             assert_eq!(got.is_mlo, want["isMlo"].as_bool().unwrap(), "{at}: isMlo");
-            assert_eq!(got.def.parent_index, want["parentIndex"].as_i64().unwrap() as i32, "{at}: parentIndex");
-            assert_eq!(got.def.flags, want["flags"].as_u64().unwrap() as u32, "{at}: flags");
-            assert!(close(got.def.position[0], f32_at(&want["position"][0])), "{at}: x");
-            assert!(close(got.def.position[1], f32_at(&want["position"][1])), "{at}: y");
-            assert!(close(got.def.position[2], f32_at(&want["position"][2])), "{at}: z");
+            assert_eq!(
+                got.def.parent_index,
+                want["parentIndex"].as_i64().unwrap() as i32,
+                "{at}: parentIndex"
+            );
+            assert_eq!(
+                got.def.flags,
+                want["flags"].as_u64().unwrap() as u32,
+                "{at}: flags"
+            );
+            assert!(
+                close(got.def.position[0], f32_at(&want["position"][0])),
+                "{at}: x"
+            );
+            assert!(
+                close(got.def.position[1], f32_at(&want["position"][1])),
+                "{at}: y"
+            );
+            assert!(
+                close(got.def.position[2], f32_at(&want["position"][2])),
+                "{at}: z"
+            );
             assert_eq!(
                 got.children,
                 want["children"]
@@ -444,5 +501,8 @@ fn agrees_with_the_reference_ymap_reader() {
         }
     }
 
-    println!("{} .ymap files, {entities_checked} entities match the reference", files.len());
+    println!(
+        "{} .ymap files, {entities_checked} entities match the reference",
+        files.len()
+    );
 }

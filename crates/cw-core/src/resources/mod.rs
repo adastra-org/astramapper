@@ -13,16 +13,16 @@ pub mod texture;
 pub mod vertex;
 
 pub use bounds::{
-    Bounds, BoundsData, BoundsType, BoundComposite, BoundGeomOctants, BoundGeometry, BoundMaterial,
-    BoundPolygon, Bvh, CollisionMesh, CollisionPart, Matrix4F,
+    BoundComposite, BoundGeomOctants, BoundGeometry, BoundMaterial, BoundPolygon, Bounds,
+    BoundsData, BoundsType, Bvh, CollisionMesh, CollisionPart, Matrix4F,
 };
 pub use clip::{Animation, AnimationBoneId, Clip, ClipDictionary, ClipType};
 pub use drawable::{
     Aabb, Drawable, DrawableDictionary, DrawableGeometry, DrawableModel, Lod, ShaderFx,
 };
 pub use frag::{
-    FragBoneTransforms, FragDrawable, FragGlassWindow, FragPhysicsLOD, FragPhysicsLODGroup,
-    FragPhysArchetype, FragPhysTypeChild, FragPhysTypeGroup, FragType, FragVehicleGlassWindows,
+    FragBoneTransforms, FragDrawable, FragGlassWindow, FragPhysArchetype, FragPhysTypeChild,
+    FragPhysTypeGroup, FragPhysicsLOD, FragPhysicsLODGroup, FragType, FragVehicleGlassWindows,
 };
 pub use reader::{version_from_flags, ResourceReader, GRAPHICS_BASE, SYSTEM_BASE};
 pub use texture::{MipLevel, Texture, TextureDictionary, TextureFormat, TextureUsage};
@@ -252,10 +252,18 @@ pub fn read_named_fragments(
         for (li, lod) in group.all_lods().iter().enumerate() {
             for (ci, child) in lod.children.iter().enumerate() {
                 if let Some(d) = &child.drawable1 {
-                    push(format!("lod{li}.child{ci}.drawable1"), d.drawable.clone(), &mut out);
+                    push(
+                        format!("lod{li}.child{ci}.drawable1"),
+                        d.drawable.clone(),
+                        &mut out,
+                    );
                 }
                 if let Some(d) = &child.drawable2 {
-                    push(format!("lod{li}.child{ci}.drawable2"), d.drawable.clone(), &mut out);
+                    push(
+                        format!("lod{li}.child{ci}.drawable2"),
+                        d.drawable.clone(),
+                        &mut out,
+                    );
                 }
             }
         }

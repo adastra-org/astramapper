@@ -64,12 +64,7 @@ fn try_frag_at(manager: &RpfManager, keys: &GtaKeys, path: &str) -> Option<FragT
     let entry = manager.entry(entry_ref);
     let (system_size, _) = entry.resource_segments()?;
     let data = manager.extract(entry_ref, keys).ok()?;
-    read_fragments(
-        FileKind::from_name(&entry.name_lower),
-        &data,
-        system_size,
-    )
-    .ok()
+    read_fragments(FileKind::from_name(&entry.name_lower), &data, system_size).ok()
 }
 
 fn f32_at(value: &Value) -> f32 {
@@ -142,11 +137,7 @@ fn check_model(m: &cw_core::resources::DrawableModel, expected: &Value, at: &str
 /// Compare a drawable's LOD models and shaders against the oracle.
 fn check_drawable(d: &cw_core::resources::Drawable, expected: &Value, at: &str) {
     if let Some(name) = &d.name {
-        assert_eq!(
-            name,
-            expected["name"].as_str().unwrap_or(""),
-            "{at}: name"
-        );
+        assert_eq!(name, expected["name"].as_str().unwrap_or(""), "{at}: name");
     }
     assert!(
         close(d.bounding_sphere_radius, f32_at(&expected["radius"])),
@@ -190,11 +181,7 @@ fn check_drawable(d: &cw_core::resources::Drawable, expected: &Value, at: &str) 
         .zip(&d.models)
         .flat_map(|(lod, list)| list.iter().map(move |m| (lod, m)))
         .collect();
-    assert_eq!(
-        got_models.len(),
-        models.len(),
-        "{at}: LOD model count"
-    );
+    assert_eq!(got_models.len(), models.len(), "{at}: LOD model count");
     for (i, ((lod, m), want)) in got_models.iter().zip(models).enumerate() {
         // The oracle names the LODs `High`/`Med`/`Low`/`VLow`; map back to the
         // enum rather than comparing display strings.
@@ -215,7 +202,9 @@ fn check_frag_drawable(fd: &cw_core::resources::FragDrawable, expected: &Value, 
         check_drawable(&fd.drawable, &Value::Object(d.clone()), at);
     }
 
-    let want = expected["drawable"]["fragMatrix"].as_array().expect("fragMatrix");
+    let want = expected["drawable"]["fragMatrix"]
+        .as_array()
+        .expect("fragMatrix");
     let columns = [
         fd.frag_matrix.column1,
         fd.frag_matrix.column2,
@@ -283,28 +272,18 @@ fn check_lod(lod: &cw_core::resources::FragPhysicsLOD, expected: &Value, at: &st
         match &child.drawable1 {
             Some(d) => check_frag_drawable(
                 d,
-                &Value::Object(
-                    want["drawable1"].as_object().expect("drawable1").clone()
-                ),
+                &Value::Object(want["drawable1"].as_object().expect("drawable1").clone()),
                 &format!("{at}.drawable1"),
             ),
-            None => assert!(
-                want["drawable1"].is_null(),
-                "{at}: expected drawable1"
-            ),
+            None => assert!(want["drawable1"].is_null(), "{at}: expected drawable1"),
         }
         match &child.drawable2 {
             Some(d) => check_frag_drawable(
                 d,
-                &Value::Object(
-                    want["drawable2"].as_object().expect("drawable2").clone()
-                ),
+                &Value::Object(want["drawable2"].as_object().expect("drawable2").clone()),
                 &format!("{at}.drawable2"),
             ),
-            None => assert!(
-                want["drawable2"].is_null(),
-                "{at}: expected drawable2"
-            ),
+            None => assert!(want["drawable2"].is_null(), "{at}: expected drawable2"),
         }
     }
 
@@ -360,11 +339,9 @@ fn check_fragment(f: &FragType, expected: &Value, at: &str) {
     }
 
     match (&f.drawable, expected["drawable"].as_object()) {
-        (Some(d), Some(want)) => check_frag_drawable(
-            d,
-            &Value::Object(want.clone()),
-            &format!("{at}.drawable"),
-        ),
+        (Some(d), Some(want)) => {
+            check_frag_drawable(d, &Value::Object(want.clone()), &format!("{at}.drawable"))
+        }
         (None, None) => {}
         (got, want) => panic!("{at}: drawable mismatch ({got:?} vs {want:?})"),
     }
@@ -388,18 +365,16 @@ fn check_fragment(f: &FragType, expected: &Value, at: &str) {
         );
     }
 
-    let names = expected["drawableArrayNames"].as_array().expect("drawableArrayNames");
+    let names = expected["drawableArrayNames"]
+        .as_array()
+        .expect("drawableArrayNames");
     assert_eq!(
         f.drawable_array_names.len(),
         names.len(),
         "{at}: array name count"
     );
     for (i, (got, want)) in f.drawable_array_names.iter().zip(names).enumerate() {
-        assert_eq!(
-            got.as_deref(),
-            want.as_str(),
-            "{at}: array name {i}"
-        );
+        assert_eq!(got.as_deref(), want.as_str(), "{at}: array name {i}");
     }
 
     let lodg = &expected["physicsLODGroup"];
@@ -408,9 +383,7 @@ fn check_fragment(f: &FragType, expected: &Value, at: &str) {
             for (name, lod) in [("lod1", &g.lod1), ("lod2", &g.lod2), ("lod3", &g.lod3)] {
                 let at = format!("{at}.{name}");
                 match (lod, want[name].as_object()) {
-                    (Some(lod), Some(want)) => {
-                        check_lod(lod, &Value::Object(want.clone()), &at)
-                    }
+                    (Some(lod), Some(want)) => check_lod(lod, &Value::Object(want.clone()), &at),
                     (None, None) => {}
                     (got, want) => panic!("{at}: LOD mismatch ({got:?} vs {want:?})"),
                 }

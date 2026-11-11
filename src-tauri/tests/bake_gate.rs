@@ -132,10 +132,18 @@ fn cancelling_the_walk_stops_it() {
     let names: HashMap<u32, String> = manager.index_names();
 
     let started = Instant::now();
-    let models = reachable_models(&manager, &keys, &archetypes.mlo, &names, &["base".into()], &|| {
-        true
-    });
-    assert!(models.is_empty(), "a walk cancelled at the start finds nothing");
+    let models = reachable_models(
+        &manager,
+        &keys,
+        &archetypes.mlo,
+        &names,
+        &["base".into()],
+        &|| true,
+    );
+    assert!(
+        models.is_empty(),
+        "a walk cancelled at the start finds nothing"
+    );
     assert!(
         started.elapsed().as_secs() < 5,
         "cancelling took {:?}",

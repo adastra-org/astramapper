@@ -7,6 +7,7 @@ import { useMemo } from "react";
 
 import * as perf from "../perf";
 import type { GeometryLoad } from "../world";
+import type { PlacementColumns } from "./columns";
 import {
   binInto,
   binPlacements,
@@ -64,7 +65,7 @@ export type HexModel = {
   readonly adaptive: AdaptiveGrid | null;
 };
 
-type Placements = { readonly placements: readonly { readonly position: readonly [number, number, number] }[] };
+type Placements = { readonly placements: PlacementColumns };
 
 /**
  * Build what the current mode needs, and only that: counting three quarters of
@@ -96,10 +97,11 @@ export function useHexModel(
     const zs = new Float64Array(total);
     let at = 0;
     for (const entry of entries) {
-      for (const placement of entry.placements) {
-        xs[at] = placement.position[0];
-        ys[at] = placement.position[1];
-        zs[at] = placement.position[2];
+      const cols = entry.placements;
+      for (let row = 0; row < cols.length; row += 1) {
+        xs[at] = cols.x(row);
+        ys[at] = cols.y(row);
+        zs[at] = cols.z(row);
         at += 1;
       }
     }

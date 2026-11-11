@@ -156,7 +156,8 @@ mod tests {
 
     impl Scratch {
         fn new(tag: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("astramapper-maps-{tag}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("astramapper-maps-{tag}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("scratch dir");
             Self { dir }

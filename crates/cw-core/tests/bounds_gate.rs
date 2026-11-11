@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use cw_core::filetype::FileKind;
-use cw_core::resources::{read_bounds, Bounds, BoundsData, BoundsType, BoundPolygon};
+use cw_core::resources::{read_bounds, BoundPolygon, Bounds, BoundsData, BoundsType};
 use cw_core::rpf::RpfManager;
 use cw_core::utils::GtaKeys;
 use serde_json::Value;
@@ -64,12 +64,7 @@ fn try_bounds_at(manager: &RpfManager, keys: &GtaKeys, path: &str) -> Option<Bou
     let entry = manager.entry(entry_ref);
     let (system_size, _) = entry.resource_segments()?;
     let data = manager.extract(entry_ref, keys).ok()?;
-    read_bounds(
-        FileKind::from_name(&entry.name_lower),
-        &data,
-        system_size,
-    )
-    .ok()
+    read_bounds(FileKind::from_name(&entry.name_lower), &data, system_size).ok()
 }
 
 fn f32_at(value: &Value) -> f32 {
@@ -92,12 +87,13 @@ fn check_common(b: &Bounds, expected: &Value, at: &str) {
         b.sphere_radius,
         f32_at(&expected["sphereRadius"])
     );
-    assert!(
-        close(b.margin, f32_at(&expected["margin"])),
-        "{at}: margin"
-    );
+    assert!(close(b.margin, f32_at(&expected["margin"])), "{at}: margin");
     assert!(close(b.volume, f32_at(&expected["volume"])), "{at}: volume");
-    assert_eq!(b.room_id() as u64, expected["roomId"].as_u64().unwrap(), "{at}: room id");
+    assert_eq!(
+        b.room_id() as u64,
+        expected["roomId"].as_u64().unwrap(),
+        "{at}: room id"
+    );
     assert_eq!(
         b.ped_density() as u64,
         expected["pedDensity"].as_u64().unwrap(),
@@ -155,7 +151,12 @@ fn check_geometry(g: &cw_core::resources::BoundGeometry, expected: &Value, at: &
         "{at}: polygons count"
     );
 
-    for (axis, (got, want)) in g.quantum.iter().zip(expected["quantum"].as_array().unwrap()).enumerate() {
+    for (axis, (got, want)) in g
+        .quantum
+        .iter()
+        .zip(expected["quantum"].as_array().unwrap())
+        .enumerate()
+    {
         assert!(close(*got, f32_at(want)), "{at}: quantum[{axis}]");
     }
     for (axis, (got, want)) in g
@@ -173,13 +174,7 @@ fn check_geometry(g: &cw_core::resources::BoundGeometry, expected: &Value, at: &
         want_verts.len(),
         "{at}: vertices array length"
     );
-    for (i, (got, want)) in g
-        .vertices
-        .iter()
-        .flatten()
-        .zip(want_verts)
-        .enumerate()
-    {
+    for (i, (got, want)) in g.vertices.iter().flatten().zip(want_verts).enumerate() {
         assert!(close(*got, f32_at(want)), "{at}: vertex[{i}]");
     }
 
@@ -206,7 +201,9 @@ fn check_geometry(g: &cw_core::resources::BoundGeometry, expected: &Value, at: &
         assert_eq!(got as u64, want.as_u64().unwrap(), "{at}: material[{i}]");
     }
 
-    let want_polymats = expected["polygonMaterialIndices"].as_array().expect("polygonMaterialIndices");
+    let want_polymats = expected["polygonMaterialIndices"]
+        .as_array()
+        .expect("polygonMaterialIndices");
     assert_eq!(
         g.polygon_material_indices.len(),
         want_polymats.len(),
@@ -238,7 +235,11 @@ fn check_geometry(g: &cw_core::resources::BoundGeometry, expected: &Value, at: &
         .zip(want_vcols)
         .enumerate()
     {
-        assert_eq!(got as u64, want.as_u64().unwrap(), "{at}: vertex colour[{i}]");
+        assert_eq!(
+            got as u64,
+            want.as_u64().unwrap(),
+            "{at}: vertex colour[{i}]"
+        );
     }
 
     let want_octs = expected["octantCounts"].as_array().expect("octantCounts");
@@ -277,14 +278,32 @@ fn check_polygon(poly: &BoundPolygon, want: &Value, at: &str) {
         }
         BoundPolygon::Sphere(s) => {
             assert_eq!(want_type, "Sphere", "{at}: type");
-            assert_eq!(s.sphere_index as u64, want["idx"].as_u64().unwrap(), "{at}: index");
-            assert!(close(s.sphere_radius, f32_at(&want["radius"])), "{at}: radius");
+            assert_eq!(
+                s.sphere_index as u64,
+                want["idx"].as_u64().unwrap(),
+                "{at}: index"
+            );
+            assert!(
+                close(s.sphere_radius, f32_at(&want["radius"])),
+                "{at}: radius"
+            );
         }
         BoundPolygon::Capsule(c) => {
             assert_eq!(want_type, "Capsule", "{at}: type");
-            assert_eq!(c.capsule_index1 as u64, want["i1"].as_u64().unwrap(), "{at}: index 1");
-            assert!(close(c.capsule_radius, f32_at(&want["radius"])), "{at}: radius");
-            assert_eq!(c.capsule_index2 as u64, want["i2"].as_u64().unwrap(), "{at}: index 2");
+            assert_eq!(
+                c.capsule_index1 as u64,
+                want["i1"].as_u64().unwrap(),
+                "{at}: index 1"
+            );
+            assert!(
+                close(c.capsule_radius, f32_at(&want["radius"])),
+                "{at}: radius"
+            );
+            assert_eq!(
+                c.capsule_index2 as u64,
+                want["i2"].as_u64().unwrap(),
+                "{at}: index 2"
+            );
         }
         BoundPolygon::Box(b) => {
             assert_eq!(want_type, "Box", "{at}: type");
@@ -298,19 +317,27 @@ fn check_polygon(poly: &BoundPolygon, want: &Value, at: &str) {
         }
         BoundPolygon::Cylinder(c) => {
             assert_eq!(want_type, "Cylinder", "{at}: type");
-            assert_eq!(c.cylinder_index1 as u64, want["i1"].as_u64().unwrap(), "{at}: index 1");
-            assert!(close(c.cylinder_radius, f32_at(&want["radius"])), "{at}: radius");
-            assert_eq!(c.cylinder_index2 as u64, want["i2"].as_u64().unwrap(), "{at}: index 2");
+            assert_eq!(
+                c.cylinder_index1 as u64,
+                want["i1"].as_u64().unwrap(),
+                "{at}: index 1"
+            );
+            assert!(
+                close(c.cylinder_radius, f32_at(&want["radius"])),
+                "{at}: radius"
+            );
+            assert_eq!(
+                c.cylinder_index2 as u64,
+                want["i2"].as_u64().unwrap(),
+                "{at}: index 2"
+            );
         }
     }
 }
 
 fn check_bvh(bvh: Option<&cw_core::resources::Bvh>, expected: &Value, at: &str) {
     let Some(bvh) = bvh else {
-        assert!(
-            expected.is_null(),
-            "{at}: expected a bvh but read none"
-        );
+        assert!(expected.is_null(), "{at}: expected a bvh but read none");
         return;
     };
     if expected.is_null() {
@@ -339,8 +366,16 @@ fn check_bvh(bvh: Option<&cw_core::resources::Bvh>, expected: &Value, at: &str) 
         {
             assert_eq!(*got as i64, want.as_i64().unwrap(), "{at}: max[{axis}]");
         }
-        assert_eq!(node.item_id as i64, want["itemId"].as_i64().unwrap(), "{at}: item id");
-        assert_eq!(node.item_count as i64, want["itemCount"].as_i64().unwrap(), "{at}: item count");
+        assert_eq!(
+            node.item_id as i64,
+            want["itemId"].as_i64().unwrap(),
+            "{at}: item id"
+        );
+        assert_eq!(
+            node.item_count as i64,
+            want["itemCount"].as_i64().unwrap(),
+            "{at}: item count"
+        );
     }
 
     let want_trees = expected["trees"].as_array().expect("bvh trees");
@@ -363,8 +398,16 @@ fn check_bvh(bvh: Option<&cw_core::resources::Bvh>, expected: &Value, at: &str) 
         {
             assert_eq!(*got as i64, want.as_i64().unwrap(), "{at}: max[{axis}]");
         }
-        assert_eq!(tree.node_index1 as i64, want["n1"].as_i64().unwrap(), "{at}: node 1");
-        assert_eq!(tree.node_index2 as i64, want["n2"].as_i64().unwrap(), "{at}: node 2");
+        assert_eq!(
+            tree.node_index1 as i64,
+            want["n1"].as_i64().unwrap(),
+            "{at}: node 1"
+        );
+        assert_eq!(
+            tree.node_index2 as i64,
+            want["n2"].as_i64().unwrap(),
+            "{at}: node 2"
+        );
     }
 }
 
@@ -388,7 +431,11 @@ fn check_bounds_tree(b: &Bounds, expected: &Value, at: &str) {
         }
         BoundsData::Composite(c) => {
             let want_children = expected["children"].as_array().expect("children");
-            assert_eq!(c.children.len(), want_children.len(), "{at}: children count");
+            assert_eq!(
+                c.children.len(),
+                want_children.len(),
+                "{at}: children count"
+            );
             for (i, (child, want)) in c.children.iter().zip(want_children).enumerate() {
                 check_bounds_tree(child, want, &format!("{at}.child{i}"));
             }
@@ -399,7 +446,12 @@ fn check_bounds_tree(b: &Bounds, expected: &Value, at: &str) {
                 want_t1.len(),
                 "{at}: t1 count"
             );
-            for (i, (matrix, want)) in c.children_transformation1.iter().zip(want_t1.chunks_exact(16)).enumerate() {
+            for (i, (matrix, want)) in c
+                .children_transformation1
+                .iter()
+                .zip(want_t1.chunks_exact(16))
+                .enumerate()
+            {
                 let at = format!("{at}.child{i} transform1");
                 let columns = [
                     matrix.column1,
@@ -407,7 +459,8 @@ fn check_bounds_tree(b: &Bounds, expected: &Value, at: &str) {
                     matrix.column3,
                     matrix.column4,
                 ];
-                for (ci, (column, want_col)) in columns.iter().zip(want.chunks_exact(4)).enumerate() {
+                for (ci, (column, want_col)) in columns.iter().zip(want.chunks_exact(4)).enumerate()
+                {
                     for (axis, want) in want_col.iter().enumerate() {
                         if axis == 3 {
                             assert_eq!(
@@ -446,7 +499,8 @@ fn check_bounds_tree(b: &Bounds, expected: &Value, at: &str) {
                     matrix.column3,
                     matrix.column4,
                 ];
-                for (ci, (column, want_col)) in columns.iter().zip(want.chunks_exact(4)).enumerate() {
+                for (ci, (column, want_col)) in columns.iter().zip(want.chunks_exact(4)).enumerate()
+                {
                     for (axis, want) in want_col.iter().enumerate() {
                         if axis == 3 {
                             assert_eq!(
@@ -484,34 +538,14 @@ fn check_bounds_tree(b: &Bounds, expected: &Value, at: &str) {
             }
 
             let want_f1 = expected["childrenFlags1"].as_array().expect("f1");
-            assert_eq!(
-                c.children_flags1.len() * 2,
-                want_f1.len(),
-                "{at}: f1 count"
-            );
-            for (i, (got, want)) in c
-                .children_flags1
-                .iter()
-                .flatten()
-                .zip(want_f1)
-                .enumerate()
-            {
+            assert_eq!(c.children_flags1.len() * 2, want_f1.len(), "{at}: f1 count");
+            for (i, (got, want)) in c.children_flags1.iter().flatten().zip(want_f1).enumerate() {
                 assert_eq!(*got as u64, want.as_u64().unwrap(), "{at}.child{i} flags1");
             }
 
             let want_f2 = expected["childrenFlags2"].as_array().expect("f2");
-            assert_eq!(
-                c.children_flags2.len() * 2,
-                want_f2.len(),
-                "{at}: f2 count"
-            );
-            for (i, (got, want)) in c
-                .children_flags2
-                .iter()
-                .flatten()
-                .zip(want_f2)
-                .enumerate()
-            {
+            assert_eq!(c.children_flags2.len() * 2, want_f2.len(), "{at}: f2 count");
+            for (i, (got, want)) in c.children_flags2.iter().flatten().zip(want_f2).enumerate() {
                 assert_eq!(*got as u64, want.as_u64().unwrap(), "{at}.child{i} flags2");
             }
 
@@ -532,8 +566,8 @@ fn agrees_with_the_reference_bounds_reader() {
         return;
     };
     // PowerShell's Out-File -Encoding utf8 writes a BOM.
-    let oracle: Value = serde_json::from_str(raw.trim_start_matches('\u{FEFF}'))
-        .expect("parse the bounds oracle");
+    let oracle: Value =
+        serde_json::from_str(raw.trim_start_matches('\u{FEFF}')).expect("parse the bounds oracle");
 
     let keys = load_keys();
     let manager = scan(&keys);
@@ -568,7 +602,12 @@ fn agrees_with_the_reference_bounds_reader() {
         let bounds = bounds_at(&manager, &keys, path);
         check_bounds_tree(&bounds, &file["bounds"], path);
 
-        fn tally(data: &BoundsData, geometries: &mut usize, vertices: &mut usize, polygons: &mut usize) {
+        fn tally(
+            data: &BoundsData,
+            geometries: &mut usize,
+            vertices: &mut usize,
+            polygons: &mut usize,
+        ) {
             match data {
                 BoundsData::Geometry(g) => {
                     *geometries += 1;
@@ -634,8 +673,8 @@ fn flattened_triangles_match_the_oracle() {
         );
         return;
     };
-    let oracle: Value = serde_json::from_str(raw.trim_start_matches('\u{FEFF}'))
-        .expect("parse the bounds oracle");
+    let oracle: Value =
+        serde_json::from_str(raw.trim_start_matches('\u{FEFF}')).expect("parse the bounds oracle");
 
     let keys = load_keys();
     let manager = scan(&keys);
@@ -649,7 +688,10 @@ fn flattened_triangles_match_the_oracle() {
         let bounds = bounds_at(&manager, &keys, path);
 
         let expected = count_oracle_triangles(&file["bounds"]);
-        let got = bounds.triangle_mesh().map(|m| m.triangle_count).unwrap_or(0);
+        let got = bounds
+            .triangle_mesh()
+            .map(|m| m.triangle_count)
+            .unwrap_or(0);
         assert_eq!(got, expected, "{path}: flattened triangle count");
 
         if let Some(mesh) = bounds.triangle_mesh() {
@@ -658,7 +700,11 @@ fn flattened_triangles_match_the_oracle() {
             // The renderer indexes into its own positions; a bad index would
             // draw garbage, so every index must stay in range.
             for part in &mesh.parts {
-                assert!(part.positions.len() / 3 >= 3, "{path}/{}: no vertices", part.name);
+                assert!(
+                    part.positions.len() / 3 >= 3,
+                    "{path}/{}: no vertices",
+                    part.name
+                );
                 assert_eq!(
                     part.indices.len(),
                     part.triangle_count * 3,
@@ -677,9 +723,7 @@ fn flattened_triangles_match_the_oracle() {
     }
 
     assert!(meshes > 0, "no bounds file produced a mesh");
-    println!(
-        "{meshes} files flattened to meshes, {triangles} triangles total"
-    );
+    println!("{meshes} files flattened to meshes, {triangles} triangles total");
 }
 
 /// Every `.ybn` in the install parses, and the composite tree resolves.

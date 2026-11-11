@@ -288,11 +288,7 @@ struct ReadModel {
 /// Like `world_map`, this reads past the viewer's one-open-file state: several
 /// entities stream their models at once, so the Explorer's single open file
 /// must not be disturbed.
-fn read_model_file(
-    path: &str,
-    keys: &GtaKeys,
-    manager: &RpfManager,
-) -> Result<ReadModel, String> {
+fn read_model_file(path: &str, keys: &GtaKeys, manager: &RpfManager) -> Result<ReadModel, String> {
     let entry_ref = manager
         .find(path)
         .ok_or_else(|| format!("{path} is not in the index"))?;
@@ -641,10 +637,7 @@ impl GpuState {
     /// The reported capabilities, or none at all if the lock is poisoned —
     /// which costs fidelity (RGBA instead of blocks) and never correctness.
     pub fn get(&self) -> crate::textures::GpuCaps {
-        self.0
-            .read()
-            .map(|caps| *caps)
-            .unwrap_or_default()
+        self.0.read().map(|caps| *caps).unwrap_or_default()
     }
 }
 
@@ -790,8 +783,7 @@ pub async fn world_map(
         let started = std::time::Instant::now();
         let out = match &loaded.cache {
             Some(cache) => {
-                let key =
-                    crate::cache::map_key(&loaded.manager, &path, loaded.typ_generation());
+                let key = crate::cache::map_key(&loaded.manager, &path, loaded.typ_generation());
                 cache.get_or_insert_with(key, cw_cache::Kind::Map, compile)
             }
             None => compile(),

@@ -111,7 +111,8 @@ fn main() {
             continue;
         };
         bytes += data.len();
-        let _ = cw_core::resources::read_textures(cw_core::filetype::FileKind::Texture, &data, size);
+        let _ =
+            cw_core::resources::read_textures(cw_core::filetype::FileKind::Texture, &data, size);
     }
     let worst_time = started.elapsed();
 

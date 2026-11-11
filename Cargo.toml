@@ -34,6 +34,12 @@ serde_json = "1"
 # Test-only: comparing extracted payloads against hashes the C# reference emits.
 sha2 = "0.11"
 
+[workspace.lints.clippy]
+# Added to clippy in 1.99. The parsers walk `chunks_exact(4)` over byte slices
+# and the rewrite to `as_chunks` changes the item type at ~40 sites in code that
+# is checked byte for byte against the reference; not worth it in a CI fix.
+chunks_exact_to_as_chunks = "allow"
+
 [profile.dev]
 # Parsing 120 GB of archives is unusable at opt-level 0. Keep our own code
 # debuggable but build dependencies optimized.
@@ -41,6 +47,17 @@ opt-level = 0
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# `cargo test` inherits the dev profile above, so every test build compiled all
+# dependencies optimized, which dominated CI time on a cold cache. Tests run on
+# small fixtures and take about a second, so build them unoptimized. `cargo run`
+# and the app keep the dev profile. Line tables keep backtraces, and skip the
+# full debuginfo that is slow to link on Windows.
+[profile.test]
+debug = "line-tables-only"
+
+[profile.test.package."*"]
+opt-level = 0
 
 [profile.release]
 lto = "thin"

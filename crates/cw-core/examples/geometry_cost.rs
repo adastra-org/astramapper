@@ -114,7 +114,10 @@ fn main() {
         "base64  {base64_time:.2?}  ->  {:.1} MB on the wire",
         mb(base64_bytes)
     );
-    println!("raw     (a memcpy)  ->  {:.1} MB on the wire", mb(raw_bytes));
+    println!(
+        "raw     (a memcpy)  ->  {:.1} MB on the wire",
+        mb(raw_bytes)
+    );
     println!(
         "\nwire {:.2}x smaller, base64 costs {:.1} ms per model file",
         base64_bytes as f64 / raw_bytes.max(1) as f64,

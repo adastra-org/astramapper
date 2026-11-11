@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { columnsFromPlaced, type PlacementColumns } from "./world/columns";
 import {
   applyEdit,
   axisRotate,
@@ -31,11 +32,11 @@ import {
 /** A map entry with one placed entity per position, for the streamer tests. */
 function entry(key: string, positions: readonly (readonly [number, number, number])[]): {
   key: string;
-  placements: Placed[];
+  placements: PlacementColumns;
 } {
   return {
     key,
-    placements: positions.map((position, index) => ({
+    placements: columnsFromPlaced(positions.map((position, index) => ({
       index,
       name: "x",
       nameHash: 0,
@@ -49,7 +50,7 @@ function entry(key: string, positions: readonly (readonly [number, number, numbe
       lodLevel: "HD",
       lodDist: 100,
       children: 0,
-    })),
+    }))),
   };
 }
 
@@ -669,6 +670,6 @@ function regionEntryOf(key: string, placements: Placed[]): RegionEntry {
     key,
     extentsMin: [0, 0, 0],
     extentsMax: [100, 100, 100],
-    placements,
+    placements: columnsFromPlaced(placements),
   };
 }

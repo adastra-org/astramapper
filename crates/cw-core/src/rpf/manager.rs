@@ -276,9 +276,7 @@ impl RpfManager {
         let archive = &self.archives[r.archive];
         let entry = &archive.entries[r.entry];
         match self.maps.get(&archive.physical_path) {
-            Some(map) => {
-                archive.extract_from(&mut std::io::Cursor::new(&map[..]), entry, keys)
-            }
+            Some(map) => archive.extract_from(&mut std::io::Cursor::new(&map[..]), entry, keys),
             None => archive.extract(entry, keys),
         }
     }
@@ -341,7 +339,10 @@ impl RpfManager {
                         Some((folder, _)) => folder.to_string(),
                         None => String::new(),
                     };
-                    by_folder.entry(folder).or_default().push(entry.path.clone());
+                    by_folder
+                        .entry(folder)
+                        .or_default()
+                        .push(entry.path.clone());
                 }
             }
             by_folder
@@ -565,13 +566,10 @@ mod tests {
         let mut manager = RpfManager::default();
         // The top-level archive's path is real, so it stamps non-zero; the
         // nested ones have no path of their own, which is the point.
-        let real = std::env::temp_dir().join(format!("astramapper-nest-{}.rpf", std::process::id()));
+        let real =
+            std::env::temp_dir().join(format!("astramapper-nest-{}.rpf", std::process::id()));
         std::fs::write(&real, b"payload").unwrap();
-        manager.archives = vec![
-            archive(&real.to_string_lossy()),
-            archive(""),
-            archive(""),
-        ];
+        manager.archives = vec![archive(&real.to_string_lossy()), archive(""), archive("")];
         // Archive 1 is nested in 0; archive 2 is nested in 1.
         manager.archive_parent = vec![None, Some(0), Some(1)];
 
@@ -669,8 +667,14 @@ mod tests {
         };
 
         let names = manager.index_names();
-        assert_eq!(names.get(&crate::utils::gen_hash("prop_bin_04a")), Some(&"prop_bin_04a".to_string()));
-        assert_eq!(names.get(&crate::utils::gen_hash("td_prop_ground_01")), Some(&"td_prop_ground_01".to_string()));
+        assert_eq!(
+            names.get(&crate::utils::gen_hash("prop_bin_04a")),
+            Some(&"prop_bin_04a".to_string())
+        );
+        assert_eq!(
+            names.get(&crate::utils::gen_hash("td_prop_ground_01")),
+            Some(&"td_prop_ground_01".to_string())
+        );
         assert_eq!(names.get(&crate::utils::gen_hash("prop_bin_04a.ydr")), None);
     }
 
@@ -732,10 +736,7 @@ mod tests {
             Some(2),
             "the folder should hold both dictionaries"
         );
-        assert_eq!(
-            by_folder.get(r"update\x64").map(|v| v.len()),
-            Some(1)
-        );
+        assert_eq!(by_folder.get(r"update\x64").map(|v| v.len()), Some(1));
     }
 
     /// The asset index picks the best model for a stem: `update` beats base,

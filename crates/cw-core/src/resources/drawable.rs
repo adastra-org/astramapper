@@ -419,7 +419,9 @@ fn read_shader_parameters(
         // The vector4 data the pointers reference is embedded here, skipped the
         // way the reference skips it.
         let _ = r.read_bytes(offset)?;
-        let hashes = r.read_u32s_at(r.position(), count as usize)?.unwrap_or_default();
+        let hashes = r
+            .read_u32s_at(r.position(), count as usize)?
+            .unwrap_or_default();
 
         let mut parameters = Vec::with_capacity(records.len());
         for (index, (data_type, data_pointer)) in records.into_iter().enumerate() {

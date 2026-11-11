@@ -141,7 +141,10 @@ pub fn from_text(text: &str) -> Gxt2File {
         if let Some(rest) = line.strip_prefix("0x") {
             if rest.len() >= 8 {
                 if let Ok(hash) = u32::from_str_radix(&rest[..8], 16) {
-                    let text = rest.get(8..).and_then(|s| s.strip_prefix(" = ")).unwrap_or("");
+                    let text = rest
+                        .get(8..)
+                        .and_then(|s| s.strip_prefix(" = "))
+                        .unwrap_or("");
                     entries.push(Gxt2Entry {
                         hash,
                         text: text.to_string(),
@@ -180,13 +183,13 @@ impl<'a> Reader<'a> {
     }
 
     fn read_u32(&mut self) -> Result<u32> {
-        let bytes = self
-            .data
-            .get(self.pos..self.pos + 4)
-            .ok_or_else(|| crate::CwError::Invalid {
-                what: "gxt2",
-                detail: format!("read past the end at offset {:#x}", self.pos),
-            })?;
+        let bytes =
+            self.data
+                .get(self.pos..self.pos + 4)
+                .ok_or_else(|| crate::CwError::Invalid {
+                    what: "gxt2",
+                    detail: format!("read past the end at offset {:#x}", self.pos),
+                })?;
         self.pos += 4;
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
@@ -203,9 +206,18 @@ mod tests {
     fn round_trips_byte_for_byte() {
         let original = Gxt2File {
             entries: vec![
-                Gxt2Entry { hash: 0x11111111, text: "hello".into() },
-                Gxt2Entry { hash: 0x22222222, text: "world".into() },
-                Gxt2Entry { hash: 0x33333333, text: "".into() },
+                Gxt2Entry {
+                    hash: 0x11111111,
+                    text: "hello".into(),
+                },
+                Gxt2Entry {
+                    hash: 0x22222222,
+                    text: "world".into(),
+                },
+                Gxt2Entry {
+                    hash: 0x33333333,
+                    text: "".into(),
+                },
             ],
         };
         let bytes = original.write();
@@ -242,14 +254,19 @@ mod tests {
     fn to_text_and_from_text_are_inverses() {
         let file = Gxt2File {
             entries: vec![
-                Gxt2Entry { hash: 0x22222222, text: "b".into() },
-                Gxt2Entry { hash: 0x11111111, text: "a".into() },
+                Gxt2Entry {
+                    hash: 0x22222222,
+                    text: "b".into(),
+                },
+                Gxt2Entry {
+                    hash: 0x11111111,
+                    text: "a".into(),
+                },
             ],
         };
         let text = file.to_text();
         assert_eq!(
-            text,
-            "0x22222222 = b\n0x11111111 = a\n",
+            text, "0x22222222 = b\n0x11111111 = a\n",
             "to_text keeps the stored order"
         );
 

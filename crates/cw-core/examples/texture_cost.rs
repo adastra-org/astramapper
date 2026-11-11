@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use cw_core::filetype::FileKind;
+use cw_core::image;
 use cw_core::resources::read_textures;
 use cw_core::rpf::RpfManager;
 use cw_core::utils::GtaKeys;
-use cw_core::image;
 
 const DEFAULT_GTA_PATH: &str = r"E:\SteamLibrary\steamapps\common\Grand Theft Auto V";
 

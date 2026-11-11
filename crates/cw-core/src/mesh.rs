@@ -346,7 +346,8 @@ mod tests {
 
     #[test]
     fn packs_a_geometry_into_buffers() {
-        let part = MeshPart::from_geometry(&triangle_geometry(), 0x1234, None, None, None, 0, 1).unwrap();
+        let part =
+            MeshPart::from_geometry(&triangle_geometry(), 0x1234, None, None, None, 0, 1).unwrap();
 
         assert_eq!(part.name, "model0.geometry1");
         assert_eq!(part.shader, 0x1234);

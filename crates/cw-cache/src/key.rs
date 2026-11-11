@@ -333,6 +333,10 @@ mod tests {
                 CacheKey::of(varied).unwrap()
             })
             .collect();
-        assert_eq!(keys.len(), 1000, "1,000 sequential entries must be distinct");
+        assert_eq!(
+            keys.len(),
+            1000,
+            "1,000 sequential entries must be distinct"
+        );
     }
 }

@@ -215,7 +215,9 @@ impl<'a> EnvelopeView<'a> {
         for index in 0..count {
             let at = table_offset + index * SECTION_ENTRY_BYTES;
             if at + SECTION_ENTRY_BYTES > buffer.len() {
-                return Err(invalid("the section table runs past the buffer".to_string()));
+                return Err(invalid(
+                    "the section table runs past the buffer".to_string(),
+                ));
             }
             let offset = read_u32(buffer, at) as usize;
             let length = read_u32(buffer, at + 4) as usize;

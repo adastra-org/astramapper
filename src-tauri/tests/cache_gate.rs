@@ -236,8 +236,8 @@ fn a_warm_map_read_returns_exactly_what_was_flattened() {
             .get(key)
             .unwrap_or_else(|| panic!("{path} should be cached"));
         assert_eq!(&got, expected, "{path} came back different");
-        let view = EnvelopeView::read(&got)
-            .unwrap_or_else(|e| panic!("{path} is not an envelope: {e}"));
+        let view =
+            EnvelopeView::read(&got).unwrap_or_else(|e| panic!("{path} is not an envelope: {e}"));
         let meta: serde_json::Value = serde_json::from_str(view.meta).expect("meta");
         placements += meta["count"].as_u64().unwrap_or(0) as usize;
         warm_bytes += got.len() as u64;
