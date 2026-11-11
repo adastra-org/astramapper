@@ -49,6 +49,7 @@ Positions are game coordinates (Z up), the ones the app prints.
 | `resetPerf` | clear the F3 spans, both sides |
 | `click` | `text`, `nth?`: the visible button, link or checkbox whose label contains `text` (`state.clickable` lists them) |
 | `key` | `key`: keydown and keyup on the window, e.g. `F3` |
+| `probe` | `match`: one `probe ...` console line (see `/logs`) per resident entity whose archetype name contains it: distance to the camera, `lodDist`, the LOD bundle drawn and how many exist. Added in v0.3.8 |
 
 Camera commands need World open; open it with `{"type":"click","text":"world"}`.
 A command that cannot run logs `bridge command N (type) failed: ...` to the

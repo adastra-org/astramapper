@@ -284,6 +284,37 @@ about 2 s. `WirePart.shader` already reaches the frontend with each compiled
 model, so the class could be refined after load (and a per-install table could be
 built by `bake`), but that is a separate piece of work, not done here.
 
+## Pylons (v0.3.8)
+
+Reported: power-line towers go to "a very far LOD" as soon as the camera moves
+away. Reproduced with the bridge's `probe` command (`{"type":"probe","match":"prop_pylon_01"}`
+logs, per resident entity, the distance, `lodDist`, the bundle drawn and how many
+exist), camera stepped along a line from `prop_pylon_01` #9 (game
+`[2410.1, 1641.4, 37.1]`, entity `lodDist` 242, drawable LOD distances 120 / 180,
+three bundles: 3,608 / 1,752 / 960 triangles), looking at it from 60 m up:
+
+| camera distance (m) | bundle drawn | draw calls | triangles |
+|---|---|---|---|
+| 60 / 120 / 180 / 230 | 0 (High) | 2,746-3,359 | 2.5-4.1 M |
+| 260 / 320 / 450 | 1 (Medium) | 3,471-4,214 | 4.5-4.8 M |
+| 700 | 2 (Low) | 4,830 | 4.8 M |
+
+(before the alpha test; after it the same bundles, 3,023-4,878 calls and 3.3-5.1 M
+triangles, the difference being what streamed in at each step.) The rule
+`lodBandForDistance` (`lodDist`, 2x, 4x) is as designed and later than the game's;
+`prop_pylon_02`-`04` (`lodDist` 155) have only two bundles, so they are 0 to 155 m
+and 1 beyond.
+
+What looked like a far LOD was drawing, not selection. The Medium and Low bundles
+of `prop_pylon_01` and the whole of the `cs1_10_cable_pylon_lod_00x` SLOD entities
+(`lodDist` 700, drawn from any range) are lattice cut out of a card by the texture's
+alpha (shader `cutout`, render bucket 3). Drawn without the alpha test they were
+solid dark slabs standing next to the real tower at 60 m already. See formats.md
+"Shaders: cutout, proxies and the render bucket" and the before/after in the fixes
+doc. Two things the evidence shows and this change does not touch: entities with
+`lodDist` -1 or 0 use fixed 100/200/400 m bands (the reference uses the
+archetype's), and a parent LOD entity is drawn together with its children.
+
 ## Frame hitches over the base game (v0.3.3)
 
 Flying the same 120 m/s route over Los Santos (waypoints `[195,-935,80]`,

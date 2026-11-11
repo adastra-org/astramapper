@@ -446,6 +446,9 @@ pub struct WireBundle {
 pub struct WirePart {
     pub name: String,
     pub shader: u32,
+    /// Jenkins hash of the `.sps` file name; see `MeshPart::shader_file`.
+    pub shader_file: u32,
+    pub render_bucket: u8,
     pub diffuse: Option<u32>,
     pub normal: Option<u32>,
     pub specular: Option<u32>,
@@ -493,6 +496,8 @@ fn wire_drawables(drawables: &[ModelDrawable], envelope: &mut Envelope) -> Vec<W
                             WirePart {
                                 name: part.name.clone(),
                                 shader: part.shader,
+                                shader_file: part.shader_file,
+                                render_bucket: part.render_bucket,
                                 diffuse: part.diffuse,
                                 normal: part.normal,
                                 specular: part.specular,
