@@ -70,7 +70,8 @@ pub fn model_key(manager: &RpfManager, path: &str, caps: GpuCaps) -> Option<Cach
 ///
 /// `PLACEMENTS_FORMAT` is mixed in so a change to what the envelope carries
 /// invalidates what is already cached: bump it when the encoder or the archetype
-/// classifier changes. v2 added the per-name archetype classes.
+/// classifier changes. v2 added the per-name archetype classes; v3 stores the
+/// drawn orientation (the inverse of the file's quaternion) instead of the raw one.
 pub fn map_key(manager: &RpfManager, path: &str, typ_generation: u64) -> Option<CacheKey> {
     entry_key(
         manager,
@@ -81,7 +82,7 @@ pub fn map_key(manager: &RpfManager, path: &str, typ_generation: u64) -> Option<
 }
 
 /// The version of the cached placement payload. See [`map_key`].
-const PLACEMENTS_FORMAT: u64 = 2;
+const PLACEMENTS_FORMAT: u64 = 3;
 
 /// The key for any artifact compiled out of one archive entry.
 fn entry_key(manager: &RpfManager, path: &str, kind: Kind, params: u64) -> Option<CacheKey> {
