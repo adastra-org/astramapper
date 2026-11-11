@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { formatHash } from "../lib/format";
 import { registerCamera } from "../lib/debugBridge";
+import { RefCache } from "../lib/world/refCache";
 import * as perf from "../lib/perf";
 
 import { reportGpuCaps } from "../lib/gpu";
@@ -2352,6 +2353,10 @@ function Canvas({
       // The instanced meshes are what the models cost in draw calls: one per
       // model, LOD bundle and part, not one per entity. Walking every pool is
       // not free, so it is sampled, not per frame.
+      if (ticks % 15 === 0) {
+        perf.gauge("texture cache", textureCache.size);
+        perf.gauge("shared models", sharedModels.size);
+      }
       if (ticks % 15 === 0 && instanced.current) {
         const stats = instanced.current.stats();
         perf.gauge("instanced meshes drawn", stats.drawn);
@@ -2688,7 +2693,12 @@ function totalCount(entries: readonly CanvasEntry[]): number {
 }
 
 /** One part's GPU resources, made once per model and drawn by every entity. */
-type SharedPart = { readonly geometry: THREE.BufferGeometry; readonly material: THREE.Material };
+type SharedPart = {
+  readonly geometry: THREE.BufferGeometry;
+  readonly material: THREE.Material;
+  /** The `textureCache` keys this part holds, released with it. */
+  readonly textureKeys: readonly string[];
+};
 type SharedModel = { readonly lods: readonly (readonly SharedPart[])[]; refs: number };
 
 /**
@@ -2725,12 +2735,20 @@ function releaseShared(model: WorldModel): void {
   shared.refs -= 1;
   if (shared.refs > 0) return;
   for (const lod of shared.lods) {
-    for (const part of lod) {
-      part.geometry.dispose();
-      part.material.dispose();
-    }
+    for (const part of lod) disposePart(part);
   }
   sharedModels.delete(model);
+}
+
+/**
+ * Free one part: its geometry, its material, and its hold on its textures.
+ * `material.dispose()` does not touch the textures it points at, which is what
+ * let every texture of the session stay resident (#23).
+ */
+function disposePart(part: SharedPart): void {
+  part.geometry.dispose();
+  part.material.dispose();
+  for (const key of part.textureKeys) textureCache.release(key);
 }
 
 function buildSharedParts(
@@ -2778,7 +2796,7 @@ function buildSharedParts(
       material.normalScale = new THREE.Vector2(1, -1);
       material.needsUpdate = true;
     }
-    parts.push({ geometry, material });
+    parts.push({ geometry, material, textureKeys: resolved.keys });
   }
   return parts;
 }
@@ -2794,6 +2812,7 @@ function disposeAllShared(): void {
     }
   }
   sharedModels.clear();
+  textureCache.clear();
 }
 
 const editScratch = {
@@ -2863,7 +2882,7 @@ function updateHexLines(lines: THREE.LineSegments, cells: readonly OverlayCell[]
 function resolvePartTextures(
   part: { readonly diffuse: number | null; readonly normal: number | null },
   textures: WorldModel["textures"],
-): { diffuse: THREE.Texture | null; normal: THREE.Texture | null } {
+): { diffuse: THREE.Texture | null; normal: THREE.Texture | null; keys: string[] } {
   // A texture whose section came back empty counts as unresolved, which the
   // caller already handles by leaving the part flat grey. Better that than a
   // throw from inside the render setup.
@@ -2872,13 +2891,24 @@ function resolvePartTextures(
   );
   const diffuse = part.diffuse === null ? null : byHash.get(part.diffuse);
   const normal = part.normal === null ? null : byHash.get(part.normal);
+  // Each upload holds the texture for the part until the part is disposed.
+  const keys: string[] = [];
+  const hold = (
+    texture: WorldModel["textures"][number] | null | undefined,
+    colorSpace: THREE.ColorSpace,
+  ): THREE.Texture | null => {
+    if (!texture) return null;
+    keys.push(textureKey(texture, colorSpace));
+    return uploadTexture(texture, colorSpace);
+  };
   return {
     // Diffuse carries colour and is authored in sRGB; a normal map carries
     // vectors and must stay linear. Getting this backwards washes the whole
     // scene out, and it is set per slot because the texture does not know
     // which it is.
-    diffuse: diffuse ? uploadTexture(diffuse, THREE.SRGBColorSpace) : null,
-    normal: normal ? uploadTexture(normal, THREE.NoColorSpace) : null,
+    diffuse: hold(diffuse, THREE.SRGBColorSpace),
+    normal: hold(normal, THREE.NoColorSpace),
+    keys,
   };
 }
 
@@ -2903,7 +2933,14 @@ const BLOCK_FORMATS: Readonly<Record<string, THREE.CompressedPixelFormat>> = {
  * the colour space is in the key because the same texture can legitimately be
  * bound as both a diffuse and a normal map by two different parts.
  */
-const textureCache = new Map<string, THREE.Texture>();
+const textureCache = new RefCache<THREE.Texture>();
+
+function textureKey(
+  texture: WorldModel["textures"][number],
+  colorSpace: THREE.ColorSpace,
+): string {
+  return `${texture.hash}|${texture.format}|${colorSpace}`;
+}
 
 /**
  * Upload one texture's blocks straight to the GPU.
@@ -2922,10 +2959,14 @@ function uploadTexture(
   texture: WorldModel["textures"][number],
   colorSpace: THREE.ColorSpace,
 ): THREE.Texture {
-  const key = `${texture.hash}|${texture.format}|${colorSpace}`;
-  const cached = textureCache.get(key);
-  if (cached) return cached;
+  return textureCache.acquire(textureKey(texture, colorSpace), () => buildTexture(texture, colorSpace));
+}
 
+/** Build and upload one texture. Called once per key while it has users. */
+function buildTexture(
+  texture: WorldModel["textures"][number],
+  colorSpace: THREE.ColorSpace,
+): THREE.Texture {
   const last = texture.mips[texture.levels.length - 1];
   const complete =
     texture.levels.length > 1 && last !== undefined && last.width <= 1 && last.height <= 1;
@@ -2968,9 +3009,13 @@ function uploadTexture(
   built.minFilter = complete ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
   built.magFilter = THREE.LinearFilter;
   built.generateMipmaps = false;
+  // Once the driver has the levels, the JS side has no use for them, and they
+  // are views over the IPC response the model arrived in: dropping them lets
+  // that buffer go as soon as no geometry needs it.
+  built.onUpdate = () => {
+    built.mipmaps = [];
+  };
   built.needsUpdate = true;
-
-  textureCache.set(key, built);
   return built;
 }
 

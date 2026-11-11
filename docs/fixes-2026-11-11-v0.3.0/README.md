@@ -42,6 +42,9 @@ Design and numbers: [../hex-streaming.md](../hex-streaming.md#zone-clusters-v030
   stayed 20 to 75 and `cell placements held` under 35,000; the whole-map terrain
   layer is drawn at distance (screenshot). Frame p95 30 to 85 ms and long task p95
   100 to 150 ms during the flight, still above the targets.
-- [ ] JS heap bounded while flying (#23): the heap reached 5.5 GB and does not
-  come back, with the model cache at its budget.
+- [~] JS heap bounded while flying (#23): textures were never released and kept
+  whole IPC responses alive; now reference-counted with their model parts. Same
+  flight: heap idle 5.5 GB (growing) -> 3.2 GB (stable, comes back after peaks),
+  textures and geometries follow what is near. Not at the 300 MB target: the
+  model cache budget allows up to 3 GB.
 - [ ] Code Mode on the bridge channel (scripted scenarios, assertions on gauges).

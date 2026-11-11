@@ -85,6 +85,29 @@ Flight over Los Santos at 120 m/s through five waypoints, F3 read through
   (418, 1,236, 1,855) and `geometries` with it (2,202 to 5,489) while the cells
   held went back down to about 40. Tracked in #23.
 
+## After the texture fix (v0.3.2, #23)
+
+The heap growth was `textureCache` in `World.tsx`: a bare `Map` that never
+released anything, whose textures kept their mip chains, which are views over
+the IPC response each model arrived in. One texture kept a whole response
+(geometry included) alive for the session, so the cache budget of #6 did not
+bound the heap. Textures are now reference-counted with the shared model parts
+that use them (`src/lib/world/refCache.ts`), freed with the last user, and drop
+their CPU mips once uploaded. F3 gets `texture cache` and `shared models`.
+
+Same flight, same machine:
+
+| | before | after |
+|---|---|---|
+| `JS heap used` at 8 s intervals (MB) | 2,439 / 2,789 / 3,305 / 3,722 / 4,012 / 4,463, then 5,376 | 2,704 / 3,133 / 3,640 / 3,804 / 4,168 / 2,870 / 3,218 |
+| heap idle after the flight | 5,500 and not coming down | 3,150 to 3,200, stable |
+| `textures` / `geometries` | 482 to 2,531 / 2,202 to 5,489, only growing | 1,448 to 2,983 / 3,743 to 5,865, follow what is near |
+
+The heap is no longer monotonic and the collector brings it back. It is not
+under the 300 MB target of #2: the model cache is allowed up to 3 GB (#6) and
+the models in use stay in it. Screenshots after the flight show the textures
+intact.
+
 ## Next
 
 A Code Mode on top of the same channel (scripted scenarios, assertions on the
