@@ -21,6 +21,6 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "scripts/bridge.ts", "scripts/code-mode"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }
