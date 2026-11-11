@@ -97,6 +97,68 @@ models, while `tick js` stayed ~16 ms. The list is now `PlacedList`
 The heap is not under the 300 MB target: `modelCache` keeps every model fetched
 (598 MB over the wire in this run). That is #6.
 
+## IPC cost: where the remaining ~130 ms is (#8)
+
+Measured with `scripts/ipc-bench.ts` (release build, base game, WebView2,
+driven over CDP from inside the page, nothing else loading). The ~130 ms is not
+a per-call floor. It is **queueing behind bytes**.
+
+An idle call costs about 1 ms, whatever the command:
+
+| probe | p50 |
+|---|---|
+| `setTimeout(0)` (JS floor) | 4.6 ms |
+| `app_info` / `game_is_open` (sync, trivial) | 0.8 ms |
+| `world_status` (sync, `content_groups` over 5,378 archives) | 1.5 ms |
+| `world_asset` (async, `spawn_blocking`, tiny reply) | 0.9 ms |
+| `world_model`, backend only (`perf_report`, 247 hits of 4.4 MB) | 1.2 ms |
+| `world_model` round trip, one at a time, 4.4 MB | 37 ms (~120 MB/s) |
+
+The transport moves about 115 MB/s on one stream and saturates near **177 MB/s**
+(1, 2, 4, 8, 12 in flight: 114, 148, 166, 176, 177 MB/s). Replies share that
+pipe in order, so *any* call, including a one-byte ping, waits for the bytes
+already in front of it:
+
+| `world_status` while N x 4.4 MB model transfers are in flight | p50 |
+|---|---|
+| 0 | 1.4 ms |
+| 4 | 74.5 ms |
+| 12 | 261 ms |
+
+That is the `ipc ping` p50 of 128 ms in the table above: with 12 requests in
+flight and models averaging about 1 MB, the ping waits ~130 ms for the replies
+queued ahead of it. The main thread is not the cause (a ping under a 50 ms
+long-task loop is still 1.5 ms p50, 52 ms max), and neither is the JS heap.
+
+What this rules out:
+
+- **A custom URI scheme for model bytes.** Prototyped
+  (`register_asynchronous_uri_scheme_protocol`, `fetch` on the JS side): 37.2 ms
+  vs 37.6 ms for `invoke` sequentially, 630 ms vs 643 ms with 48 in flight.
+  Tauri's `invoke` already is a custom-protocol request on WebView2 and
+  `tauri::ipc::Response` already ships raw bytes, so there is nothing to gain.
+  Not merged.
+- **Batching models per call (#3).** It saves the ~1 ms per call and nothing
+  else; the bytes still go through the same pipe at the same rate.
+- **Serialization.** Replies are raw `Vec<u8>`, the backend side is 1.2 ms.
+
+What would move it, none of it done:
+
+- **Fewer bytes per model.** Every LOD is sent whether or not the camera needs
+  it, and textures shared between models are sent once per model. A 12-in-flight
+  window of 4.4 MB models is 53 MB, ~300 ms on this pipe.
+- **A lower in-flight limit.** Throughput is within 6% of its ceiling at 4 in
+  flight (166 vs 177 MB/s) and a ping behind them costs 75 ms instead of 261 ms.
+  Not changed here: this was measured on cache hits of one large model, where
+  concurrency buys nothing. On a cold cache the backend compiles for tens of ms
+  per model and concurrency hides that, so the limit needs a measurement on a
+  real flight before it moves.
+
+Streaming throughput is not hurt by this: a model arrives when its bytes have
+crossed, however many are queued. It only shows as latency on a call that
+should have been quick (Show model, `world_asset`, the F3 ping), and that call
+waits at most one window of transfers.
+
 ## F3 probes
 
 - `tick js` (the whole frame callback), `tick lod update`.
@@ -113,8 +175,10 @@ The heap is not under the 300 MB target: `modelCache` keeps every model fetched
 
 - #2 Placements are columnar (`src/lib/world/columns.ts`): typed-array views
   over the response buffer, a `Placed` built only on demand. Done.
-- #8 IPC latency: the ~0.7 s floor was the main thread, not the IPC (see below).
-  What is left (~130 ms p50) is worth one more look.
+- #8 IPC latency: the ~0.7 s floor was the main thread, not the IPC. The
+  ~130 ms left is replies queueing behind model bytes on a ~177 MB/s transport,
+  not a per-call cost; a URI scheme and batching do not move it (see "IPC
+  cost"). Closed. What could: fewer bytes per model, a lower in-flight limit.
 - #6 `modelCache` is a `ModelCache` under a byte budget (v0.1.3): a fifth of
   available RAM, at most a tenth of the total, within 256 MB and 3 GB, from the
   new `system_memory` command, refreshed every 10 s. Over budget it drops the
