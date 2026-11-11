@@ -92,6 +92,36 @@ export function pixel(image: Image, x: number, y: number): [number, number, numb
 export type Region = readonly [number, number, number, number];
 
 /**
+ * The fraction of pixels in `region` whose colour differs between two images of
+ * the same size by more than `tolerance` on any channel. NaN for images of
+ * different sizes or an empty region.
+ */
+export function difference(a: Image, b: Image, region: Region, tolerance = 30): number {
+  if (a.width !== b.width || a.height !== b.height) return Number.NaN;
+  const x0 = Math.floor(region[0] * a.width);
+  const y0 = Math.floor(region[1] * a.height);
+  const x1 = Math.min(a.width, Math.ceil(region[2] * a.width));
+  const y1 = Math.min(a.height, Math.ceil(region[3] * a.height));
+  let total = 0;
+  let different = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const [r1, g1, b1] = pixel(a, x, y);
+      const [r2, g2, b2] = pixel(b, x, y);
+      total++;
+      if (
+        Math.abs(r1 - r2) > tolerance ||
+        Math.abs(g1 - g2) > tolerance ||
+        Math.abs(b1 - b2) > tolerance
+      ) {
+        different++;
+      }
+    }
+  }
+  return total === 0 ? Number.NaN : different / total;
+}
+
+/**
  * The fraction of pixels in `region` (x0, y0, x1, y1 as fractions of the image)
  * whose colour is further than `tolerance` (per channel) from `background`.
  */

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { encodePng, solidPng } from "./fake-app";
-import { coverage, decodePng, pixel } from "./png";
+import { coverage, decodePng, difference, pixel } from "./png";
 
 const gradient = (w: number, h: number): Array<[number, number, number]> =>
   Array.from({ length: w * h }, (_, i) => {
@@ -25,6 +25,24 @@ describe("decodePng", () => {
 
   test("things that are not a PNG are refused", () => {
     expect(() => decodePng(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9]))).toThrow("not a PNG");
+  });
+});
+
+describe("difference", () => {
+  const same: Array<[number, number, number]> = Array.from({ length: 32 }, () => [10, 10, 10]);
+  const half: Array<[number, number, number]> = same.map((p, i) => (i % 8 < 4 ? p : [200, 10, 10]));
+  const a = decodePng(encodePng(8, 4, same));
+  const b = decodePng(encodePng(8, 4, half));
+
+  test("the fraction of pixels that changed between two shots", () => {
+    expect(difference(a, a, [0, 0, 1, 1])).toBe(0);
+    expect(difference(a, b, [0, 0, 1, 1])).toBeCloseTo(0.5);
+    expect(difference(a, b, [0, 0, 0.5, 1])).toBe(0);
+  });
+
+  test("shots of different sizes cannot be compared", () => {
+    const small = decodePng(encodePng(4, 4, same.slice(0, 16)));
+    expect(difference(a, small, [0, 0, 1, 1])).toBeNaN();
   });
 });
 

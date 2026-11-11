@@ -53,6 +53,8 @@ pub enum ArchetypeClass {
     None = 0,
     Decal = 1,
     Vegetation = 2,
+    // 3 is ground: set by the world index from the model's shaders, which this
+    // function cannot see (see `src-tauri/src/ground.rs`). Never returned here.
 }
 
 /// Classify one archetype. See the module note for what each rule rests on.

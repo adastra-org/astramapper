@@ -40,6 +40,11 @@ pub const SPEC_SAMPLER: u32 = 1619499462;
 pub const DIFFUSE_HF_SAMPLER: u32 = 2946270081;
 pub const TINT_PALETTE_SAMPLER: u32 = 4131954791;
 pub const DETAIL_SAMPLER: u32 = 3393362404;
+/// The four ground layers of the `terrain_cb_w_4lyr` family, in the order the
+/// reference's `TerrainShader` binds them (`TextureSampler_layer0` to `3`), and
+/// the mask the `_cm` variants blend by (`lookupSampler`).
+pub const TERRAIN_LAYER_SAMPLERS: [u32; 4] = [3576369631, 606121937, 831736502, 2025281789];
+pub const LOOKUP_SAMPLER: u32 = 2295086480;
 
 /// Guard on any count read out of a file before it is used to size an
 /// allocation. Nothing in a stock drawable comes close; a corrupt or hostile

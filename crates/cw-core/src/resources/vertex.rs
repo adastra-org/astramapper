@@ -45,7 +45,9 @@ impl VertexSemantic {
     pub const POSITION: usize = 0;
     pub const NORMAL: usize = 3;
     pub const COLOUR0: usize = 4;
+    pub const COLOUR1: usize = 5;
     pub const TEXCOORD0: usize = 6;
+    pub const TEXCOORD1: usize = 7;
 
     pub fn from_index(index: usize) -> Option<Self> {
         use VertexSemantic::*;

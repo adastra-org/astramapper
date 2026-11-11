@@ -23,7 +23,10 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::{Serialize, Serializer};
 
-use crate::resources::drawable::{Drawable, DrawableGeometry, Lod};
+use crate::resources::drawable::{
+    Drawable, DrawableGeometry, Lod, BUMP_SAMPLER, DIFFUSE_SAMPLER, LOOKUP_SAMPLER, SPEC_SAMPLER,
+    TERRAIN_LAYER_SAMPLERS,
+};
 use crate::resources::vertex::VertexSemantic;
 
 /// A vertex or index buffer: tightly packed, little-endian, ready to upload.
@@ -112,6 +115,13 @@ pub struct MeshPart {
     pub normal: Option<u32>,
     /// Hash of the texture in the specular slot, when bound.
     pub specular: Option<u32>,
+    /// The four ground layers of a `terrain_cb_w_4lyr` shader, by hash, in
+    /// `TextureSampler_layer0` to `3` order. `None` for every other shader; when
+    /// set, [`MeshPart::colours`] and [`MeshPart::uvs1`] carry what blends them.
+    pub layers: Option<[Option<u32>; 4]>,
+    /// The blend mask of the `_cm` terrain variants (`lookupSampler`), sampled
+    /// with the second texcoord.
+    pub mask: Option<u32>,
     pub vertex_count: usize,
     pub triangle_count: usize,
     /// Tightly packed `f32` triples.
@@ -120,8 +130,25 @@ pub struct MeshPart {
     pub normals: Option<Buffer>,
     /// `f32` pairs, absent when the declaration has no texcoord0.
     pub uvs: Option<Buffer>,
+    /// `f32` pairs of texcoord1, only for a terrain blend that has one.
+    pub uvs1: Option<Buffer>,
+    /// Terrain blend weights, only for a [`MeshPart::layers`] part: eight bytes
+    /// a vertex, `COLOUR0` as RGBA then `COLOUR1` as RGBA, each byte the
+    /// reference's `Colour` over 255. A colour the declaration lacks is
+    /// `[255; 4]`, which the reference also reads as no blend.
+    pub colours: Option<Buffer>,
     /// `u32` triples.
     pub indices: Buffer,
+}
+
+/// The texture hashes a shader binds for one geometry.
+#[derive(Debug, Clone, Copy, Default)]
+struct PartTextures {
+    diffuse: Option<u32>,
+    normal: Option<u32>,
+    specular: Option<u32>,
+    layers: Option<[Option<u32>; 4]>,
+    mask: Option<u32>,
 }
 
 impl MeshBundle {
@@ -133,26 +160,22 @@ impl MeshBundle {
         let mut parts = Vec::new();
         for (m, model) in models.iter().enumerate() {
             for (g, geometry) in model.geometries.iter().enumerate() {
-                let shader = drawable
-                    .shaders
-                    .get(geometry.shader_id as usize)
-                    .map(|s| s.name)
-                    .unwrap_or(0);
-                let (diffuse, normal, specular) = drawable
-                    .shaders
-                    .get(geometry.shader_id as usize)
+                let shader_fx = drawable.shaders.get(geometry.shader_id as usize);
+                let shader = shader_fx.map(|s| s.name).unwrap_or(0);
+                let textures = shader_fx
                     .map(|s| {
-                        (
-                            s.texture_for(crate::resources::drawable::DIFFUSE_SAMPLER),
-                            s.texture_for(crate::resources::drawable::BUMP_SAMPLER),
-                            s.texture_for(crate::resources::drawable::SPEC_SAMPLER),
-                        )
+                        let layers = TERRAIN_LAYER_SAMPLERS.map(|param| s.texture_for(param));
+                        PartTextures {
+                            diffuse: s.texture_for(DIFFUSE_SAMPLER),
+                            normal: s.texture_for(BUMP_SAMPLER),
+                            specular: s.texture_for(SPEC_SAMPLER),
+                            layers: layers.iter().any(Option::is_some).then_some(layers),
+                            mask: s.texture_for(LOOKUP_SAMPLER),
+                        }
                     })
-                    .unwrap_or((None, None, None));
-                if let Some(mut part) =
-                    MeshPart::from_geometry(geometry, shader, diffuse, normal, specular, m, g)
-                {
-                    if let Some(fx) = drawable.shaders.get(geometry.shader_id as usize) {
+                    .unwrap_or_default();
+                if let Some(mut part) = MeshPart::from_geometry(geometry, shader, textures, m, g) {
+                    if let Some(fx) = shader_fx {
                         part.shader_file = fx.file_name;
                         part.render_bucket = fx.render_bucket;
                     }
@@ -203,12 +226,19 @@ impl MeshBundle {
 }
 
 impl MeshPart {
+    /// Every texture hash this part draws with: the three slots, the terrain
+    /// layers and the blend mask.
+    pub fn texture_hashes(&self) -> impl Iterator<Item = u32> + '_ {
+        [self.diffuse, self.normal, self.specular, self.mask]
+            .into_iter()
+            .chain(self.layers.into_iter().flatten())
+            .flatten()
+    }
+
     fn from_geometry(
         geometry: &DrawableGeometry,
         shader: u32,
-        diffuse: Option<u32>,
-        normal: Option<u32>,
-        specular: Option<u32>,
+        textures: PartTextures,
         model_index: usize,
         geometry_index: usize,
     ) -> Option<Self> {
@@ -230,6 +260,11 @@ impl MeshPart {
         let mut positions = Vec::with_capacity(count * 3);
         let mut normals = has_normal.then(|| Vec::with_capacity(count * 3));
         let mut uvs = has_uv.then(|| Vec::with_capacity(count * 2));
+        // A terrain blend also needs the vertex colours and the second texcoord.
+        let blend = textures.layers.is_some();
+        let mut colours = blend.then(|| Vec::with_capacity(count * 8));
+        let mut uvs1 = (blend && declaration.has(VertexSemantic::TEXCOORD1))
+            .then(|| Vec::with_capacity(count * 2));
 
         for i in 0..count {
             let Some(vertex) = geometry.vertex(i) else {
@@ -251,6 +286,20 @@ impl MeshPart {
                     .decode(vertex, VertexSemantic::TEXCOORD0)
                     .unwrap_or([0.0; 4]);
                 uvs.extend_from_slice(&uv[..2]);
+            }
+            if let Some(colours) = colours.as_mut() {
+                for semantic in [VertexSemantic::COLOUR0, VertexSemantic::COLOUR1] {
+                    let c = declaration
+                        .decode(vertex, semantic)
+                        .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    colours.extend(c.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+                }
+            }
+            if let Some(uvs1) = uvs1.as_mut() {
+                let uv = declaration
+                    .decode(vertex, VertexSemantic::TEXCOORD1)
+                    .unwrap_or([0.0; 4]);
+                uvs1.extend_from_slice(&uv[..2]);
             }
         }
 
@@ -275,14 +324,18 @@ impl MeshPart {
             shader,
             shader_file: 0,
             render_bucket: 0,
-            diffuse,
-            normal,
-            specular,
+            diffuse: textures.diffuse,
+            normal: textures.normal,
+            specular: textures.specular,
+            layers: textures.layers,
+            mask: textures.mask,
             vertex_count,
             triangle_count: indices.len() / 3,
             positions: Buffer::from_f32(&positions),
             normals: normals.as_deref().map(Buffer::from_f32),
             uvs: uvs.as_deref().map(Buffer::from_f32),
+            uvs1: uvs1.as_deref().map(Buffer::from_f32),
+            colours: colours.map(Buffer),
             indices: Buffer::from_u32(&indices),
         })
     }
@@ -361,7 +414,8 @@ mod tests {
     #[test]
     fn packs_a_geometry_into_buffers() {
         let part =
-            MeshPart::from_geometry(&triangle_geometry(), 0x1234, None, None, None, 0, 1).unwrap();
+            MeshPart::from_geometry(&triangle_geometry(), 0x1234, PartTextures::default(), 0, 1)
+                .unwrap();
 
         assert_eq!(part.name, "model0.geometry1");
         assert_eq!(part.shader, 0x1234);
@@ -390,13 +444,103 @@ mod tests {
         assert_eq!(indices, vec![0, 1, 2]);
     }
 
+    /// A `PNCCTT` vertex (position, normal, colour0, colour1, texcoord0,
+    /// texcoord1): the layout of the `terrain_cb_w_4lyr_2tex` family.
+    fn terrain_geometry() -> DrawableGeometry {
+        let declaration = VertexDeclaration {
+            flags: 0b1111_1001, // position, normal, colour0, colour1, texcoord0, texcoord1
+            stride: 48,
+            unknown_6h: 0,
+            count: 6,
+            types: 0x5599_6006,
+        };
+        let mut bytes = Vec::new();
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in p {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+            for c in [0.0f32, 0.0, 1.0] {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[255, 128, 0, 51]); // colour0
+            bytes.extend_from_slice(&[0, 255, 64, 255]); // colour1
+            for c in [p[0] * 4.0, p[1] * 4.0, 0.25, 0.75] {
+                bytes.extend_from_slice(&c.to_le_bytes()); // texcoord0, texcoord1
+            }
+        }
+        DrawableGeometry {
+            shader_id: 0,
+            bounds: None,
+            vertex_count: 3,
+            vertex_stride: 48,
+            declaration: Some(declaration),
+            vertex_bytes: bytes,
+            indices: vec![0, 1, 2],
+        }
+    }
+
+    /// A part with ground layers carries the blend inputs: both vertex colours
+    /// as bytes and texcoord1. A part without them does not pay for them.
+    #[test]
+    fn a_terrain_blend_carries_colours_and_the_second_texcoord() {
+        let layers = Some([Some(1), Some(2), None, Some(4)]);
+        let textures = PartTextures {
+            layers,
+            mask: Some(9),
+            ..PartTextures::default()
+        };
+        let part = MeshPart::from_geometry(&terrain_geometry(), 0, textures, 0, 0).unwrap();
+
+        assert_eq!(part.layers, layers);
+        assert_eq!(part.texture_hashes().collect::<Vec<_>>(), vec![9, 1, 2, 4]);
+        let colours = part.colours.as_ref().unwrap().as_bytes();
+        assert_eq!(colours.len(), 3 * 8);
+        assert_eq!(&colours[..8], &[255, 128, 0, 51, 0, 255, 64, 255]);
+        assert_eq!(
+            decode_f32(part.uvs1.as_ref().unwrap()),
+            vec![0.25, 0.75, 0.25, 0.75, 0.25, 0.75]
+        );
+
+        let plain =
+            MeshPart::from_geometry(&terrain_geometry(), 0, PartTextures::default(), 0, 0).unwrap();
+        assert!(plain.colours.is_none() && plain.uvs1.is_none() && plain.layers.is_none());
+    }
+
+    /// A terrain blend whose vertices have no colour1 reads it as opaque white,
+    /// which is what leaves the blend to the mask texture.
+    #[test]
+    fn a_missing_colour_reads_as_white() {
+        let mut geometry = terrain_geometry();
+        geometry.declaration.as_mut().unwrap().flags &= !0b10_0000; // no colour1
+                                                                    // Re-pack without colour1 so the bytes match the declaration.
+        let mut bytes = Vec::new();
+        for p in [[0.0f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for c in p.iter().chain([0.0f32, 0.0, 1.0].iter()) {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+            bytes.extend_from_slice(&[10, 20, 30, 40]);
+            for c in [0.0f32, 0.0, 0.0, 0.0] {
+                bytes.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+        geometry.vertex_bytes = bytes;
+        geometry.vertex_stride = 44;
+        let textures = PartTextures {
+            layers: Some([Some(1), None, None, None]),
+            ..PartTextures::default()
+        };
+        let part = MeshPart::from_geometry(&geometry, 0, textures, 0, 0).unwrap();
+        let colours = part.colours.as_ref().unwrap().as_bytes();
+        assert_eq!(&colours[..8], &[10, 20, 30, 40, 255, 255, 255, 255]);
+    }
+
     /// A hand-edited file can name a vertex that is not there. Dropping the
     /// triangle beats handing the renderer an out-of-range index.
     #[test]
     fn drops_triangles_that_index_past_the_vertex_buffer() {
         let mut geometry = triangle_geometry();
         geometry.indices = vec![0, 1, 2, 0, 1, 99];
-        let part = MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).unwrap();
+        let part = MeshPart::from_geometry(&geometry, 0, PartTextures::default(), 0, 0).unwrap();
         assert_eq!(part.triangle_count, 1);
     }
 
@@ -404,7 +548,7 @@ mod tests {
     fn skips_a_geometry_with_no_usable_triangles() {
         let mut geometry = triangle_geometry();
         geometry.indices = vec![0, 1, 500];
-        assert!(MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).is_none());
+        assert!(MeshPart::from_geometry(&geometry, 0, PartTextures::default(), 0, 0).is_none());
     }
 
     /// A geometry whose declaration has no position is not renderable at all.
@@ -414,7 +558,7 @@ mod tests {
         if let Some(declaration) = geometry.declaration.as_mut() {
             declaration.flags &= !1;
         }
-        assert!(MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).is_none());
+        assert!(MeshPart::from_geometry(&geometry, 0, PartTextures::default(), 0, 0).is_none());
     }
 
     /// The vertex count in the header is trusted only as far as the bytes go.
@@ -422,7 +566,7 @@ mod tests {
     fn clamps_the_vertex_count_to_the_buffer() {
         let mut geometry = triangle_geometry();
         geometry.vertex_count = 500;
-        let part = MeshPart::from_geometry(&geometry, 0, None, None, None, 0, 0).unwrap();
+        let part = MeshPart::from_geometry(&geometry, 0, PartTextures::default(), 0, 0).unwrap();
         assert_eq!(part.vertex_count, 3);
     }
 }

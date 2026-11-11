@@ -29,10 +29,11 @@ const FLAG_FROM_MLO = 2;
 /**
  * The archetype class carried per name (`nameClasses` in the envelope metadata),
  * as `cw-core`'s `ArchetypeClass`. The numbers are the wire contract; append,
- * never renumber. No class for terrain: nothing in the archetype record
- * identifies ground safely, so terrain stays on its name.
+ * never renumber. Ground is not in the archetype record, so it is not told
+ * from the `.ytyp`: the world index sets class 3 from the model's shaders (a part
+ * that binds a terrain layer), on top of the name tokens.
  */
-export const ARCHETYPE_CLASS = { none: 0, decal: 1, vegetation: 2 } as const;
+export const ARCHETYPE_CLASS = { none: 0, decal: 1, vegetation: 2, ground: 3 } as const;
 
 /** The raw columns and tables a `PlacementColumns` is laid over. */
 export type ColumnSource = {

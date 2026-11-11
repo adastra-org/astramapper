@@ -63,6 +63,20 @@ export type Assertion = { label?: string } & (
       /** How far (per channel) a pixel may be from the background and still count as background. Default 6. */
       tolerance?: number;
     }
+  | {
+      /**
+       * The fraction of a screenshot's `region` that differs from another
+       * screenshot of the same size by more than `tolerance` per channel
+       * (default 30). Two views of the same pose: 0 is the same picture.
+       */
+      kind: "imageDiff";
+      shot: string;
+      against: string;
+      region: Region;
+      op: Op;
+      value: number;
+      tolerance?: number;
+    }
 );
 
 export type Step =

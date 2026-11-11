@@ -57,6 +57,11 @@ use crate::world::{blocking, find_model_for, map_envelope, ymaps_in_group, GpuSt
 /// The level number that names the terrain layer rather than a partition level.
 pub const TERRAIN_LEVEL: u8 = 255;
 
+/// The archetype class of a name whose shaders say it is ground. Not a class
+/// `classify_archetype` gives (the `.ytyp` says nothing about it): the index
+/// sets it after the shader census. See [`crate::ground`].
+pub const GROUND_CLASS: u8 = 3;
+
 /// One map in the index.
 #[derive(Debug, Clone)]
 pub struct MapInfo {
@@ -250,6 +255,20 @@ impl WorldIndex {
         failed: usize,
         params: PartitionParams,
     ) -> Result<Self, String> {
+        Self::build_with_ground(folder, group, decoded, failed, params, |_| HashSet::new())
+    }
+
+    /// [`WorldIndex::build`], with `ground` telling which of the interned names
+    /// are ground by their shaders. Those join the terrain layer and carry
+    /// [`GROUND_CLASS`], on top of the names with a terrain token.
+    pub fn build_with_ground(
+        folder: &str,
+        group: &str,
+        decoded: &[DecodedMap],
+        failed: usize,
+        params: PartitionParams,
+        ground: impl FnOnce(&[String]) -> HashSet<String>,
+    ) -> Result<Self, String> {
         let mut store = PlacementStore::default();
         let mut maps = Vec::with_capacity(decoded.len());
         for (slot, map) in decoded.iter().enumerate() {
@@ -264,7 +283,18 @@ impl WorldIndex {
         }
 
         // Classified once per distinct name, not per placement.
-        let terrain_name: Vec<bool> = store.names.iter().map(|n| is_terrain_name(n)).collect();
+        let ground = ground(&store.names);
+        for (slot, name) in store.names.iter().enumerate() {
+            if ground.contains(name) {
+                store.name_classes[slot] = GROUND_CLASS;
+            }
+        }
+        let terrain_name: Vec<bool> = store
+            .names
+            .iter()
+            .zip(&store.name_classes)
+            .map(|(n, class)| *class == GROUND_CLASS || is_terrain_name(n))
+            .collect();
         let mut terrain = Vec::new();
         let mut rest = Vec::with_capacity(store.len());
         for (id, &name) in store.name_of.iter().enumerate() {
@@ -654,7 +684,14 @@ pub async fn world_index_build(
                 .collect();
             let failed = read.iter().filter(|r| r.is_err()).count();
             let decoded: Vec<DecodedMap> = read.into_iter().flatten().collect();
-            WorldIndex::build(&loaded.folder, &group, &decoded, failed, params)
+            WorldIndex::build_with_ground(
+                &loaded.folder,
+                &group,
+                &decoded,
+                failed,
+                params,
+                |names| crate::ground::cached_ground_names(&loaded, &group, names),
+            )
         })
     })
     .await?;
@@ -674,7 +711,7 @@ const MODEL_WORKER_STACK: usize = 16 * 1024 * 1024;
 
 /// A pool of its own, one core short of the machine's, so a cell fetch cannot
 /// starve the UI thread or the bake, and its workers have room to compile.
-fn model_pool() -> Option<&'static rayon::ThreadPool> {
+pub fn model_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         let threads = std::thread::available_parallelism()
@@ -966,6 +1003,48 @@ mod tests {
             index.store.names[index.store.name_of[index.terrain[0] as usize] as usize],
             "terrain_01"
         );
+    }
+
+    /// A name whose shaders say ground joins the terrain layer even though its
+    /// name has no terrain token, and carries the ground class to the frontend.
+    #[test]
+    fn a_ground_shader_puts_a_placement_in_the_terrain_layer() {
+        let a = decoded(
+            "a.ymap",
+            &[
+                ("ch2_04_land02b", "HD", 10.0, 10.0),
+                ("terrain_01", "HD", 40.0, 40.0),
+                ("prop_lamp", "HD", 12.0, 12.0),
+            ],
+        );
+        let index =
+            WorldIndex::build_with_ground("C:\\gta", "base", &[a], 0, small_params(), |names| {
+                assert!(names.iter().any(|n| n == "ch2_04_land02b"));
+                HashSet::from(["ch2_04_land02b".to_string()])
+            })
+            .expect("build");
+
+        assert_eq!(
+            index.report.terrain, 2,
+            "the token and the shader both count"
+        );
+        let terrain_names: Vec<&str> = index
+            .terrain
+            .iter()
+            .map(|id| index.store.names[index.store.name_of[*id as usize] as usize].as_str())
+            .collect();
+        assert!(terrain_names.contains(&"ch2_04_land02b"));
+        assert!(terrain_names.contains(&"terrain_01"));
+        let land = index
+            .store
+            .names
+            .iter()
+            .position(|n| n == "ch2_04_land02b")
+            .unwrap();
+        assert_eq!(index.store.name_classes[land], GROUND_CLASS);
+        // The lamp stays in the partition.
+        let partitioned: u32 = index.partition.leaves.iter().map(|l| l.count).sum();
+        assert_eq!(partitioned, 1);
     }
 
     #[test]

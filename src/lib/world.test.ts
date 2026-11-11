@@ -448,6 +448,13 @@ describe("streamPenalty", () => {
       );
     });
 
+    test("the ground class, set from the shaders, is terrain whatever the name", () => {
+      expect(classed("ch2_04_land02b", ARCHETYPE_CLASS.ground)).toBe(STREAM_PHASE_PENALTY.terrain);
+      expect(classed("prop_building_01", ARCHETYPE_CLASS.ground)).toBe(
+        STREAM_PHASE_PENALTY.terrain,
+      );
+    });
+
     test("an unknown class number is ignored rather than trusted", () => {
       expect(classed("prop_building_01", 99)).toBe(STREAM_PHASE_PENALTY.structure);
     });
@@ -553,6 +560,30 @@ describe("streamingDecision", () => {
         4,
       );
       expect(decision.load).toEqual([]);
+    });
+
+    test("ground the shaders found is not asked for past its budget's reach; a terrain name always is", () => {
+      const ground = (name: string, index: number, x: number) => ({
+        ...placedAtXy(name, index, x, 0),
+        archetypeClass: ARCHETYPE_CLASS.ground,
+      });
+      const entries = [
+        region("m1", [
+          ground("ch2_04_land02b", 0, 500),
+          ground("ch2_04_land03", 1, 5_000),
+          ground("terrain_far", 2, 5_000),
+        ]),
+      ];
+      const decision = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4, null, 1_000);
+      expect(new Set(decision.load.map((c) => c.entityIndex))).toEqual(new Set([0, 2]));
+
+      const box = { extentsMin: [0, 0, 0], extentsMax: [100, 100, 100] } as const;
+      const far = ground("ch2_04_land03", 1, 5_000);
+      expect(stillStreamWanted([0, 0, 0], box, far, null, 1_000)).toBe(false);
+      expect(stillStreamWanted([0, 0, 0], box, far, null, 10_000)).toBe(true);
+      expect(stillStreamWanted([0, 0, 0], box, ground("terrain_far", 2, 5_000), null, 1_000)).toBe(
+        true,
+      );
     });
 
     test("a waiting terrain request stays wanted wherever the camera goes", () => {

@@ -586,12 +586,7 @@ pub fn read_model(
     for entry in &named {
         for bundle in MeshBundle::all(&entry.drawable) {
             for part in &bundle.parts {
-                for hash in [part.diffuse, part.normal, part.specular]
-                    .into_iter()
-                    .flatten()
-                {
-                    wanted.insert(hash);
-                }
+                wanted.extend(part.texture_hashes());
             }
         }
     }

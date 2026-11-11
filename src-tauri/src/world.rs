@@ -330,12 +330,7 @@ fn read_model_file(path: &str, keys: &GtaKeys, manager: &RpfManager) -> Result<R
             }
             for bundle in &lods {
                 for part in &bundle.parts {
-                    for hash in [part.diffuse, part.normal, part.specular]
-                        .into_iter()
-                        .flatten()
-                    {
-                        wanted.insert(hash);
-                    }
+                    wanted.extend(part.texture_hashes());
                 }
             }
             ModelDrawable {
@@ -452,6 +447,10 @@ pub struct WirePart {
     pub diffuse: Option<u32>,
     pub normal: Option<u32>,
     pub specular: Option<u32>,
+    /// The ground layers of a terrain blend, by hash. See `MeshPart::layers`.
+    pub layers: Option<[Option<u32>; 4]>,
+    /// The terrain blend mask, by hash.
+    pub mask: Option<u32>,
     pub vertex_count: usize,
     pub triangle_count: usize,
     /// Section holding `f32` triples.
@@ -460,6 +459,10 @@ pub struct WirePart {
     pub normals: Option<usize>,
     /// Section holding `f32` pairs, absent when there was no texcoord0.
     pub uvs: Option<usize>,
+    /// Section holding `f32` pairs of texcoord1, for a terrain blend.
+    pub uvs1: Option<usize>,
+    /// Section holding the terrain blend colours: eight bytes a vertex.
+    pub colours: Option<usize>,
     pub indices: usize,
     /// 16 or 32. Every part in a 3,382-part sample of stock geometry indexed
     /// fewer than 65,536 vertices, which halves the index payload, but a part
@@ -501,6 +504,8 @@ fn wire_drawables(drawables: &[ModelDrawable], envelope: &mut Envelope) -> Vec<W
                                 diffuse: part.diffuse,
                                 normal: part.normal,
                                 specular: part.specular,
+                                layers: part.layers,
+                                mask: part.mask,
                                 vertex_count: part.vertex_count,
                                 triangle_count: part.triangle_count,
                                 positions: envelope.push(part.positions.as_bytes()),
@@ -510,6 +515,14 @@ fn wire_drawables(drawables: &[ModelDrawable], envelope: &mut Envelope) -> Vec<W
                                     .map(|buffer| envelope.push(buffer.as_bytes())),
                                 uvs: part
                                     .uvs
+                                    .as_ref()
+                                    .map(|buffer| envelope.push(buffer.as_bytes())),
+                                uvs1: part
+                                    .uvs1
+                                    .as_ref()
+                                    .map(|buffer| envelope.push(buffer.as_bytes())),
+                                colours: part
+                                    .colours
                                     .as_ref()
                                     .map(|buffer| envelope.push(buffer.as_bytes())),
                                 indices: envelope.push(indices),
