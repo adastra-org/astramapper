@@ -318,6 +318,19 @@ describe("sample and assertions", () => {
     ]);
   });
 
+  test("a tolerance keeps a slightly lighter grid from counting as ground", async () => {
+    const steps: Scenario["steps"] = [
+      { do: "openWorld" },
+      { do: "shot", name: "grid" },
+      { do: "assert", kind: "image", shot: "grid", region: [0, 0, 1, 1], op: ">=", value: 0.9 },
+      { do: "assert", kind: "image", shot: "grid", region: [0, 0, 1, 1], op: "<=", value: 0.1, tolerance: 40 },
+    ];
+    const { report } = await run(scenario({ name: "t", description: "", steps }), {
+      png: solidPng(4, 4, [42, 48, 58]),
+    });
+    expect(report.assertions.map((a) => a.ok)).toEqual([true, true]);
+  });
+
   test("the corner pixel can stand for the background", async () => {
     const { report } = await run(
       scenario({

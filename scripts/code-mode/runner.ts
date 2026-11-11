@@ -337,7 +337,7 @@ export async function runScenario(
         const image = shots.get(a.shot);
         if (!image) return result(null, `no screenshot named "${a.shot}" was taken`);
         const bg = a.background === "corner" ? pixel(image, 0, 0) : (a.background ?? CLEAR_COLOR);
-        return result(coverage(image, a.region, bg));
+        return result(coverage(image, a.region, bg, a.tolerance));
       }
     }
   }

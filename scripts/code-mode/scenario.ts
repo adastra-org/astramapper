@@ -60,6 +60,8 @@ export type Assertion = { label?: string } & (
       value: number;
       /** `[r, g, b]`, or "corner" to take the top-left pixel. Defaults to the scene's clear colour. */
       background?: readonly [number, number, number] | "corner";
+      /** How far (per channel) a pixel may be from the background and still count as background. Default 6. */
+      tolerance?: number;
     }
 );
 
