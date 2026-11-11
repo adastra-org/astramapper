@@ -9,6 +9,9 @@ repository.workspace = true
 # Deliberately depends on neither `tauri` nor `cw-core`. The cache stores opaque
 # bytes under an opaque key; what those bytes mean is the caller's business, and
 # that is what makes the round trip testable without an app or an install.
+[lints]
+workspace = true
+
 [dependencies]
 memmap2.workspace = true
 serde.workspace = true

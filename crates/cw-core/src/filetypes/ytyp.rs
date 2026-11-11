@@ -207,7 +207,7 @@ pub struct Extension {
 /// The `.ytyp` is one of the RSC-meta containers, so this is
 /// [`crate::meta::read_meta`]'s RSC path followed by the typed walk.
 pub fn read_ytyp(meta: &Meta) -> Result<YtypFile> {
-    let Some(map_types) = get_typed_data::<MapTypes>(&meta, names::C_MAP_TYPES) else {
+    let Some(map_types) = get_typed_data::<MapTypes>(meta, names::C_MAP_TYPES) else {
         return Err(crate::CwError::Invalid {
             what: "ytyp",
             detail: "no CMapTypes block".into(),
@@ -284,17 +284,17 @@ pub fn read_ytyp(meta: &Meta) -> Result<YtypFile> {
     })
 }
 
-/// `MloArchetype.LoadChildren`: the rooms, portals, entity sets and modifiers.
-fn load_mlo_children(
-    meta: &Meta,
-    def: &MloArchetypeDef,
-) -> (
+/// What `load_mlo_children` returns, in the order the reference reads them.
+type MloChildren = (
     Vec<MloEntity>,
     Vec<MloRoom>,
     Vec<MloPortal>,
     Vec<MloEntitySetData>,
     Vec<MloTimeCycleModifier>,
-) {
+);
+
+/// `MloArchetype.LoadChildren`: the rooms, portals, entity sets and modifiers.
+fn load_mlo_children(meta: &Meta, def: &MloArchetypeDef) -> MloChildren {
     let mut entities = Vec::new();
     if let Some(defs) =
         convert_data_array_ptr::<EntityDef>(meta, names::C_ENTITY_DEF, &def.mlo.entities)

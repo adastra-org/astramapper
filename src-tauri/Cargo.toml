@@ -19,6 +19,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[lints]
+workspace = true
+
 [dependencies]
 cw-core = { path = "../crates/cw-core" }
 cw-cache = { path = "../crates/cw-cache" }
