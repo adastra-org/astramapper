@@ -89,6 +89,10 @@ pub struct WorldStatus {
     /// The `.ymap` open in the Explorer, when there is one — so the world view
     /// can offer to place the map the user was just looking at.
     pub open_map_path: Option<String>,
+    /// Identifies the install the models were compiled from (hex, because a
+    /// `u64` does not survive a JSON number). The frontend's persistent model
+    /// cache is keyed on it, so a game update drops what it holds (#7).
+    pub install_stamp: Option<String>,
 }
 
 /// One `.ymap` a content group holds.
@@ -696,6 +700,66 @@ pub fn system_memory() -> SystemMemory {
     }
 }
 
+/// What the machine has, for the onboarding's precompile recommendation (#7).
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareInfo {
+    /// Logical cores. The bake uses all but one.
+    pub cores: usize,
+    pub total_memory: u64,
+    pub available_memory: u64,
+    /// Free bytes on the volume holding the compiled-asset cache, or `None`
+    /// when it cannot be worked out.
+    pub free_disk_bytes: Option<u64>,
+}
+
+/// What Windows puts in front of a canonicalized path: backslash, backslash,
+/// question mark, backslash.
+const VERBATIM_PREFIX: &str = "\\\\?\\";
+
+/// Free space on the volume `path` lives on: the disk whose mount point is the
+/// longest prefix of it. A path that does not exist yet (the cache directory
+/// before the first write) is resolved through its nearest existing ancestor.
+/// Pure of sysinfo so it is testable.
+pub fn free_space_for(path: &std::path::Path, disks: &[(std::path::PathBuf, u64)]) -> Option<u64> {
+    let mut probe = Some(path);
+    let resolved = loop {
+        let candidate = probe?;
+        match candidate.canonicalize() {
+            Ok(real) => break real,
+            Err(_) => probe = candidate.parent(),
+        }
+    };
+    // Windows canonicalizes to the verbatim form (`\\?\C:\...`); mount points
+    // come without the prefix.
+    let text = resolved.to_string_lossy();
+    let plain = std::path::PathBuf::from(text.strip_prefix(VERBATIM_PREFIX).unwrap_or(&text));
+    disks
+        .iter()
+        .filter(|(mount, _)| plain.starts_with(mount))
+        .max_by_key(|(mount, _)| mount.components().count())
+        .map(|(_, free)| *free)
+}
+
+#[tauri::command]
+pub fn hardware_info(app: tauri::AppHandle) -> HardwareInfo {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let free: Vec<(std::path::PathBuf, u64)> = disks
+        .iter()
+        .map(|disk| (disk.mount_point().to_path_buf(), disk.available_space()))
+        .collect();
+    let free_disk_bytes =
+        crate::cache::assets_dir(&app).and_then(|dir| free_space_for(&dir, &free));
+    HardwareInfo {
+        cores: std::thread::available_parallelism().map_or(1, |n| n.get()),
+        total_memory: system.total_memory(),
+        available_memory: system.available_memory(),
+        free_disk_bytes,
+    }
+}
+
 /// The world view's first question: is there a game, what content does it have,
 /// and is a map open in the Explorer.
 #[tauri::command]
@@ -719,12 +783,17 @@ pub fn world_status(
             folder: Some(loaded.folder.clone()),
             dlc_groups: content_groups(&loaded.manager),
             open_map_path,
+            install_stamp: Some(format!(
+                "{:016x}",
+                crate::cache::install_stamp(std::path::Path::new(&loaded.folder))
+            )),
         }),
         None => Ok(WorldStatus {
             game_open: false,
             folder: None,
             dlc_groups: Vec::new(),
             open_map_path,
+            install_stamp: None,
         }),
     }
 }
@@ -815,7 +884,7 @@ pub(crate) fn map_envelope(
             Some(loaded.mlo_archetypes()),
             Some(loaded.names()),
         )?;
-        crate::placements::encode(&map)
+        crate::placements::encode_with(&map, Some(&loaded.archetypes().all))
     };
     let started = std::time::Instant::now();
     let out = match &loaded.cache {
@@ -860,7 +929,10 @@ pub async fn world_map_file(
             Some(loaded.mlo_archetypes()),
             Some(loaded.names()),
         )?;
-        Ok(tauri::ipc::Response::new(crate::placements::encode(&map)?))
+        Ok(tauri::ipc::Response::new(crate::placements::encode_with(
+            &map,
+            Some(&loaded.archetypes().all),
+        )?))
     })
     .await
 }
@@ -1103,5 +1175,45 @@ mod tests {
         let (payload, system) = loose_ymap_payload(&raw);
         assert_eq!(payload.len(), 512);
         assert_eq!(system, 512);
+    }
+
+    #[test]
+    fn free_space_picks_the_longest_mount_prefix() {
+        let here = std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("canon");
+        let plain = here
+            .to_string_lossy()
+            .trim_start_matches(VERBATIM_PREFIX)
+            .to_string();
+        let root = std::path::PathBuf::from(&plain)
+            .ancestors()
+            .last()
+            .expect("root")
+            .to_path_buf();
+        let disks = vec![(root, 111), (std::path::PathBuf::from(&plain), 222)];
+        assert_eq!(free_space_for(&here, &disks), Some(222));
+    }
+
+    #[test]
+    fn free_space_resolves_a_path_that_does_not_exist_yet() {
+        let here = std::env::current_dir()
+            .expect("cwd")
+            .canonicalize()
+            .expect("canon");
+        let plain = here
+            .to_string_lossy()
+            .trim_start_matches(VERBATIM_PREFIX)
+            .to_string();
+        let disks = vec![(std::path::PathBuf::from(&plain), 5)];
+        let missing = here.join("no-such-dir").join("assets");
+        assert_eq!(free_space_for(&missing, &disks), Some(5));
+    }
+
+    #[test]
+    fn free_space_is_unknown_without_a_matching_disk() {
+        let here = std::env::current_dir().expect("cwd");
+        assert_eq!(free_space_for(&here, &[]), None);
     }
 }

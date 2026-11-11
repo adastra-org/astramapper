@@ -1158,3 +1158,18 @@ fn zone_cluster_model_sizes_over_the_base_game() {
         total as f64 / 1_073_741_824.0
     );
 }
+
+/// Which base maps fail to read, and why.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn unreadable_base_maps() {
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let names = manager.index_names();
+    for (path, _) in ymaps_in_group(&manager, "base") {
+        if let Err(e) = read_world_map(&path, &keys, &manager, Some(&archetypes.mlo), Some(&names))
+        {
+            println!("FAILED {path}: {e}");
+        }
+    }
+}

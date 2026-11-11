@@ -9,7 +9,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import * as perf from "./perf";
-import type { PlacementColumns } from "./world/columns";
+import { ARCHETYPE_CLASS, type PlacementColumns } from "./world/columns";
 import { decodePlacements } from "./world/placements";
 import { asFloat32, asUint16, asUint32, Kind, readEnvelope, splitMips } from "./wire";
 
@@ -28,7 +28,22 @@ export type WorldStatus = {
   readonly dlcGroups: readonly ContentGroup[];
   /** The `.ymap` open in the Explorer, when there is one. */
   readonly openMapPath: string | null;
+  /** Identifies the installed build (hex): the persistent model cache's key. */
+  readonly installStamp: string | null;
 };
+
+/** What the machine has, for the precompile recommendation (#7). */
+export type HardwareInfo = {
+  readonly cores: number;
+  readonly totalMemory: number;
+  readonly availableMemory: number;
+  /** Free bytes on the volume holding the asset cache; `null` if unknown. */
+  readonly freeDiskBytes: number | null;
+};
+
+export function hardwareInfo(): Promise<HardwareInfo> {
+  return invoke<HardwareInfo>("hardware_info");
+}
 
 /** One `.ymap` a content group holds. */
 export type YmapListing = {
@@ -63,6 +78,12 @@ export type Placed = {
   /** The entity's own LOD distance, the streamer's HD→LOD boundary. */
   readonly lodDist: number;
   readonly children: number;
+  /**
+   * What the archetype record says this is (`ARCHETYPE_CLASS`, from flags, asset
+   * type and bounding box: #9). Absent or 0 means the data says nothing and the
+   * name decides.
+   */
+  readonly archetypeClass?: number;
 };
 
 /** A `.ymap` read for the world. */
@@ -267,6 +288,14 @@ let worldModelInFlight = 0;
 let worldModelPeak = 0;
 
 export async function worldModel(path: string): Promise<WorldModel> {
+  return decodeModel(await worldModelBuffer(path), path);
+}
+
+/**
+ * The raw envelope for a model, as the backend sent it. Split from decoding so
+ * the persistent cache can keep the bytes and skip this call next session (#7).
+ */
+export async function worldModelBuffer(path: string): Promise<ArrayBuffer> {
   worldModelInFlight += 1;
   worldModelPeak = Math.max(worldModelPeak, worldModelInFlight);
   perf.gauge("worldModel in flight", worldModelInFlight);
@@ -289,6 +318,15 @@ export async function worldModel(path: string): Promise<WorldModel> {
     worldModelInFlight -= 1;
     perf.gauge("worldModel in flight", worldModelInFlight);
   }
+  return buffer;
+}
+
+/**
+ * Decode a model envelope into typed-array views over it. Throws on a buffer
+ * that is not a model envelope, which is how a persisted record from another
+ * build of the wire format is told apart from a good one.
+ */
+export function decodeModel(buffer: ArrayBuffer, path: string): WorldModel {
   return decodeWorldModel(buffer, 0, buffer.byteLength, path);
 }
 
@@ -709,6 +747,37 @@ export const STREAM_VIEW_COS_HALF_ANGLE = Math.cos((60 * Math.PI) / 180);
  */
 export const STREAM_VIEW_NEAR = 60;
 
+/**
+ * How much of its tier radius an entity outside the view cone may load from.
+ *
+ * Out of view is not out of the sphere (turning must not find an empty world),
+ * but it is a lot less urgent: past this fraction of the radius, what is behind
+ * or beside the camera is not a candidate until it comes into view. Unloading
+ * keeps the full radius (x1.5), so a loaded entity that falls out of view stays
+ * put: the gap between 0.5 and 1.5 is the hysteresis.
+ */
+export const STREAM_OFF_VIEW_RADIUS = 0.5;
+
+/**
+ * Whether something `distance` away, at offset `(dx, dy, dz)`, counts as on
+ * screen: inside the near radius, or inside the view cone. No view means
+ * everything is.
+ */
+export function inStreamView(
+  dx: number,
+  dy: number,
+  dz: number,
+  distance: number,
+  view?: StreamView | null,
+): boolean {
+  if (!view || distance <= STREAM_VIEW_NEAR) return true;
+  return (
+    (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
+      Math.max(distance, 1e-6) >=
+    view.cosHalfAngle
+  );
+}
+
 /** One entity the pass decided to load. */
 export type StreamCandidate = {
   readonly mapKey: string;
@@ -733,13 +802,18 @@ export type StreamCandidate = {
  * # What `view` changes, and what it deliberately does not
  *
  * Given a view, the batch is filled with what is **on screen** first and only
- * then with what is behind the camera. It does not change *which* entities are
- * candidates and it does not change the unload rule — both stay the sphere they
- * were. That distinction is the whole design: culling the candidate set to the
- * frustum would mean turning around and finding nothing there, and then a
- * reload storm as the same geometry streams back in. Ordering costs nothing and
- * cannot pop, and with a batch of 24 against a sphere holding thousands, order
- * is what the user actually experiences as load speed.
+ * then with what is behind the camera, and what is off screen is only a
+ * candidate inside `STREAM_OFF_VIEW_RADIUS` of its tier radius. The unload rule
+ * does not look at the view at all: it stays the full sphere (x1.5).
+ *
+ * That split is the design. Culling the candidates to the frustum outright
+ * would mean turning around and finding nothing there, then a reload storm as
+ * the same geometry streams back in. A smaller sphere for what is off screen
+ * keeps the near side of it resident and spends no IPC or memory on the far
+ * side until it is looked at, and because loading starts at 0.5 of the radius
+ * and unloading at 1.5, an entity that drifts in and out of the cone never
+ * thrashes. Ordering still does most of the work: with a batch of 24 against a
+ * sphere holding thousands, order is what the user experiences as load speed.
  *
  * # Why this is not a collect-then-sort
  *
@@ -794,12 +868,7 @@ export function streamingDecision(
       ) {
         continue;
       }
-      const inView =
-        !view ||
-        distance <= STREAM_VIEW_NEAR ||
-        (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
-          Math.max(distance, 1e-6) >=
-          view.cosHalfAngle;
+      const inView = inStreamView(dx, dy, dz, distance, view);
       const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + STREAM_PHASE_PENALTY.terrain;
       insertCandidate(
         best,
@@ -860,7 +929,7 @@ export function streamingDecision(
       if (pendingHere?.has(entityIndex)) continue;
 
       const distance = Math.sqrt(distanceSq);
-      const penalty = streamPenaltyOf(cols.name(row), lodLevel);
+      const penalty = streamPenaltyOf(cols.name(row), lodLevel, cols.archetypeClass(row));
       // The view only ever adds to the rank, so distance plus penalty is a floor
       // on it: anything whose floor already loses to the worst candidate kept
       // cannot win, and skips the cone test.
@@ -871,12 +940,9 @@ export function streamingDecision(
       ) {
         continue;
       }
-      const inView =
-        !view ||
-        distance <= STREAM_VIEW_NEAR ||
-        (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
-          Math.max(distance, 1e-6) >=
-          view.cosHalfAngle;
+      const inView = inStreamView(dx, dy, dz, distance, view);
+      // Off view, only the inner part of the sphere is worth loading now.
+      if (!inView && distance > radius * STREAM_OFF_VIEW_RADIUS) continue;
       const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + penalty;
       insertCandidate(
         best,
@@ -907,12 +973,7 @@ export function streamRank(
   const dy = entity.position[1] - cameraGta[1];
   const dz = entity.position[2] - cameraGta[2];
   const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  const inView =
-    !view ||
-    distance <= STREAM_VIEW_NEAR ||
-    (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
-      Math.max(distance, 1e-6) >=
-      view.cosHalfAngle;
+  const inView = inStreamView(dx, dy, dz, distance, view);
   return (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + streamPenalty(entity);
 }
 
@@ -980,7 +1041,10 @@ export function terrainRowsOf(cols: PlacementColumns): Uint32Array {
   if (!rows) {
     const found: number[] = [];
     for (let row = 0; row < cols.length; row += 1) {
-      if (streamPenaltyOf(cols.name(row), cols.lodLevel(row)) === STREAM_PHASE_PENALTY.terrain) {
+      if (
+        streamPenaltyOf(cols.name(row), cols.lodLevel(row), cols.archetypeClass(row)) ===
+        STREAM_PHASE_PENALTY.terrain
+      ) {
         found.push(row);
       }
     }
@@ -1005,22 +1069,28 @@ function isTerrainRow(terrain: Uint32Array, row: number): boolean {
 }
 
 /**
- * The phase penalty for one entity. Decided by name where the name is telling
- * (terrain, decal, vegetation) and by LOD tier otherwise: HD structures are
- * the structure phase, the coarse LOD and SLOD tiers go last. A name that
- * matches wrongly only loads its entity in the wrong order; nothing is dropped.
+ * The phase penalty for one entity. Terrain is decided by name, because no
+ * archetype data identifies ground safely (see `cw-core` `filetypes/class.rs`).
+ * Decals and vegetation are decided by the archetype class the backend read from
+ * the `.ytyp` flags and bounding box; where the data says nothing, by name
+ * tokens. Otherwise by LOD tier: HD structures are the structure phase, the
+ * coarse LOD and SLOD tiers go last. A misclassification only loads its entity
+ * in the wrong order; nothing is dropped.
  */
 export function streamPenalty(entity: Placed): number {
-  return streamPenaltyOf(entity.name, entity.lodLevel);
+  return streamPenaltyOf(entity.name, entity.lodLevel, entity.archetypeClass);
 }
 
-/** `streamPenalty` from the two fields it reads, for a scan over columns. */
-export function streamPenaltyOf(name: string, lodLevel: string): number {
+/** `streamPenalty` from the fields it reads, for a scan over columns. */
+export function streamPenaltyOf(name: string, lodLevel: string, archetypeClass = 0): number {
   let byName = namePenalty.get(name);
   if (byName === undefined) {
     byName = classifyName(name);
     namePenalty.set(name, byName);
   }
+  if (byName === STREAM_PHASE_PENALTY.terrain) return byName;
+  if (archetypeClass === ARCHETYPE_CLASS.decal) return STREAM_PHASE_PENALTY.decal;
+  if (archetypeClass === ARCHETYPE_CLASS.vegetation) return STREAM_PHASE_PENALTY.vegetation;
   if (byName >= 0) return byName;
   return lodLevel === "ORPHAN_HD" || lodLevel === "HD"
     ? STREAM_PHASE_PENALTY.structure
@@ -1029,13 +1099,15 @@ export function streamPenaltyOf(name: string, lodLevel: string): number {
 
 /**
  * Whether `streamingDecision` would still ask for this placement from this
- * camera: its map is in range and it is inside its own LOD-tier radius. The
- * test a request waiting in a queue has to keep passing to stay there.
+ * camera: its map is in range and it is inside its own LOD-tier radius (the
+ * reduced one when it is off view). The test a request waiting in a queue has
+ * to keep passing to stay there.
  */
 export function stillStreamWanted(
   cameraGta: readonly [number, number, number],
   entry: Pick<RegionEntry, "extentsMin" | "extentsMax">,
   placement: Placed,
+  view?: StreamView | null,
 ): boolean {
   // The ground is wanted everywhere (#5), so a waiting terrain request never
   // goes stale however far the camera has moved.
@@ -1050,7 +1122,15 @@ export function stillStreamWanted(
   const dy = placement.position[1] - cameraGta[1];
   const dz = placement.position[2] - cameraGta[2];
   const radius = entityStreamRadius(placement);
-  return dx * dx + dy * dy + dz * dz <= radius * radius;
+  const distanceSq = dx * dx + dy * dy + dz * dz;
+  if (distanceSq > radius * radius) return false;
+  // The same off-view cut as the decision, so a request for something the
+  // camera turned away from does not sit in the queue.
+  if (!view) return true;
+  const distance = Math.sqrt(distanceSq);
+  return (
+    inStreamView(dx, dy, dz, distance, view) || distance <= radius * STREAM_OFF_VIEW_RADIUS
+  );
 }
 
 /**

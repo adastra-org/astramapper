@@ -22,7 +22,10 @@ Long-term items are GitHub issues in this repo and on the Ad Astra Roadmap.
 
 - [ ] Placements as typed arrays instead of objects (#2).
 - [ ] IPC latency floor ~0.7 s per call (#8).
-- [ ] One draw call per entity; instancing (#10).
+- [~] One draw call per entity; instancing (#10). `InstancedMesh` per model, LOD
+  bundle and part. Browser harness: 7,915 to 1,090 draw calls (4,600 entities,
+  273 models), picking and edits pass. Not yet confirmed in the app with real
+  data (F3 `draw calls`).
 - [ ] Classify phases from real data, not name tokens (#9).
 
 ## Hex view
