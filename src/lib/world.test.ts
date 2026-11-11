@@ -18,6 +18,7 @@ import {
   placementScale,
   popHistory,
   serializeProject,
+  stillStreamWanted,
   streamingDecision,
   streamPenalty,
   STREAM_PHASE_PENALTY,
@@ -432,6 +433,70 @@ describe("streamingDecision", () => {
     key: string,
     placements: Placed[],
   ): ReturnType<typeof regionEntryOf> => regionEntryOf(key, placements);
+
+  describe("whole-map terrain layer (#5)", () => {
+    test("terrain loads from outside its map's box and radius; structures there do not", () => {
+      const entries = [
+        region("m1", [
+          placedAtXy("terrain_a", 0, 20_000, 0),
+          placedAtXy("prop_building_01", 1, 20_000, 10),
+        ]),
+      ];
+      const { load } = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4);
+      expect(load.map((c) => c.entityIndex)).toEqual([0]);
+    });
+
+    test("terrain from every map comes before any structure, nearest terrain first", () => {
+      const entries = [
+        region("m1", [placedAtXy("prop_building_01", 0, 10, 0), placedAtXy("terrain_a", 1, 5_000, 0)]),
+        region("m2", [placedAtXy("terrain_b", 0, 800, 0)]),
+      ];
+      const { load } = streamingDecision([0, 0, 0], entries, new Set(), new Set(), 4);
+      expect(load.map((c) => `${c.mapKey}:${c.entityIndex}`)).toEqual(["m2:0", "m1:1", "m1:0"]);
+    });
+
+    test("loaded terrain never unloads, in range or not; a structure there does", () => {
+      const entries = [
+        region("m1", [placedAtXy("terrain_a", 0, 20_000, 0), placedAtXy("prop_building_01", 1, 20_000, 0)]),
+      ];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(["m1:0", "m1:1"]),
+        new Set(),
+        4,
+      );
+      expect(decision.unload).toEqual(["m1:1"]);
+
+      const near = streamingDecision(
+        [20_000, 0, 0],
+        [region("m1", [placedAtXy("terrain_a", 0, 5_000, 0)])],
+        new Set(["m1:0"]),
+        new Set(),
+        4,
+      );
+      expect(near.unload).toEqual([]);
+    });
+
+    test("does not re-queue loaded or pending terrain", () => {
+      const entries = [region("m1", [placedAtXy("terrain_a", 0, 20_000, 0), placedAtXy("terrain_b", 1, 20_000, 0)])];
+      const decision = streamingDecision(
+        [0, 0, 0],
+        entries,
+        new Set(["m1:0"]),
+        new Set(["m1:1"]),
+        4,
+      );
+      expect(decision.load).toEqual([]);
+    });
+
+    test("a waiting terrain request stays wanted wherever the camera goes", () => {
+      const placement = placedAtXy("terrain_a", 0, 20_000, 0);
+      const box = { extentsMin: [0, 0, 0], extentsMax: [100, 100, 100] } as const;
+      expect(stillStreamWanted([0, 0, 0], box, placement)).toBe(true);
+      expect(stillStreamWanted([0, 0, 0], box, { ...placement, name: "prop_building_01" })).toBe(false);
+    });
+  });
 
   test("loads the nearest in-range entities, capped by the batch", () => {
     const entries = [region("m1", [placedAt("m1", 0, 0), placedAt("m1", 0, 1000)])];
