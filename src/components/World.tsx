@@ -2167,7 +2167,7 @@ function Canvas({
       // streamer's cone test divides by the distance and needs it to be.
       cameraRef.current.forward = [look.x, look.y, look.z];
 
-      lodUpdate.current?.(camera.position);
+      perf.measure("tick lod update", () => lodUpdate.current?.(camera.position));
       // Rebuilt a few times a second, not per frame: the cells only change when
       // the camera crosses one or the loaded set moves.
       const hex = hexSource.current;
@@ -2191,6 +2191,11 @@ function Canvas({
       perf.gauge("geometries", renderer.info.memory.geometries);
       perf.gauge("textures", renderer.info.memory.textures);
       perf.gauge("resident models", loadedState.current.size);
+      // The whole callback in JS. `frame` is the wall gap between callbacks and
+      // `render` only the submit call: if this is small while `frame` is large,
+      // the time is outside our JS (GPU back-pressure, compositing); if it is
+      // large, `tick lod update` and `render` say which part.
+      perf.record("tick js", performance.now() - now);
     };
 
     /** Lay every live edit onto its box instance or geometry holder. */
