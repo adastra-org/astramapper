@@ -283,3 +283,88 @@ map (tens of thousands) inside `world_map`, which today reads all 4,597 maps in
 about 2 s. `WirePart.shader` already reaches the frontend with each compiled
 model, so the class could be refined after load (and a per-install table could be
 built by `bake`), but that is a separate piece of work, not done here.
+
+## Frame hitches over the base game (v0.3.3)
+
+Flying the same 120 m/s route over Los Santos (waypoints `[195,-935,80]`,
+`[-300,-300,80]`, `[-1200,-400,100]`, `[-1800,-2800,100]`, `[300,-2300,90]`,
+`[195,-935,80]`, about 65 s) through the debug bridge, in `bun run tauri dev`
+(React in dev mode with StrictMode, Rust in the debug profile), after 40 s parked
+at the start so its cells are in. Percentiles are over **every frame of the
+flight** (`runP50Ms` / `runP95Ms` in `/state`, a histogram with 0.5 ms bins that
+`resetPerf` clears); the F3 `p95` column is the last 256 samples only, about 8 s
+of frames, which is why earlier readings of the same flight moved between 42 and
+77 ms.
+
+| | before (two runs) | after (two runs) |
+|---|---|---|
+| `frame` p50 / p95 / max (ms) | 18 / 58 / 220 | 18 / 31.5 / 291 and 18 / 29.0 / 158 |
+| `long task` count in the flight | 143 and 166 | 23 and 13 |
+| `long task` total (ms) | 9,800 and 10,900 | 2,400 and 1,000 |
+| `main thread lag` p95 (ms) | 69 and 70 | 33.5 and 24 |
+| `tick js` p95 (ms) | 24.5 | 20.5 and 18.5 |
+| `worldIndex cells` replies, calls / MB | 85 / 4,290 | 170 / 1,620 |
+| `cell merge` total (ms) | 4,430 (6,683 calls) | 660 (6,432 calls) |
+| cells held, mean over the flight | 49 | 108 and 110 |
+| resident models, mean | 976 | 972 and 878 |
+| JS heap used, mean (MB) | 3,694 | 3,205 |
+
+`frame` p95 is under the 33 ms target in both runs. `long task` p95 is not: a
+long task is by definition 50 ms or more, so its p95 can only fall under 50 ms
+when there are none, and 13 to 23 remain (see what bounds it, below). The count
+fell by about 90%.
+
+### Where the long tasks were
+
+Found with a CPU profile and a Chrome trace of the WebView, not with F3: start
+`bun run tauri dev` with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222 --remote-allow-origins=*"`
+and use the DevTools protocol (`Profiler.start` with a 0.5 ms interval, or
+`Tracing.start` with `devtools.timeline,v8,v8.gc,toplevel`) while the bridge flies
+the route. `PerformanceObserver` `long-animation-frame` entries say which script
+ran but attribute nothing to native work; the trace does. Over a 40 s flight, of
+the main-thread tasks of 45 ms or more:
+
+1. **Receiving the IPC replies, about 70% of them and 2.0 s of time.** One task of
+   46 to 87 ms per large reply, in `SimpleWatcher::OnHandleReady`
+   (`data_pipe_bytes_consumer.cc`) as Blink gathers the body into one
+   `ArrayBuffer`: native, no JS in it, about 1 ms per MB, and nothing of ours can
+   split it. A `world_index_cells` reply carried up to 48 MB of models
+   (`REPLY_MODEL_BYTES`) and averaged 49 MB, so the 85 of them in a flight were
+   ~4.3 GB through the main thread in 50 ms lumps. **Fix:** `REPLY_MODEL_BYTES` is
+   4 MB (a reply still overshoots by up to a wave of models, so the mean is 9.5
+   MB). The models a reply leaves out come through the per-model loader as before.
+   Replies are twice as many and a fifth of the bytes in total; cells arrive
+   faster (108 held on average against 49), and the models resident are the same.
+2. **React rendering World, about 25%.** Every change to the held cells or to the
+   loaded geometry re-rendered the whole of World (sidebar, placement index,
+   `preloadableCount`) in a microtask behind whatever caused it, up to once a
+   frame while models streamed in, and re-merged the columns of every map the cell
+   touched. **Fixes:**
+   - `throttle.ts`: World follows both stores at most every 250 ms; the canvas,
+     which has to build what arrives, subscribes on its own, so models still
+     appear the frame after they land. World shows a count of the loaded
+     geometry and no longer reads the whole list.
+   - `ColumnsMerger` (`columns.ts`): a map's columns are updated from the parts
+     that changed instead of merged again from all of them. 0.66 ms per merge
+     became 0.10, 4.4 s of a flight became 0.66 s. `allocateColumns` makes the
+     eleven columns one buffer (0.57 against 0.03 ms for 40,000 rows in Node).
+3. **Scene graph matrices, 11% of the main thread** (`updateMatrixWorld` plus
+   `multiplyMatrices`, not task length): every frame multiplied a matrix for each
+   of the ~5,000 instanced meshes, none of which ever moves. The scene, the `world`
+   group and the model group now stop updating their own matrices after the first
+   one, and a pool mesh takes its world matrix once when it is made. `render` p95
+   fell from 24 to 20 ms.
+
+### What bounds it
+
+The 13 to 23 tasks that remain are 60 to 140 ms, and the biggest is a
+`geometry sync` that builds a burst of models in one frame (`geometry sync` max
+110 and 257 ms; `BUILD_PER_SYNC` is 6, and a model with large textures costs its
+upload inside the next `render`). They are rare (one every 3 to 5 s) and are the
+price of drawing what arrived, not of receiving it. Lowering `BUILD_PER_SYNC` or
+metering by bytes is the next step; it was not done here because it trades
+pop-in against hitches and needs its own measurement.
+
+The numbers are from the dev build. A release build has no React dev checks and
+no StrictMode double render, so the React share is smaller there; the IPC
+receive cost is the same. Not measured in release.

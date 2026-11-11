@@ -13,7 +13,8 @@
  * Merging is lazy and per map. Adding or dropping a cell marks only the maps in
  * it dirty, and `entries()` rebuilds only those.
  */
-import { mergeColumns, PlacementColumns } from "./columns";
+import * as perf from "../perf";
+import { ColumnsMerger, PlacementColumns } from "./columns";
 import type { DecodedCell } from "./cellData";
 
 /**
@@ -41,6 +42,8 @@ type MapSlot = {
   readonly name: string;
   /** This map's part of every cell held, by cell key. */
   readonly parts: Map<string, PlacementColumns>;
+  /** Keeps the map's merged columns across the parts that come and go. */
+  readonly merger: ColumnsMerger;
   merged: CellEntry | null;
 };
 
@@ -76,7 +79,7 @@ export class CellStore {
     for (const part of cell.parts) {
       let slot = this.maps.get(part.mapKey);
       if (!slot) {
-        slot = { name: part.mapName, parts: new Map(), merged: null };
+        slot = { name: part.mapName, parts: new Map(), merger: new ColumnsMerger(), merged: null };
         this.maps.set(part.mapKey, slot);
       }
       slot.parts.set(cell.key, part.columns);
@@ -128,11 +131,12 @@ export class CellStore {
           name: slot.name,
           extentsMin: EVERYWHERE_MIN,
           extentsMax: EVERYWHERE_MAX,
-          placements: mergeColumns([...slot.parts.values()]),
+          placements: perf.measure("cell merge", () => slot.merger.update(slot.parts)),
         };
       }
       out.push(slot.merged);
     }
+    perf.gauge("cell merge maps", out.length);
     this.cached = out;
     return out;
   }
