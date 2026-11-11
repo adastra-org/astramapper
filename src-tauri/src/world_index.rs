@@ -624,6 +624,63 @@ pub async fn world_index_build(
     Ok(tauri::ipc::Response::new(reply))
 }
 
+/// Most model bytes one `world_index_cells` reply carries. A reply is one IPC
+/// payload held whole in the backend and again in the WebView, so it is bounded
+/// by what a reply can safely cost, not by what the cells need.
+pub const REPLY_MODEL_BYTES: usize = 48 * 1024 * 1024;
+
+/// Stack for the model workers: compiling a drawable's textures recurses deeper
+/// than the 2 MB a default worker gets.
+const MODEL_WORKER_STACK: usize = 16 * 1024 * 1024;
+
+/// A pool of its own, one core short of the machine's, so a cell fetch cannot
+/// starve the UI thread or the bake, and its workers have room to compile.
+fn model_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get() - 1).max(1))
+            .unwrap_or(1);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .stack_size(MODEL_WORKER_STACK)
+            .thread_name(|i| format!("cell-model-{i}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Compile `paths` in order, a worker-count of them at a time, and stop once the
+/// results hold `cap` bytes. The last wave may overshoot by up to a wave's worth;
+/// a model that fails is skipped. Order is the order of `paths`.
+pub fn compile_capped(
+    paths: &[String],
+    cap: usize,
+    compile: impl Fn(&str) -> Option<Vec<u8>> + Sync,
+) -> Vec<(String, Vec<u8>)> {
+    let wave = model_pool().map_or(1, |p| p.current_num_threads()).max(1);
+    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut bytes = 0usize;
+    for chunk in paths.chunks(wave) {
+        if bytes >= cap {
+            break;
+        }
+        let run = || -> Vec<Option<Vec<u8>>> { chunk.par_iter().map(|p| compile(p)).collect() };
+        let built = match model_pool() {
+            Some(pool) => pool.install(run),
+            None => chunk.iter().map(|p| compile(p)).collect(),
+        };
+        for (path, built) in chunk.iter().zip(built) {
+            if let Some(model) = built {
+                bytes += model.len();
+                out.push((path.clone(), model));
+            }
+        }
+    }
+    out
+}
+
 /// Placements and models for a set of cells, in one reply.
 ///
 /// `known` is every archetype name the frontend already holds a model (or a
@@ -647,18 +704,14 @@ pub async fn world_index_cells(
             let names = index.names_in(&gathered);
             let (assets, paths) =
                 resolve_assets(&names, &known, |name| find_model_for(&loaded.manager, name));
-            // Compiled in parallel: a cold cell asks for dozens of models, and
-            // each is a separate file read and texture chain. A model that
-            // fails to compile stays out of the reply, and the frontend asks
-            // for it on its own.
-            let models: Vec<(String, Vec<u8>)> = paths
-                .par_iter()
-                .filter_map(|path| {
-                    crate::world::model_envelope(&loaded, caps, path)
-                        .ok()
-                        .map(|bytes| (path.clone(), bytes))
-                })
-                .collect();
+            // A cold cell can name hundreds of models and gigabytes of
+            // geometry (a measured terrain cell is 1.8 GB). Only the first
+            // `REPLY_MODEL_BYTES` ride along; the rest are left for the
+            // frontend's per-model loader, which paces itself against the model
+            // cache budget.
+            let models = compile_capped(&paths, REPLY_MODEL_BYTES, |path| {
+                crate::world::model_envelope(&loaded, caps, path).ok()
+            });
             index.encode_batch(&gathered, assets, models)
         })
     })
@@ -1027,5 +1080,33 @@ mod tests {
         *state.0.write().expect("lock") = Some(Arc::new(world()));
         assert!(state.current("C:\\gta").is_ok());
         assert!(state.current("D:\\other").is_err());
+    }
+
+    #[test]
+    fn a_reply_stops_taking_models_once_it_is_full() {
+        let paths: Vec<String> = (0..200).map(|i| format!("m{i}.ydr")).collect();
+        let sent = compile_capped(&paths, 1000, |_| Some(vec![0u8; 100]));
+        let bytes: usize = sent.iter().map(|(_, b)| b.len()).sum();
+        assert!(bytes >= 1000, "filled up to the cap");
+        assert!(sent.len() < paths.len(), "and then stopped");
+        // At most one wave past the cap.
+        assert!(bytes <= 1000 + 100 * 64);
+        // What was sent is a prefix, in order.
+        for (i, (path, _)) in sent.iter().enumerate() {
+            assert_eq!(path, &paths[i]);
+        }
+    }
+
+    #[test]
+    fn a_model_that_fails_is_skipped_and_costs_no_bytes() {
+        let paths: Vec<String> = (0..6).map(|i| format!("m{i}.ydr")).collect();
+        let sent = compile_capped(&paths, usize::MAX, |p| {
+            (p != "m2.ydr").then(|| vec![1u8; 10])
+        });
+        assert_eq!(
+            sent.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+            ["m0.ydr", "m1.ydr", "m3.ydr", "m4.ydr", "m5.ydr"]
+        );
+        assert!(compile_capped(&[], 10, |_| Some(vec![])).is_empty());
     }
 }

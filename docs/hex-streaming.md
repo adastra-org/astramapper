@@ -57,6 +57,16 @@ call per name. `known` is the names the frontend already holds, which are left
 out. Models that fail to compile are left out too and the frontend asks for them
 on its own.
 
+A reply is bounded: only the first 48 MB of models ride along
+(`REPLY_MODEL_BYTES`), compiled a wave at a time on a pool of their own with large
+worker stacks. The rest of the names still arrive with their files, and the
+per-model loader fetches them as before, paced by the model cache budget. This is
+measured, not a guess: against the base game the terrain cell alone names 395
+models and 1.8 GB of geometry, the densest leaf 777 models and 2.0 GB, a median
+leaf 70 models and 235 MB (`cell_replies_over_the_base_game` in the gate). Without
+the cap a single call held that whole reply in the backend and again in the
+WebView, and the app ran out of memory.
+
 Terrain is a pseudo-cell (level 255): wanted map-wide and never evicted (#5), so it
 is outside the partition. The backend classifies it by the same name tokens as the
 frontend (a test pins the two); real flags are #9.

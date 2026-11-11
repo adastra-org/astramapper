@@ -925,3 +925,91 @@ fn density_of_the_base_game_under_the_adaptive_partition() {
         }
     }
 }
+
+/// How big a cell's reply really is, and whether every model it names compiles.
+/// Terrain, the densest leaf and a median leaf, over the base game.
+#[test]
+#[ignore = "needs a local GTA V install"]
+fn cell_replies_over_the_base_game() {
+    use astramapper_lib::cells::PartitionParams;
+    use astramapper_lib::placements::{decode, encode};
+    use astramapper_lib::textures::GpuCaps;
+    use astramapper_lib::world_index::{resolve_assets, CellRef, WorldIndex, TERRAIN_LEVEL};
+    use std::collections::HashSet;
+
+    let (manager, keys) = scan();
+    let archetypes = cw_core::filetypes::index_archetypes(&manager, &keys);
+    let names = manager.index_names();
+    let decoded: Vec<_> = ymaps_in_group(&manager, "base")
+        .iter()
+        .filter_map(|(path, _)| {
+            let map =
+                read_world_map(path, &keys, &manager, Some(&archetypes.mlo), Some(&names)).ok()?;
+            decode(&encode(&map).ok()?).ok()
+        })
+        .collect();
+    let index =
+        WorldIndex::build("gate", "base", &decoded, 0, PartitionParams::default()).expect("build");
+
+    let mut by_size: Vec<_> = index.partition.leaves.iter().collect();
+    by_size.sort_by_key(|l| l.count);
+    let cells = [
+        (
+            "terrain",
+            CellRef {
+                level: TERRAIN_LEVEL,
+                q: 0,
+                r: 0,
+            },
+        ),
+        ("densest", {
+            let l = by_size.last().expect("a leaf");
+            CellRef {
+                level: l.level,
+                q: l.q,
+                r: l.r,
+            }
+        }),
+        ("median", {
+            let l = by_size[by_size.len() / 2];
+            CellRef {
+                level: l.level,
+                q: l.q,
+                r: l.r,
+            }
+        }),
+    ];
+    for (label, cell) in cells {
+        let gathered = index.gather(&[cell]);
+        let names = index.names_in(&gathered);
+        let (assets, paths) =
+            resolve_assets(&names, &HashSet::new(), |n| find_model_for(&manager, n));
+        let started = std::time::Instant::now();
+        let mut ok = 0usize;
+        let mut bytes = 0usize;
+        let mut failed = Vec::new();
+        for path in &paths {
+            match compile_world_model(path, &keys, &manager, Some(&archetypes), GpuCaps::default())
+            {
+                Ok(b) => {
+                    ok += 1;
+                    bytes += b.len();
+                }
+                Err(e) => failed.push(format!("{path}: {e}")),
+            }
+        }
+        println!(
+            "{label}: {} placements, {} names, {} models: {ok} ok, {} failed, {:.1} MB in {:.1}s, {} unresolved",
+            gathered.ids.len(),
+            names.len(),
+            paths.len(),
+            failed.len(),
+            bytes as f64 / 1048576.0,
+            started.elapsed().as_secs_f64(),
+            assets.iter().filter(|a| a.path.is_none()).count()
+        );
+        for f in failed.iter().take(5) {
+            println!("    {f}");
+        }
+    }
+}
