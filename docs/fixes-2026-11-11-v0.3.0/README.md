@@ -29,3 +29,19 @@ Design and numbers: [../hex-streaming.md](../hex-streaming.md#zone-clusters-v030
 - [ ] Automatic zones (connected components of leaves by density). Not done:
   the hand-drawn regions cover the map.
 - [ ] Zones for DLC and custom maps, which are not in the index.
+
+## Debug bridge (v0.3.1)
+
+- [x] Read the console and F3 from a shell, move the camera, click a button, take
+  a screenshot (`docs/debug-bridge.md`). Run against the dev app: `/health`, auth
+  rejects a request without the token, `/logs`, `/state`, `click world`, `camera`,
+  `fly` (a five-waypoint flight over Los Santos) and `/screenshot` all worked.
+  Cargo tests for the HTTP parsing, auth and queues; TS tests for the flight maths
+  and the commands.
+- [x] Cell streaming works in the running app: flying across the city, `cells held`
+  stayed 20 to 75 and `cell placements held` under 35,000; the whole-map terrain
+  layer is drawn at distance (screenshot). Frame p95 30 to 85 ms and long task p95
+  100 to 150 ms during the flight, still above the targets.
+- [ ] JS heap bounded while flying (#23): the heap reached 5.5 GB and does not
+  come back, with the model cache at its budget.
+- [ ] Code Mode on the bridge channel (scripted scenarios, assertions on gauges).
