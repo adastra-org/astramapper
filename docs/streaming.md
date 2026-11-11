@@ -10,6 +10,7 @@ The zone-based redesign lives in [hex-streaming.md](hex-streaming.md).
    (`src/lib/world.ts`) scans the placed maps and picks up to 24 entities to
    load and the ones to unload.
 2. **Order.** A candidate's rank is `phase + (in view ? 0 : wall) + distance`.
+   Out of view it is a candidate only within half its tier radius (below).
    Phases are strict tiers, in order: terrain, structures at full detail
    (`HD` / `ORPHAN_HD`), decals, vegetation, then the coarse `LOD` / `SLOD`
    tiers. Terrain, decal and vegetation are recognised by whole-word tokens in
@@ -28,6 +29,29 @@ The zone-based redesign lives in [hex-streaming.md](hex-streaming.md).
    frame, so a burst of arrivals is not one upload spike.
 6. **Shared geometry.** `BufferGeometry` and material are built once per model
    and shared by every entity of it, refcounted, freed with the last entity.
+
+## Range LODs and the view (#1, v0.1.4)
+
+Three layers decide what is on screen at a given distance, each at its own time:
+
+| Layer | Where | What it does |
+|---|---|---|
+| Sphere loading | `streamingDecision` | An entity is a candidate inside its tier radius (`max(lodDist, 50)` x 4 / 7 / 14 / 20 for `ORPHAN_HD` / `HD` / `LOD` / `SLOD`); it unloads at 1.5x that. Terrain is exempt (#5). |
+| View | `streamingDecision`, `stillStreamWanted` | Inside the view cone, or within 60 m, an entity loads out to its full radius and ranks first. Outside it, it is a candidate only within `STREAM_OFF_VIEW_RADIUS` (0.5) of its radius. |
+| Distance LOD | per-frame swap, `lodBandForDistance` | One bundle per entity: `lodDist`, 2x, 4x, beyond. Hidden bundles are not drawn or uploaded. |
+| Frustum culling | three.js | Every mesh keeps `frustumCulled = true`, so off-screen meshes are skipped at draw time. |
+
+The off-view cut is a smaller sphere, not a frustum cull, on purpose: loading
+starts at 0.5 of the radius and unloading at 1.5, so something that drifts in
+and out of the cone does not thrash, and turning around finds the near half of
+what was behind already resident. The queue applies the same cut
+(`stillStreamWanted` takes the view), so a request for something the camera
+turned away from is dropped before it costs an IPC call. With no view (preload,
+tests) the whole sphere stays a candidate.
+
+Not done: choosing the LOD at *load* time. `world_model` returns every bundle,
+so a far entity still pays for the HD ones over IPC. That needs a bundle
+selector in the command and a model cache keyed by it.
 
 ## What was measured (release build, F3)
 

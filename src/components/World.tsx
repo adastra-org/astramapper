@@ -720,7 +720,7 @@ export function World(): React.JSX.Element {
       perf.measure("stream requeue", () =>
         modelQueue.reprioritize(({ data }) => {
           const entry = regionByKey.get(data.mapKey);
-          if (!entry || !stillStreamWanted(cameraGta, entry, data.entity)) return null;
+          if (!entry || !stillStreamWanted(cameraGta, entry, data.entity, view)) return null;
           return streamRank(cameraGta, data.entity, view);
         }),
       );
