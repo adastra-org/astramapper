@@ -88,6 +88,13 @@ The heap is not under the 300 MB target: `modelCache` keeps every model fetched
 - #8 IPC latency: the ~0.7 s floor was the main thread, not the IPC (see below).
   What is left (~130 ms p50) is worth one more look.
 - #6 `modelCache` never evicts: the heap grows with every model fetched.
-- #5 Terrain is only loaded inside each entity's own radius, not map-wide.
+- #5 Terrain is a whole-map layer (v0.1.2): `streamingDecision` scans each map's
+  terrain rows (`terrainRowsOf`, classified once per map) ahead of everything
+  else, ignoring the map's box and the entity's radius, and never unloads them.
+  Detail comes from the existing distance LOD swap, so far ground draws its
+  coarse bundle. Still open: it is by name tokens (#9), it costs memory with no
+  eviction (#6) and a draw call per piece (#10), and the phases are not yet
+  applied per cell (needs the cell index, #3). Not measured against the base
+  game yet: with strict tiers, structures wait for every terrain piece map-wide.
 - #9 Phase classification is by name tokens.
 - #10 One draw call per entity (1,000-4,600 in the city).
