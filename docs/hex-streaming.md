@@ -43,8 +43,9 @@ makes the same trade).
 Per zone: **terrain, then structures at full detail (LOD0), then decals, then
 vegetation, then progressively coarser structure LODs.** The first version
 (strict tiers over entities already in range) is in `streamingDecision`; see
-[streaming.md](streaming.md). The target is a terrain layer for the *whole* map,
-resident at low detail, with the phases applied per cell on top (#5). Better
+[streaming.md](streaming.md). The terrain layer for the *whole* map is in (#5,
+v0.1.2: always wanted, never unloaded, low detail by the distance LOD swap);
+applying the phases per cell on top waits for the cell index (#3). Better
 classification than name tokens needs archetype flags and shader names from the
 backend (#9).
 

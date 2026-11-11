@@ -745,6 +745,45 @@ export function streamingDecision(
   // placements and an insert for almost none.
   const best: StreamCandidate[] = [];
 
+  // The ground is a layer of its own: every terrain placement of every placed
+  // map is wanted whatever the camera or the map's box says, and none unloads
+  // (#5). It is scanned here, over each map's precomputed terrain rows, and the
+  // per-entity loop below steps over those rows.
+  for (const entry of entries) {
+    const cols = entry.placements;
+    const terrain = terrainRowsOf(cols);
+    if (terrain.length === 0) continue;
+    const loadedHere = loadedByMap.get(entry.key);
+    const pendingHere = pendingByMap.get(entry.key);
+    for (const row of terrain) {
+      const entityIndex = cols.entityIndex(row);
+      if (loadedHere?.has(entityIndex) || pendingHere?.has(entityIndex)) continue;
+      const dx = cols.x(row) - cameraGta[0];
+      const dy = cols.y(row) - cameraGta[1];
+      const dz = cols.z(row) - cameraGta[2];
+      const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (
+        best.length >= batchLimit &&
+        batchLimit > 0 &&
+        distance >= best[best.length - 1]!.rank
+      ) {
+        continue;
+      }
+      const inView =
+        !view ||
+        distance <= STREAM_VIEW_NEAR ||
+        (dx * view.forward[0] + dy * view.forward[1] + dz * view.forward[2]) /
+          Math.max(distance, 1e-6) >=
+          view.cosHalfAngle;
+      const rank = (inView ? distance : STREAM_OFF_VIEW_PENALTY + distance) + STREAM_PHASE_PENALTY.terrain;
+      insertCandidate(
+        best,
+        { mapKey: entry.key, entityIndex, distance, inView, rank },
+        batchLimit,
+      );
+    }
+  }
+
   for (const entry of entries) {
     const loadedHere = loadedByMap.get(entry.key);
     const pendingHere = pendingByMap.get(entry.key);
@@ -760,15 +799,25 @@ export function streamingDecision(
 
     // Out of range the whole map goes, and it goes without touching a single
     // placement: what is loaded is already the answer.
+    const cols = entry.placements;
+    const terrain = terrainRowsOf(cols);
     if (!inRange) {
       if (loadedHere) {
-        for (const index of loadedHere) unload.push(keyFor(entry.key, index));
+        for (const index of loadedHere) {
+          // The ground stays resident when its map goes out of range.
+          if (terrain.length > 0 && isTerrainRow(terrain, cols.rowOf(index))) continue;
+          unload.push(keyFor(entry.key, index));
+        }
       }
       continue;
     }
 
-    const cols = entry.placements;
+    let nextTerrain = 0;
     for (let row = 0; row < cols.length; row += 1) {
+      if (nextTerrain < terrain.length && terrain[nextTerrain] === row) {
+        nextTerrain += 1;
+        continue;
+      }
       const entityIndex = cols.entityIndex(row);
       const dx = cols.x(row) - cameraGta[0];
       const dy = cols.y(row) - cameraGta[1];
@@ -896,6 +945,40 @@ function classifyName(name: string): number {
   return found;
 }
 
+/** Per map: the rows the terrain phase claims, ascending. A map's columns never
+ *  change, and the scan runs four times a second, so it is classified once. */
+const terrainRows = new WeakMap<PlacementColumns, Uint32Array>();
+
+/** The ascending rows of `cols` that are terrain, classified once per map. */
+export function terrainRowsOf(cols: PlacementColumns): Uint32Array {
+  let rows = terrainRows.get(cols);
+  if (!rows) {
+    const found: number[] = [];
+    for (let row = 0; row < cols.length; row += 1) {
+      if (streamPenaltyOf(cols.name(row), cols.lodLevel(row)) === STREAM_PHASE_PENALTY.terrain) {
+        found.push(row);
+      }
+    }
+    rows = Uint32Array.from(found);
+    terrainRows.set(cols, rows);
+  }
+  return rows;
+}
+
+/** Whether `row` is one of the ascending `terrain` rows. */
+function isTerrainRow(terrain: Uint32Array, row: number): boolean {
+  let low = 0;
+  let high = terrain.length - 1;
+  while (low <= high) {
+    const mid = (low + high) >>> 1;
+    const value = terrain[mid]!;
+    if (value === row) return true;
+    if (value < row) low = mid + 1;
+    else high = mid - 1;
+  }
+  return false;
+}
+
 /**
  * The phase penalty for one entity. Decided by name where the name is telling
  * (terrain, decal, vegetation) and by LOD tier otherwise: HD structures are
@@ -929,6 +1012,9 @@ export function stillStreamWanted(
   entry: Pick<RegionEntry, "extentsMin" | "extentsMax">,
   placement: Placed,
 ): boolean {
+  // The ground is wanted everywhere (#5), so a waiting terrain request never
+  // goes stale however far the camera has moved.
+  if (streamPenalty(placement) === STREAM_PHASE_PENALTY.terrain) return true;
   const inRange =
     cameraGta[0] >= entry.extentsMin[0] - STREAM_REGION_MARGIN &&
     cameraGta[0] <= entry.extentsMax[0] + STREAM_REGION_MARGIN &&
