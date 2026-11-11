@@ -669,6 +669,24 @@ pub fn project_load(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| format!("could not read {path}: {e}"))
 }
 
+/// The machine's memory, in bytes, as the world view sizes its model budget
+/// against it (#6). Read fresh on each call: available memory moves.
+#[derive(Serialize)]
+pub struct SystemMemory {
+    pub total: u64,
+    pub available: u64,
+}
+
+#[tauri::command]
+pub fn system_memory() -> SystemMemory {
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    SystemMemory {
+        total: system.total_memory(),
+        available: system.available_memory(),
+    }
+}
+
 /// The world view's first question: is there a game, what content does it have,
 /// and is a map open in the Explorer.
 #[tauri::command]

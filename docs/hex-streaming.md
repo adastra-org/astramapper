@@ -54,7 +54,8 @@ backend (#9).
 A byte budget, global, as a percentage of total and of available system memory
 (a new Rust command; today the WebView cannot see real RAM). Evict farthest ring
 first, not least recently used. Evicted models go to the backend's disk cache, so
-returning is a read and not a recompile (#6).
+returning is a read and not a recompile (#6; the model cache half is in as of
+v0.1.3, see [streaming.md](streaming.md)).
 
 ## Persistence and precompile
 

@@ -87,7 +87,14 @@ The heap is not under the 300 MB target: `modelCache` keeps every model fetched
   over the response buffer, a `Placed` built only on demand. Done.
 - #8 IPC latency: the ~0.7 s floor was the main thread, not the IPC (see below).
   What is left (~130 ms p50) is worth one more look.
-- #6 `modelCache` never evicts: the heap grows with every model fetched.
+- #6 `modelCache` is a `ModelCache` under a byte budget (v0.1.3): a fifth of
+  available RAM, at most a tenth of the total, within 256 MB and 3 GB, from the
+  new `system_memory` command, refreshed every 10 s. Over budget it drops the
+  models no loaded geometry uses, farthest from the camera first (not LRU). What
+  it does not do yet: shrink what the renderer holds (loaded entities and the
+  terrain layer are never evicted by it), and the budget is not measured on the
+  base game. F3: `model cache (MB)`, `model cache budget (MB)`,
+  `model cache evicted (last pass)`, `model cache evict`.
 - #5 Terrain is a whole-map layer (v0.1.2): `streamingDecision` scans each map's
   terrain rows (`terrainRowsOf`, classified once per map) ahead of everything
   else, ignoring the map's box and the entity's radius, and never unloads them.

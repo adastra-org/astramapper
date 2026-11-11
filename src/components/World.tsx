@@ -72,6 +72,7 @@ import {
   worldMapsInGroup,
   worldModel,
   worldStatus,
+  systemMemory,
   worldToGta,
   type ContentGroup,
   type GeometryLoad,
@@ -84,6 +85,11 @@ import {
   type WorldStatus,
   type YmapListingPage,
 } from "../lib/world";
+import {
+  FALLBACK_MODEL_BUDGET,
+  ModelCache,
+  modelBudgetBytes,
+} from "../lib/world/modelCache";
 
 /** Placing a map whose LOD buckets would exceed this turns shadows off. */
 const SHADOW_LIMIT = 5_000;
@@ -116,7 +122,12 @@ const PRELOAD_CAP = 5_000;
  * re-decoding model geometry.
  */
 const assetCache = new Map<string, string | null>();
-const modelCache = new Map<string, WorldModel>();
+/** Fetched models under a byte budget (#6): the farthest unused go first. */
+const modelCache = new ModelCache<WorldModel>();
+/** The cache's budget in bytes, refreshed from the machine's memory. */
+let modelBudget = FALLBACK_MODEL_BUDGET;
+/** How often the budget is recomputed from available memory. */
+const MODEL_BUDGET_REFRESH_MS = 10_000;
 /** Model reads already on their way, by path, so two entities sharing a model
  *  that are both out at once share one `world_model` call. */
 const modelInFlight = new Map<string, Promise<WorldModel>>();
@@ -394,6 +405,7 @@ export function World(): React.JSX.Element {
       if (knownPath === null) return;
       const knownModel = knownPath ? modelCache.get(knownPath) : undefined;
       if (knownPath && knownModel) {
+        modelCache.touch(knownPath, entity.position);
         geometryStore.add({ mapKey, entity, modelPath: knownPath, model: knownModel });
         return;
       }
@@ -421,7 +433,7 @@ export function World(): React.JSX.Element {
               request = reportGpuCaps()
                 .then(() => worldModel(path))
                 .then((fetched) => {
-                  modelCache.set(path, fetched);
+                  modelCache.set(path, fetched, entity.position);
                   return fetched;
                 })
                 .finally(() => modelInFlight.delete(path));
@@ -433,7 +445,10 @@ export function World(): React.JSX.Element {
         },
         rank !== undefined,
       );
-      if (loaded) geometryStore.add({ mapKey, entity, ...loaded });
+      if (loaded) {
+        modelCache.touch(loaded.modelPath, entity.position);
+        geometryStore.add({ mapKey, entity, ...loaded });
+      }
     } catch (cause) {
       // Dropped from the queue because the camera moved on: not an error.
       if (!(cause instanceof QueueDropped)) setError(String(cause));
@@ -733,9 +748,39 @@ export function World(): React.JSX.Element {
         void loadEntity(candidate.mapKey, entity, rank);
       }
       geometryStore.removeMany(unload);
+      // Over budget: drop the farthest models nothing draws (#6).
+      if (modelCache.bytes > modelBudget) {
+        const inUse = new Set(geometryStore.all().map((g) => g.modelPath));
+        const dropped = perf.measure("model cache evict", () =>
+          modelCache.evict(modelBudget, cameraGta, inUse),
+        );
+        perf.gauge("model cache evicted (last pass)", dropped.length);
+      }
+      perf.gauge("model cache (MB)", Math.round(modelCache.bytes / 1048576));
+      perf.gauge("model cache budget (MB)", Math.round(modelBudget / 1048576));
     }, STREAM_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [streaming, status?.gameOpen, regionEntries, regionByKey, index, loadEntity]);
+
+  // The model cache's budget follows the machine's available memory (#6).
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = (): void => {
+      systemMemory()
+        .then((memory) => {
+          if (!cancelled) modelBudget = modelBudgetBytes(memory);
+        })
+        .catch(() => {
+          /* keep the last budget; the fallback is a sane one */
+        });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, MODEL_BUDGET_REFRESH_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   /** Every entity a preload could reach. Memoized because it walks every
    *  placement of every placed map, which is six figures with the base game. */
