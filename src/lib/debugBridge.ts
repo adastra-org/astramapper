@@ -40,6 +40,9 @@ export type CameraApi = {
   setKey(key: string, down: boolean): void;
   /** The canvas as a PNG data URL, or null when there is none. */
   capture(): string | null;
+  /** One line per resident entity whose archetype name contains `match`: its
+   *  distance to the camera, `lodDist`, the LOD bundle drawn and how many exist. */
+  probe(match: string): string[];
 };
 
 let camera: CameraApi | null = null;
@@ -194,6 +197,13 @@ export function runCommand(command: { id?: number; type: string } & Record<strin
     case "screenshot":
       wantScreenshot = true;
       return;
+    case "probe": {
+      if (!camera) throw new Error("World is not open");
+      const match = String(command.match ?? "");
+      if (!match) throw new Error("probe needs a match");
+      for (const line of camera.probe(match.toLowerCase())) console.info(`probe ${line}`);
+      return;
+    }
     case "resetPerf":
       perf.reset();
       void perf.backendReset();

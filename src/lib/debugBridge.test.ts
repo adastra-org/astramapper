@@ -105,7 +105,22 @@ describe("runCommand", () => {
     set: (position, yaw, pitch) => recorded.push({ position, yaw, pitch }),
     setKey: (key, down) => keys.push([key, down]),
     capture: () => null,
+    probe: (match) => [`${match} probed`],
   };
+
+  test("probe logs one line per match, and needs a match", () => {
+    registerCamera(api);
+    const lines: string[] = [];
+    const info = console.info;
+    console.info = (...args: unknown[]) => void lines.push(args.join(" "));
+    try {
+      runCommand({ type: "probe", match: "Pylon" });
+    } finally {
+      console.info = info;
+    }
+    expect(lines).toEqual(["probe pylon probed"]);
+    expect(() => runCommand({ type: "probe" })).toThrow("needs a match");
+  });
 
   test("camera commands fail clearly while World is not open", () => {
     registerCamera(null);

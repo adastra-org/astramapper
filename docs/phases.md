@@ -1403,7 +1403,9 @@ profiles; layers, search and multi-select; and the collision and AI path layers.
 Two gaps are visible in the app today and are expected rather than regressions.
 **Terrain renders flat grey** because `terrain_cb_w_4lyr`'s four-layer blend is
 driven by `COLOUR0` and `TEXCOORD1`, which `MeshPart` does not decode yet.
-**Trees read as solid canopies** because there is no alpha test yet.
+**Trees read as solid canopies** because there is no alpha test yet. *(Fixed in
+v0.3.8: cutout shaders are alpha tested and shadow-proxy parts are not drawn; see
+formats.md "Shaders: cutout, proxies and the render bucket".)*
 
 ## Anti-goals
 

@@ -34,6 +34,7 @@ import { clusterRows } from "../lib/world/clusters";
 import { columnsFromPlaced, type PlacementColumns } from "../lib/world/columns";
 import { createGeometryStore } from "../lib/world/geometryStore";
 import { QueueDropped, RequestQueue } from "../lib/world/requestQueue";
+import { ALPHA_TEST_REF, partDraw } from "../lib/world/shaderClass";
 import { throttleSubscribe } from "../lib/world/throttle";
 import {
   createPlacementIndex,
@@ -2489,6 +2490,20 @@ function Canvas({
         renderer.render(scene, camera);
         return renderer.domElement.toDataURL("image/png");
       },
+      probe: (match) => {
+        const [cx, cy, cz] = worldToGta([camera.position.x, camera.position.y, camera.position.z]);
+        const lines: string[] = [];
+        for (const loaded of loadedState.current.values()) {
+          const name = indexRef.current.placement(loaded.mapKey, loaded.entityIndex)?.name ?? "";
+          if (!name.toLowerCase().includes(match)) continue;
+          const [x, y, z] = loaded.positionGta;
+          const dist = Math.hypot(x - cx, y - cy, z - cz);
+          lines.push(
+            `${name} #${loaded.entityIndex} dist=${dist.toFixed(0)} lodDist=${loaded.lodDist} band=${loaded.band}/${loaded.lodCount}`,
+          );
+        }
+        return lines;
+      },
     });
 
     return () => {
@@ -2783,6 +2798,10 @@ function buildSharedParts(
   const parts: SharedPart[] = [];
   for (const part of bundle.parts) {
     if (part.positions.length === 0) continue;
+    // Shadow proxies and vertex-colour helpers are not drawn by the reference;
+    // here they were solid hulls inside every tree.
+    const draw = partDraw(part.shaderFile, part.renderBucket);
+    if (draw === "hidden") continue;
     // Every array here is a view over the IPC response, handed to three.js
     // without a copy. `BufferAttribute` uploads it and three.js keeps the
     // reference, which is what keeps the response buffer alive exactly as
@@ -2807,6 +2826,8 @@ function buildSharedParts(
     if (resolved.diffuse) {
       material.map = resolved.diffuse;
       material.color.set(0xffffff);
+      // Leaves, fences and grates: the diffuse alpha is coverage.
+      if (draw === "cutout") material.alphaTest = ALPHA_TEST_REF;
       material.needsUpdate = true;
     }
     if (resolved.normal) {
