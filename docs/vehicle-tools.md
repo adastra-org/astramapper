@@ -63,7 +63,14 @@ What is not verified: the optimized file loading in FiveM, and how it looks. Che
 
 Decimation sweep (75/50/25/10%) on one file, with the error per ratio. Kept as the reference for the settings above.
 
+## 5. Inspect: `yft_glass`
+
+Read-only dump of a `.yft`'s collision material types (polygons per type) and its vehicle glass-window table. Used to study armored glass; see [vehicle-flags-and-glass.md](vehicle-flags-and-glass.md).
+
 ## Not done yet
+
+- `vehicle_flags`: report and fix unknown flags in `vehicles.meta` against the official list.
+- Names for collision material types (needs `materials.dat` from the game's `update.rpf`).
 
 - Texture side: re-downloading originals for over-compressed textures, versioning, and recompression. The audit only finds them.
 - Gen9 files (`unsupported-format`) are skipped.
