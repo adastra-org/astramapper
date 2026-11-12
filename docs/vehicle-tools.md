@@ -69,7 +69,7 @@ Read-only dump of a `.yft`'s collision material types (polygons per type) and it
 
 ## 6. Extract game data: `rpf_extract`
 
-Writes plain files out of the game's archives by name (`rpf_extract <out_dir> materials.dat ...`). Reads the install at `ASTRAMAPPER_GTA_PATH` (default `E:\SteamLibrary\steamapps\common\Grand Theft Auto V`); every archive holding a match is written, tagged with the archive path. Used to get `materials.dat`, see [the material table in astra-dev](https://github.com/adastra-org/astra-dev/blob/dev/docs/vehiculos/materiales-de-colision.md). Output is not committed.
+Writes plain files out of the game's archives by name (`rpf_extract <out_dir> materials.dat ...`). Reads the install at `ASTRAMAPPER_GTA_PATH` (default `E:\SteamLibrary\steamapps\common\Grand Theft Auto V`); every archive holding a match is written, tagged with the archive path. Used to get `materials.dat`, see [the material table in astra-dev](https://github.com/adastra-org/astra-dev/blob/dev/docs/materiales/materiales-de-colision.md). Output is not committed.
 
 ## Not done yet
 
