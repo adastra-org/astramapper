@@ -8,7 +8,11 @@
 //!
 //! ```text
 //! yft_glass <file.yft> [<file.yft> ...]
+//! yft_glass --json <file.yft> [...]     one JSON object per line, for scripts
 //! ```
+//!
+//! In `--json` mode `materials` counts polygons of the first physics LOD that
+//! has a bound, so a polygon is not counted once per LOD.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -52,8 +56,50 @@ fn collect(b: &Bounds, out: &mut BTreeMap<(u8, u16), usize>) {
     }
 }
 
+/// One JSON line per file: materials of the first physics LOD with a bound.
+fn json_line(path: &str) -> serde_json::Value {
+    let parsed = std::fs::read(path)
+        .map_err(|e| e.to_string())
+        .and_then(|b| load(&b))
+        .and_then(|(d, s)| read_fragments(FileKind::Fragment, &d, s).map_err(|e| e.to_string()));
+    let frag = match parsed {
+        Ok(f) => f,
+        Err(e) => return serde_json::json!({ "file": path, "error": e }),
+    };
+    let mut mats: BTreeMap<(u8, u16), usize> = BTreeMap::new();
+    let mut lods_with_bounds = 0;
+    if let Some(g) = &frag.physics_lod_group {
+        for lod in g.all_lods() {
+            if let Some(b) = &lod.bound {
+                if lods_with_bounds == 0 {
+                    collect(b, &mut mats);
+                }
+                lods_with_bounds += 1;
+            }
+        }
+    }
+    let materials: Vec<_> = mats
+        .iter()
+        .map(|((t, f), n)| serde_json::json!({ "type": t, "flags": f, "polygons": n }))
+        .collect();
+    serde_json::json!({
+        "file": path,
+        "materials": materials,
+        "windows": frag.vehicle_glass_windows.as_ref().map(|v| v.item_count),
+        "lods_with_bounds": lods_with_bounds,
+    })
+}
+
 fn main() {
-    for path in std::env::args().skip(1) {
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--json") {
+        args.remove(0);
+        for path in &args {
+            println!("{}", json_line(path));
+        }
+        return;
+    }
+    for path in args {
         println!("== {path}");
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,

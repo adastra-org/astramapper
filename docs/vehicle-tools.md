@@ -67,6 +67,8 @@ Decimation sweep (75/50/25/10%) on one file, with the error per ratio. Kept as t
 
 Read-only dump of a `.yft`'s collision material types (polygons per type) and its vehicle glass-window table. Used to study armored glass; see [the findings in astra-dev](https://github.com/adastra-org/astra-dev/blob/dev/docs/vehiculos/flags-y-cristal.md).
 
+`--json` prints one JSON object per file (materials of the first physics LOD with a bound, window count) for scripts. `bun scripts/glass-audit.ts <resources dir> [--out audit.json]` uses it to cross every `vehicles.meta` entry (glass flags) with the glass materials of its `.yft`; results in [the glass audit in astra-dev](https://github.com/adastra-org/astra-dev/blob/dev/docs/vehiculos/auditoria-de-cristal.md).
+
 ## 6. Extract game data: `rpf_extract`
 
 Writes plain files out of the game's archives by name (`rpf_extract <out_dir> materials.dat ...`). Reads the install at `ASTRAMAPPER_GTA_PATH` (default `E:\SteamLibrary\steamapps\common\Grand Theft Auto V`); every archive holding a match is written, tagged with the archive path. Used to get `materials.dat`, see [the material table in astra-dev](https://github.com/adastra-org/astra-dev/blob/dev/docs/materiales/materiales-de-colision.md). Output is not committed.
