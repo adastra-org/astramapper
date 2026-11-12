@@ -27,4 +27,5 @@ serde_json.workspace = true
 aes = "0.9"
 
 [dev-dependencies]
+meshopt = "0.7.0"
 sha2.workspace = true
