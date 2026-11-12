@@ -4,15 +4,16 @@
 
 ## Server vehicles (reported by Faku)
 
-- [~] **Armor the windows.** Two parts: the flag (`FLAG_HAS_BULLET_RESISTANT_GLASS` vs `FLAG_HAS_BULLETPROOF_GLASS`) and the collision material of the glass. The material types 120 to 123 are measured; their names are not (need `materials.dat`). No tool yet.
-- [ ] **Apply / remove tint.** Lights get tinted when UVs are wrong. Not investigated; needs a vehicle that shows it.
+- [~] **Armor the windows.** Two parts: the flag (`FLAG_HAS_BULLET_RESISTANT_GLASS` vs `FLAG_HAS_BULLETPROOF_GLASS`) and the collision material of the glass (`CAR_GLASS_WEAK`/`MEDIUM`/`STRONG`/`BULLETPROOF`, types 120 to 123, named from `materials.dat`). Measured on 7 vehicles; no tool that sets them yet.
+- [ ] **Apply / remove tint.** Lights get tinted when UVs are wrong. Hypothesis written down ([vehicle-shaders.md](../vehicle-shaders.md)); needs a vehicle that shows it.
 - [~] **Missing LODs.** `yft_optimize --lods` generates them, with backup, rollback and report. Verified on a scratch copy; not yet in game.
 - [~] **Misconfigured flags.** 86 uses of 11 flags the official list does not define, in 45 files (table in the findings doc). Reported; no `vehicle_flags` tool yet.
 
 ## References
 
 - [x] All game references must come from <https://docs.fivem.net/docs/game-references/>. The flag audit was redone against the official vehicle-flags page (204 flags).
-- [ ] Collision materials have no page in that section: names must come from the game's `materials.dat`.
+- [x] Collision materials have no page in that section: names taken from the game's `materials.dat` ([collision-materials.md](../collision-materials.md)).
+- [ ] <https://gtaforums.com/topic/899267-entities-and-materials/> could not be read (Cloudflare challenge). Faku can paste the relevant part if it matters.
 
 ## Open decisions
 

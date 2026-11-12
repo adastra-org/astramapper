@@ -71,17 +71,33 @@ Measured on 7 vehicles (polygon counts left out; types are the raw `material_typ
 | `hx58` | RESISTANT | 0, 70, 116, 117, 118, 122, 142 |
 | `bfdsuv` | none | 116, 117, 120, 121, 122, 142 |
 
-Reading it:
+Names for those numbers, from the game's own `materials.dat` (full table in [collision-materials.md](collision-materials.md)):
 
-- Types 120 to 123 look like the glass family. There are at least four variants and several can coexist in one car, one per window.
-- Flag and material do not line up: `nuketruck` (BULLETPROOF) uses only 122, the same type `rrfaku` has with resistant glass.
-- The `.yft` stores the number, not the name. What each number is (resistant, unbreakable, ordinary glass) is **not yet known**. The names live in `materials.dat` inside `update.rpf` of the game install (`E:\SteamLibrary\steamapps\common\Grand Theft Auto V`).
+| Type | Name |
+|---|---|
+| 116 | `CAR_METAL` |
+| 117 | `CAR_PLASTIC` |
+| 118 | `CAR_SOFTTOP` |
+| 120 | `CAR_GLASS_WEAK` |
+| 121 | `CAR_GLASS_MEDIUM` |
+| 122 | `CAR_GLASS_STRONG` |
+| 123 | `CAR_GLASS_BULLETPROOF` |
+| 142 | `PHYS_CAR_VOID` |
+| 70 | `WOOD_SOLID_MEDIUM` |
+| 0 | `DEFAULT` |
 
-Next: extract `materials.dat` with the `cw-core` RPF reader, label types 116 to 123 and 142, then build the glass audit on top of it. Until then a blindaje tool would guess.
+Reading the samples with those names:
+
+- `rrfaku` uses `CAR_GLASS_STRONG`: resistant, not unbreakable. That matches Faku's description and confirms the offset of the table.
+- Only 123 `CAR_GLASS_BULLETPROOF` is really unbreakable (penetration resistance 10000, no shoot-through flags). Of the three BULLETPROOF-flagged samples only `s500w223` has it, on 8 polygons; `nuketruck` and `caliburn` carry the flag but their glass is `STRONG` / `MEDIUM`.
+- `bfdsuv` has no glass flag and uses `WEAK`, `MEDIUM` and `STRONG` mixed, per window.
+- `aleutianems` and `hx58` carry `BULLET_RESISTANT` with `WEAK`, `MEDIUM`, `STRONG` only.
+- So the flag and the material are independent: the material decides how the glass takes a bullet, the flag adds its own behaviour on top. A glass audit has to read both.
+- The `.yft` also carries a vehicle glass-window table (`yft_glass` prints it). What its fields mean for armor is not worked out yet.
 
 ## 3. Tint on lights
 
-Not investigated yet. Working hypothesis: the lights share the body's material or UV region, so the tint pass paints them. Detecting it from the `.yft` is possible (geometry that uses the tinted body shader but belongs to a light). Fixing it means editing geometry through the C# writer, which is itself unverified in game.
+Not reproduced yet. Hypothesis (details in [vehicle-shaders.md](vehicle-shaders.md)): the lights use a paint shader, a `[PAINT:X]` material name or `vehicle_vehglass` instead of `vehicle_lightsemissive`, or share UVs with a painted region. Detecting it from the `.yft` is possible by listing the shader of every geometry. Fixing it means editing materials or geometry through the C# writer, which is itself unverified in game.
 
 Needs a concrete vehicle where the lights get tinted to reproduce it.
 

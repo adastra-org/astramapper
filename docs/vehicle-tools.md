@@ -67,10 +67,14 @@ Decimation sweep (75/50/25/10%) on one file, with the error per ratio. Kept as t
 
 Read-only dump of a `.yft`'s collision material types (polygons per type) and its vehicle glass-window table. Used to study armored glass; see [vehicle-flags-and-glass.md](vehicle-flags-and-glass.md).
 
+## 6. Extract game data: `rpf_extract`
+
+Writes plain files out of the game's archives by name (`rpf_extract <out_dir> materials.dat ...`). Reads the install at `ASTRAMAPPER_GTA_PATH` (default `E:\SteamLibrary\steamapps\common\Grand Theft Auto V`); every archive holding a match is written, tagged with the archive path. Used to get `materials.dat`, see [collision-materials.md](collision-materials.md). Output is not committed.
+
 ## Not done yet
 
 - `vehicle_flags`: report and fix unknown flags in `vehicles.meta` against the official list.
-- Names for collision material types (needs `materials.dat` from the game's `update.rpf`).
+- Glass audit and setter: read the flag and the glass material per vehicle, report mismatches, change the material type of the window polygons (needs the writer to handle bounds, which it does not yet).
 
 - Texture side: re-downloading originals for over-compressed textures, versioning, and recompression. The audit only finds them.
 - Gen9 files (`unsupported-format`) are skipped.
