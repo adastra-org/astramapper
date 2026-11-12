@@ -444,7 +444,7 @@ fn optimize(args: &[String]) -> Res<()> {
     let lod_names = ["high", "medium", "low", "veryLow"];
     let mut rows = Vec::new();
     for (di, (b, a)) in before.drawables.iter().zip(&after.drawables).enumerate() {
-        for li in 0..4 {
+        for (li, lod_name) in lod_names.iter().enumerate() {
             let (bt, bv) = b.lods[li]
                 .as_ref()
                 .map(|l| (l.tris, l.verts))
@@ -461,7 +461,7 @@ fn optimize(args: &[String]) -> Res<()> {
                 .map(|(s, n, m)| ((*s / (*n).max(1) as f64) as f32 * 100.0, *m * 100.0))
                 .unwrap_or((0.0, 0.0));
             rows.push(json!({
-                "drawable": di, "name": a.name, "lod": lod_names[li],
+                "drawable": di, "name": a.name, "lod": lod_name,
                 "tris_before": bt, "tris_after": at, "verts_before": bv, "verts_after": av,
                 "generated": bt == 0 && at > 0,
                 "geometric_error_mean_pct": mean, "geometric_error_max_pct": max,
