@@ -11,11 +11,8 @@
 | [hex-streaming.md](hex-streaming.md) | Design for loading by hex cells |
 | [debug-bridge.md](debug-bridge.md) | Read the console and F3 and drive the camera from a shell |
 | [vehicle-tools.md](vehicle-tools.md) | Vehicle audit and mesh optimizer CLIs: damaged files, YTD over 16 MB, LOD generation, backup and rollback |
-| [vehicle-flags-and-glass.md](vehicle-flags-and-glass.md) | Vehicle flags checked against the official Cfx list, glass flags vs collision materials, tint and LOD status |
-| [collision-materials.md](collision-materials.md) | The game's collision material table (213 entries, from `materials.dat`), vehicle glass types in detail |
-| [vehicle-shaders.md](vehicle-shaders.md) | Vehicle shaders and what each is for; tint hypothesis |
+| [Vehicle findings (astra-dev)](https://github.com/adastra-org/astra-dev/blob/dev/docs/vehiculos/README.md) | Flags checked against the official list, glass flag vs collision material, material table, shaders, tint and LOD status. Development docs live in astra-dev |
 | [code-mode.md](code-mode.md) | Scenario runner on the bridge: `bun scripts/bridge.ts run <scenario>` |
-| [fixes-2026-11-12-v0.4.0/](fixes-2026-11-12-v0.4.0/README.md) | Vehicle problems (glass armor, tint, LODs, flags), with status |
 | [fixes-2026-11-11-v0.3.5/](fixes-2026-11-11-v0.3.5/README.md) | Terrain, placement, trees and LOD problems seen in the app, with status |
 | [fixes-2026-11-11-v0.3.0/](fixes-2026-11-11-v0.3.0/README.md) | Zone clusters, with status |
 | [fixes-2026-11-11-v0.1.0/](fixes-2026-11-11-v0.1.0/README.md) | Corrections and improvements batch, with status |
