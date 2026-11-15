@@ -28,3 +28,8 @@ aes = "0.9"
 
 [dev-dependencies]
 sha2.workspace = true
+
+# Its rule checks have unit tests; `cargo test` runs them.
+[[example]]
+name = "map_audit"
+test = true
