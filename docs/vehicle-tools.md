@@ -1,6 +1,6 @@
 # Vehicle tools
 
-Audit and optimize loose vehicle streaming assets (`.yft` / `.ytd`) of a FiveM server. Three CLIs under `crates/cw-core/examples/` plus one writer under `tools/yft-writer/`. None of them touches a file unless you pass `--apply`.
+Audit and optimize loose vehicle streaming assets (`.yft` / `.ytd`) of a FiveM server, and index them for the in-game debug resource. CLIs under `crates/cw-core/examples/` plus one writer under `tools/yft-writer/`. None of them touches a file unless you pass `--apply`.
 
 ## 1. Audit: `vehicle_audit`
 
@@ -72,6 +72,22 @@ Read-only dump of a `.yft`'s collision material types (polygons per type) and it
 ## 6. Extract game data: `rpf_extract`
 
 Writes plain files out of the game's archives by name (`rpf_extract <out_dir> materials.dat ...`). Reads the install at `ASTRAMAPPER_GTA_PATH` (default `E:\SteamLibrary\steamapps\common\Grand Theft Auto V`); every archive holding a match is written, tagged with the archive path. Used to get `materials.dat`, see [the material table in astra-dev](https://github.com/adastra-org/astra-dev/blob/dev/docs/materiales/materiales-de-colision.md). Output is not committed.
+
+## 7. Index for the in-game debug: `asset_index`
+
+```bash
+cargo build --release -p cw-core --example asset_index
+./target/release/examples/asset_index.exe "E:/FiveM/Astra/resources" --out E:/Proyectos/_scratch/asset-index.json [--pretty] [--min] [--only-resources "[astra]/[cochesfacciones]"]
+```
+
+Scans every `.yft`, `.ydr` and `.ydd` (and the `.ytd` that go with them) in parallel and writes one JSON keyed by lowercase model name: triangles per LOD, high-LOD vertices, LOD distances, bytes on disk of model and textures, texture count and largest side, and the same flags as the audit. The `astra_debug` resource loads it to show polygons per LOD and MiB of the entity being looked at, since no native gives that. The shared parts (loading loose files, model and resource naming, flag thresholds) live in `cw_core::loose`, which `vehicle_audit` uses too; its output is unchanged.
+
+Rules worth knowing before using it, all in [asset-index.md](asset-index.md):
+
+- `hash` is the joaat as **unsigned** 32 bits; FiveM Lua returns `GetEntityModel` **signed**, so mask with `& 0xFFFFFFFF` before comparing.
+- `.ytd` of a model = the same-name `.ytd` plus `+hi`, in the same resource. Shared or differently named dictionaries are not counted.
+- A name provided by two resources is kept once (first by resource path) and listed in `duplicates`, because load order is in the server config, which is not read.
+- `bytes` is size on disk. `_hi` files raise `tris.high` and add to `bytes.model`. A fragment's damaged-part drawables are not counted, so triangles are lower than the audit's.
 
 ## Not done yet
 

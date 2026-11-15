@@ -14,6 +14,7 @@ pub mod filetype;
 pub mod filetypes;
 pub mod gxt2;
 pub mod image;
+pub mod loose;
 pub mod mesh;
 pub mod meta;
 pub mod resources;

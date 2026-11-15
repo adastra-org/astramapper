@@ -12,25 +12,18 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use cw_core::filetype::FileKind;
+use cw_core::loose::{
+    flags, load_loose, model_of, resource_of, walk, ytd_class, Cause, Fail, FlagInput,
+    HEAVY_YTD_BYTES, LOWRES_MAX_DIM,
+};
 use cw_core::mesh::MeshBundle;
 use cw_core::resources::{read_named_fragments, read_textures};
-use cw_core::rpf::entry::size_from_flags;
-use flate2::read::DeflateDecoder;
 use rayon::prelude::*;
 use serde::Serialize;
-
-const RSC7: u32 = 0x3743_5352;
-/// Flag thresholds. Placeholders to tune against the server's real budget.
-const HEAVY_TRIS: usize = 100_000;
-const LOWRES_MAX_DIM: u16 = 512;
-const MB: u64 = 1024 * 1024;
-/// A vehicle whose texture dictionaries add up to more than this is its own category.
-const HEAVY_YTD_BYTES: u64 = 16 * MB;
 
 #[derive(Serialize, Clone)]
 struct Tex {
@@ -50,23 +43,12 @@ struct Lods {
     very_low: usize,
 }
 
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-enum Cause {
-    /// RSC7 container that does not decode.
-    Corrupt,
-    /// Not an RSC7 container (Gen9 or unknown): not proof of damage.
-    UnsupportedFormat,
-}
-
 #[derive(Serialize, Clone)]
 struct Problem {
     file: String,
-    cause: Cause,
+    cause: &'static str,
     message: String,
 }
-
-type Fail = (Cause, String);
 
 struct Scanned {
     path: PathBuf,
@@ -119,26 +101,6 @@ struct Totals {
     by_ytd_class: BTreeMap<String, usize>,
 }
 
-fn load_loose(path: &Path) -> Result<(Vec<u8>, usize), Fail> {
-    let bytes = std::fs::read(path).map_err(|e| (Cause::Corrupt, e.to_string()))?;
-    if bytes.len() < 16 {
-        return Err((Cause::Corrupt, "shorter than an RSC7 header".into()));
-    }
-    let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    if magic != RSC7 {
-        return Err((
-            Cause::UnsupportedFormat,
-            format!("magic {magic:08x}, not RSC7 (Gen9?)"),
-        ));
-    }
-    let system_flags = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
-    let mut out = Vec::new();
-    DeflateDecoder::new(&bytes[16..])
-        .read_to_end(&mut out)
-        .map_err(|e| (Cause::Corrupt, format!("inflate: {e}")))?;
-    Ok((out, size_from_flags(system_flags) as usize))
-}
-
 fn scan_ytd(path: &Path) -> Result<Vec<Tex>, Fail> {
     let (data, system) = load_loose(path)?;
     let dict = read_textures(FileKind::Texture, &data, system)
@@ -178,51 +140,6 @@ fn scan_yft(path: &Path) -> Result<(usize, Lods), Fail> {
     Ok((drawables.len(), lods))
 }
 
-fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in read.flatten() {
-        let p = entry.path();
-        if p.is_dir() {
-            walk(&p, out);
-        } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-            if ext.eq_ignore_ascii_case("yft") || ext.eq_ignore_ascii_case("ytd") {
-                out.push(p);
-            }
-        }
-    }
-}
-
-/// `adder_hi.yft` and `adder+hi.ytd` belong to `adder`.
-fn model_of(path: &Path) -> String {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("?")
-        .to_lowercase();
-    stem.trim_end_matches("_hi")
-        .trim_end_matches("+hi")
-        .to_string()
-}
-
-/// The folder that owns the file, up to its `stream` directory.
-fn resource_of(root: &Path, path: &Path) -> String {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    let mut parts: Vec<String> = Vec::new();
-    for c in rel.components() {
-        let s = c.as_os_str().to_string_lossy().to_string();
-        if s.eq_ignore_ascii_case("stream") {
-            break;
-        }
-        parts.push(s);
-    }
-    if parts.last().is_some_and(|l| l.contains('.')) {
-        parts.pop();
-    }
-    parts.join("/")
-}
-
 fn main() {
     let mut args = std::env::args().skip(1);
     let root = PathBuf::from(
@@ -237,7 +154,7 @@ fn main() {
     }
 
     let mut files = Vec::new();
-    walk(&root, &mut files);
+    walk(&root, &["yft", "ytd"], &mut files);
     eprintln!("{} files under {}", files.len(), root.display());
 
     let scanned: Vec<Scanned> = files
@@ -312,7 +229,7 @@ fn main() {
                         }
                         v.problems.push(Problem {
                             file: s.path.file_name().unwrap().to_string_lossy().to_string(),
-                            cause: *cause,
+                            cause: cause.label(),
                             message: message.clone(),
                         });
                     }
@@ -337,7 +254,7 @@ fn main() {
                         }
                         v.problems.push(Problem {
                             file: s.path.file_name().unwrap().to_string_lossy().to_string(),
-                            cause: *cause,
+                            cause: cause.label(),
                             message: message.clone(),
                         });
                     }
@@ -348,50 +265,29 @@ fn main() {
 
     let mut list: Vec<Vehicle> = vehicles.into_values().collect();
     for v in &mut list {
-        let damaged = v.problems.iter().any(|p| p.cause == Cause::Corrupt);
-        let unsupported = v
-            .problems
-            .iter()
-            .any(|p| p.cause == Cause::UnsupportedFormat);
-        v.ytd_class = match v.ytd_bytes {
-            0 => "none",
-            n if n <= 4 * MB => "<=4MB",
-            n if n <= 8 * MB => "4-8MB",
-            n if n <= HEAVY_YTD_BYTES => "8-16MB",
-            _ => ">16MB",
-        };
-        if v.ytd_files > 0 && v.textures == 0 && v.problems.is_empty() {
-            v.flags.push("no-textures".into());
-        }
-        if v.textures > 0 && v.max_texture_dim <= LOWRES_MAX_DIM {
-            v.flags.push("low-res".into());
-        }
-        if v.triangles.high > HEAVY_TRIS {
-            v.flags.push("heavy-tris".into());
-        }
+        v.ytd_class = ytd_class(v.ytd_bytes);
+        v.flags = flags(&FlagInput {
+            yft_files: v.yft_files,
+            ytd_files: v.ytd_files,
+            ytd_bytes: v.ytd_bytes,
+            textures: v.textures,
+            max_texture_dim: v.max_texture_dim,
+            tris: [
+                v.triangles.high,
+                v.triangles.medium,
+                v.triangles.low,
+                v.triangles.very_low,
+            ],
+            corrupt: v.problems.iter().any(|p| p.cause == Cause::Corrupt.label()),
+            unsupported: v
+                .problems
+                .iter()
+                .any(|p| p.cause == Cause::UnsupportedFormat.label()),
+            no_problems: v.problems.is_empty(),
+            problems_only_ytd: v.problems.iter().all(|p| p.file.ends_with(".ytd")),
+        });
         if v.ytd_bytes > HEAVY_YTD_BYTES {
-            v.flags.push("ytd-over-16mb".into());
             totals.ytd_over_16mb_bytes += v.ytd_bytes;
-        }
-        if v.triangles.high > 20_000 && v.triangles.medium == 0 && v.triangles.low == 0 {
-            v.flags.push("no-lods".into());
-        }
-        if v.triangles.high > 5_000
-            && (v.triangles.medium == 0 || v.triangles.low == 0 || v.triangles.very_low == 0)
-        {
-            v.flags.push("missing-lods".into());
-        }
-        if v.yft_files > 0
-            && v.problems.iter().all(|p| p.file.ends_with(".ytd"))
-            && v.triangles.high == 0
-        {
-            v.flags.push("empty-mesh".into());
-        }
-        if damaged {
-            v.flags.push("damaged".into());
-        }
-        if unsupported {
-            v.flags.push("unsupported-format".into());
         }
         if !v.flags.is_empty() {
             totals.flagged += 1;

@@ -29,3 +29,9 @@ aes = "0.9"
 [dev-dependencies]
 meshopt = "0.7.0"
 sha2.workspace = true
+
+# Examples have `test = false` by default; this one carries unit tests of the
+# index rules and an end-to-end test over a synthetic resource folder.
+[[example]]
+name = "asset_index"
+test = true
